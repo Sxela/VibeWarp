@@ -1,0 +1,15 @@
+# Shell scripts must stay LF so bash can execute them after a Windows checkout.
+*.sh text eol=lf
+# Windows batch files stay CRLF.
+*.bat text eol=crlf
+
+# The built frontend is generated, committed, and shipped in the wheel. CI rebuilds it and
+# fails if it differs from what was committed, so it must not be line-ending-normalised —
+# otherwise a Windows checkout would show a diff against a Linux build for no real reason.
+vibewarp/web_static/** -text linguist-generated=true
+
+# Vite copies webui/index.html into that bundle VERBATIM, so this file's line endings end
+# up inside the committed build. Left to the platform default it is CRLF on Windows and LF
+# on Linux, so the same commit would rebuild differently on a dev box and on CI — and the
+# staleness check above would fail every PR for no real reason. Pin it.
+webui/index.html text eol=lf

@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibewarp"
+version = "0.1.0"
+description = "Video-to-video style transfer pipeline (consolidated from WarpFusion v0.37)"
+readme = "README.md"
+license = {text = "GPL-3.0-only"}
+requires-python = ">=3.11"
+# Dependencies are pinned to the exact versions the pipeline is validated
+# against — unpinned deps let fresh installs pull newer releases with changed
+# APIs (e.g. transformers 5.13 removed CLIP internals the CLIP embedder uses).
+# torch/torchvision pin the base version only (no +cuXXX local tag) so a CUDA
+# wheel installed from the PyTorch index still satisfies it and CPU/other-CUDA
+# users aren't blocked.
+dependencies = [
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "numpy==2.4.6",
+    "Pillow==12.3.0",
+    "opencv-python==4.13.0.92",
+    "scipy==1.17.1",
+    "scikit-image==0.26.0",
+    "einops==0.8.2",
+    "omegaconf==2.3.0",
+    "safetensors==0.7.0",
+    "transformers==5.5.4",
+    # 2.24.0 is what the reference WarpFusion notebook env runs, and what the
+    # vendored ldm/sgm OpenCLIP text encoders are written against: they permute
+    # NLD->LND, but open_clip >= ~2.25 made its residual blocks batch-first, so
+    # newer versions blow up with "2D attn_mask is torch.Size([77, 77])" on SDXL
+    # (bigG) and SD2.1. Matching the notebook also removes a parity variable.
+    "open-clip-torch==2.24.0",
+    # Required by k-diffusion's SDE samplers (sample_dpmpp_sde, ..._2m_sde).
+    # Version matches the reference notebook env.
+    "torchsde==0.2.6",
+    "tqdm==4.67.3",
+    "piexif==1.1.3",
+    "requests==2.34.2",
+    "controlnet-aux==0.0.10",
+]
+
+[project.scripts]
+vibewarp = "vibewarp.__main__:main"
+vibewarp-ui = "vibewarp.web:main"
+
+[project.urls]
+Homepage = "https://github.com/Sxela/VibeWarp"
+Repository = "https://github.com/Sxela/VibeWarp.git"
+Issues = "https://github.com/Sxela/VibeWarp/issues"
+
+[project.optional-dependencies]
+# Optional local web server and content-aware scheduling dependencies.
+ui = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
+sched = ["lpips"]  # content-aware scheduling with lpips/rmse+lpips diff
+dev = ["pytest==9.0.3", "pytest-cov==7.1.0"]
+
+[tool.setuptools.packages.find]
+include = ["vibewarp*"]
+exclude = ["tests*"]
+
+[tool.setuptools.package-data]
+"vibewarp.vendor" = ["*.data"]
+"vibewarp" = ["web_static/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore"]
+markers = [
+    "gpu: marks tests that require a CUDA GPU",
+]

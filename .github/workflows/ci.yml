@@ -1,0 +1,113 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install CPU PyTorch
+        run: >-
+          python -m pip install
+          torch==2.11.0 torchvision==0.26.0
+          --index-url https://download.pytorch.org/whl/cpu
+      - name: Install VibeWarp and test dependencies
+        run: python -m pip install -e ".[ui,sched,dev]"
+      - name: Run CPU-compatible test suite
+        # The `runner` context is not available in a job-level `env:` block — only at step
+        # level — so this must live here. It keeps system_settings from writing its
+        # system.json into the checked-out tree.
+        env:
+          VIBEWARP_HOME: ${{ runner.temp }}/vibewarp-home
+        run: python -m pytest -m "not gpu" --strict-markers
+
+  npm-tests:
+    name: npm tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm ci
+      - name: Run frontend tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build
+      # Advisory only. `frontend-bundle` below rebuilds and commits it on main, so a
+      # contributor never has to run Node — but knowing the bundle is stale is useful when
+      # reviewing a UI change.
+      - name: Is the committed bundle stale?
+        working-directory: .
+        run: |
+          if git diff --quiet -- vibewarp/web_static; then
+            echo "Committed bundle matches this build."
+          else
+            echo "::notice::vibewarp/web_static is stale; it will be rebuilt and committed when this lands on main."
+            git --no-pager diff --stat -- vibewarp/web_static
+          fi
+
+  frontend-bundle:
+    name: Rebuild and commit the frontend bundle
+    # The built UI is COMMITTED (vibewarp/web_static) and shipped in the wheel — a
+    # `pip install` has no Node to build it with. Rather than making every contributor
+    # remember to rebuild (and silently shipping the old interface when they forget), CI
+    # rebuilds it on main and commits the result.
+    #
+    # main only: a fork's PR cannot be pushed to, and we do not want bot commits on branches.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [python-tests, npm-tests]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm ci
+        working-directory: webui
+      - run: npm run build
+        working-directory: webui
+      - name: Commit the bundle if it changed
+        run: |
+          if git diff --quiet -- vibewarp/web_static; then
+            echo "Bundle already up to date; nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add vibewarp/web_static
+          # [skip ci] matters: without it this push retriggers the workflow, which rebuilds
+          # an identical bundle, finds no diff, and stops — but it still burns a run every
+          # time, and a non-deterministic build would loop forever.
+          git commit -m "Rebuild frontend bundle [skip ci]"
+          git push

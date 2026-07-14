@@ -1,0 +1,58 @@
+{
+  "name": "gpu-parity",
+  "reference_notebook": {
+    "source": "path/to/stable_warpfusion.ipynb",
+    "workdir": "path/to/reference-notebook-workdir",
+    "python": "path/to/reference-environment/python"
+  },
+  "defaults": {
+    "python": "python",
+    "models_root": "models",
+    "timeout_seconds": 21600,
+    "thresholds": {
+      "mae": 0.03,
+      "min_psnr": 25.0
+    },
+    "overrides": {
+      "frame_range": [0, 4],
+      "video": {
+        "video_init_path": "path/to/input.mp4",
+        "width": 384,
+        "height": 640,
+        "save_img_format": "png"
+      },
+      "video_assembly": {
+        "keep_audio": false,
+        "use_deflicker": false,
+        "upscale_ratio": 1
+      }
+    }
+  },
+  "tests": [
+    {
+      "id": "parity-basic-no-cn",
+      "settings": "path/to/warpfusion-settings.txt",
+      "env": {"VIBEWARP_DEBUG_DIFFUSION": "1"},
+      "overrides": {"controlnet": {"enabled": false}}
+    },
+    {
+      "id": "parity-basic-controlnet",
+      "enabled": false,
+      "settings": "path/to/warpfusion-settings.txt",
+      "requires": [
+        "models/ControlNet/control_v11f1p_sd15_depth.pth",
+        "models/ControlNet/control_v11p_sd15_softedge.pth"
+      ],
+      "only_controlnets": [
+        "control_sd15_depth",
+        "control_sd15_softedge"
+      ]
+    },
+    {
+      "id": "vibewarp-only-smoke",
+      "notebook": false,
+      "settings": "path/to/warpfusion-settings.txt",
+      "overrides": {"controlnet": {"enabled": false}}
+    }
+  ]
+}
