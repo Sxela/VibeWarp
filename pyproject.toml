@@ -20,7 +20,7 @@ dependencies = [
     "torchvision==0.26.0",
     "numpy==2.4.6",
     "Pillow==12.3.0",
-    "opencv-python==4.13.0.92",
+    "opencv-python==5.0.0.93",
     "scipy==1.17.1",
     "scikit-image==0.26.0",
     "einops==0.8.2",
