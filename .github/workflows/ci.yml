@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PYTHONUTF8: "1"
+      VIBEWARP_HOME: ${{ runner.temp }}/vibewarp-home
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Install CPU PyTorch
+        run: >-
+          python -m pip install
+          torch==2.11.0 torchvision==0.26.0
+          --index-url https://download.pytorch.org/whl/cpu
+      - name: Install VibeWarp and test dependencies
+        run: python -m pip install -e ".[ui,sched,dev]"
+      - name: Run CPU-compatible test suite
+        run: python -m pytest -m "not gpu" --strict-markers
+
+  npm-tests:
+    name: npm tests and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: webui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - run: npm ci
+      - name: Run frontend tests
+        run: npm test
+      - name: Build frontend
+        run: npm run build

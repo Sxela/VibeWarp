@@ -1,0 +1,138 @@
+{
+  "name": "gpu-validation",
+  "defaults": {
+    "python": "python",
+    "base_config": "path/to/vibewarp-settings.txt",
+    "base_config_kind": "vibewarp",
+    "models_root": "models",
+    "timeout_seconds": 21600,
+    "overrides": {
+      "sd_checkpoint_path": "models/checkpoints/sd15-model.safetensors",
+      "frame_range": [0, 4],
+      "video": {
+        "video_init_path": "path/to/input.mp4",
+        "width": 384,
+        "height": 640
+      },
+      "diffusion": {
+        "seed": 4275770367,
+        "fixed_seed": true,
+        "sampler": "sample_euler",
+        "steps": 20,
+        "steps_schedule": {"0": 20},
+        "cfg_scale": 5.0,
+        "cfg_scale_schedule": 5.0
+      },
+      "video_assembly": {
+        "keep_audio": false,
+        "use_deflicker": false,
+        "upscale_ratio": 1
+      }
+    }
+  },
+  "jobs": [
+    {
+      "id": "empty-cn-stock",
+      "env": {"VIBEWARP_VALIDATE_STOCK_FORWARD": "1"},
+      "overrides": {
+        "controlnet": {"enabled": false},
+        "freeu": {"do_freeunet": false}
+      }
+    },
+    {
+      "id": "empty-cn-patched",
+      "overrides": {
+        "controlnet": {"enabled": false},
+        "freeu": {"do_freeunet": false}
+      }
+    },
+    {
+      "id": "controlnet-annotators",
+      "enabled": false,
+      "requires": [
+        "models/ControlNet/control_v11f1p_sd15_depth.pth",
+        "models/ControlNet/control_v11p_sd15_softedge.pth"
+      ]
+    },
+    {
+      "id": "sample-lcm",
+      "overrides": {
+        "diffusion": {
+          "sampler": "sample_lcm",
+          "steps": 8,
+          "steps_schedule": {"0": 8}
+        }
+      }
+    },
+    {
+      "id": "softcap",
+      "overrides": {
+        "diffusion": {
+          "do_softcap": true,
+          "softcap_thresh": 0.9,
+          "softcap_q": 1.0
+        }
+      }
+    },
+    {
+      "id": "background-mask",
+      "enabled": false,
+      "requires": ["path/to/background-mask-folder"],
+      "overrides": {
+        "mask": {
+          "use_background_mask": true,
+          "apply_mask_after_warp": true
+        }
+      }
+    },
+    {
+      "id": "captioning",
+      "overrides": {
+        "text_prompts": {"0": "a cinematic painting of {caption}"},
+        "captions": {
+          "make_captions": true,
+          "keyframe_source": "Every nth frame",
+          "nth_frame": 2
+        }
+      }
+    },
+    {
+      "id": "ip-adapter",
+      "enabled": false,
+      "requires": ["models/IPAdapter/ip-adapter_sd15.safetensors"],
+      "overrides": {"ipadapter": {"enabled": true}}
+    },
+    {
+      "id": "animatediff",
+      "enabled": false,
+      "requires": ["models/AnimateDiff/mm_sd_v15_v2.ckpt"],
+      "overrides": {"animatediff": {"enabled": true}}
+    },
+    {
+      "id": "sdxl",
+      "enabled": false,
+      "requires": ["models/checkpoints/sdxl-model.safetensors"],
+      "overrides": {
+        "model_version": "sdxl_base",
+        "sd_checkpoint_path": "models/checkpoints/sdxl-model.safetensors",
+        "diffusion": {
+          "sampler": "sample_dpmpp_sde",
+          "steps": 8,
+          "steps_schedule": {"0": 8},
+          "cfg_scale": 2.0,
+          "cfg_scale_schedule": 2.0
+        },
+        "controlnet": {"models": {}}
+      }
+    }
+  ],
+  "comparisons": [
+    {
+      "id": "empty-cn-forward-equivalence",
+      "left": "empty-cn-stock",
+      "right": "empty-cn-patched",
+      "pattern": "artifacts/empty-cn-*/**/empty-cn-*(0)_*.png",
+      "thresholds": {"exact": true, "max_abs": 0.0}
+    }
+  ]
+}

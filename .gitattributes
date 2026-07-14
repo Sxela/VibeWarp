@@ -1,0 +1,4 @@
+# Shell scripts must stay LF so bash can execute them after a Windows checkout.
+*.sh text eol=lf
+# Windows batch files stay CRLF.
+*.bat text eol=crlf

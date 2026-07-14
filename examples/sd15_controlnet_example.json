@@ -1,0 +1,101 @@
+{
+  "sd_checkpoint_path": "c:/code/warp/models/base_models/revAnimated_v122.safetensors",
+  "model_version": "control_multi_v15",
+  "batch_name": "warpfusion",
+  "text_prompts": {
+    "0": "gta 5 loading screen featuring a beautiful person, comics style, by stephen bliss"
+  },
+  "negative_prompts": {
+    "0": "bad quality, low quality"
+  },
+  "frame_range": [0, 0],
+  "diffusion": {
+    "steps": 20,
+    "cfg_scale": 3.0,
+    "sampler": "sample_euler",
+    "seed": 4275770367,
+    "fixed_seed": false,
+    "use_karras_noise": false,
+    "clip_skip": 2,
+    "sd_batch_size": 2,
+    "style_strength": 1.0,
+    "cfg_scale_schedule": [[3, 7, 3]]
+  },
+  "video": {
+    "video_init_path": "",
+    "extract_nth_frame": 1,
+    "width": 1024,
+    "height": 1920
+  },
+  "flow": {
+    "flow_warp": true,
+    "check_consistency": true,
+    "flow_lq": true,
+    "num_flow_updates": 20,
+    "flow_threads": 4,
+    "missed_consistency_dilation": 2,
+    "lazy_warp": true
+  },
+  "warp": {
+    "warp_mode": "use_image",
+    "warp_strength": 1.0,
+    "warp_num_k": 128,
+    "warp_forward": false,
+    "padding_ratio": 0.2,
+    "padding_mode": "reflect",
+    "flow_blend_schedule": [1]
+  },
+  "color": {
+    "match_color_strength": 0.0,
+    "colormatch_method": "PDF",
+    "colormatch_after": true
+  },
+  "controlnet": {
+    "enabled": true,
+    "models": {
+      "control_sd15_inpaint": {
+        "path": "c:/code/warp/models/controlnet/control_v11p_sd15_inpaint.pth",
+        "weight": 0.2,
+        "start": 0.0,
+        "end": 0.9,
+        "source": "stylized"
+      },
+      "control_sd15_depth": {
+        "path": "c:/code/warp/models/controlnet/control_v11f1p_sd15_depth.pth",
+        "weight": 1.0,
+        "start": 0.0,
+        "end": 1.0
+      },
+      "control_sd15_softedge": {
+        "path": "c:/code/warp/models/controlnet/control_v11p_sd15_softedge.pth",
+        "weight": 1.0,
+        "start": 0.0,
+        "end": 0.7
+      },
+      "control_sd15_ip2p": {
+        "path": "c:/code/warp/models/controlnet/control_v11e_sd15_ip2p.pth",
+        "weight": 0.5,
+        "start": 0.0,
+        "end": 0.71
+      },
+      "control_sd15_tile": {
+        "path": "c:/code/warp/models/controlnet/control_v11f1e_sd15_tile.pth",
+        "weight": 0.5,
+        "start": 0.0,
+        "end": 0.82
+      }
+    },
+    "mode": "internal"
+  },
+  "reconstruction_noise": {
+    "enabled": true,
+    "randomness": 0.0,
+    "cfg_scale": 1.0,
+    "steps_pct": 1.0,
+    "source": "init",
+    "noise_scale": 1.0,
+    "separate_uncond": true,
+    "disable_controlnets": true,
+    "batched": true
+  }
+}

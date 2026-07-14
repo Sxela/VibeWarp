@@ -1,0 +1,142 @@
+# VibeWarp
+
+[![CI](https://github.com/Sxela/VibeWarp/actions/workflows/ci.yml/badge.svg)](https://github.com/Sxela/VibeWarp/actions/workflows/ci.yml)
+
+Video-to-video style transfer pipeline, consolidated from [WarpFusion](https://github.com/Sxela/WarpFusion) v0.37 into a standalone Python package.
+
+Takes an input video and a text prompt, then renders each frame through Stable Diffusion while using optical flow warping and ControlNets to maintain temporal coherence with the source video.
+
+## Documentation
+
+- [CLI reference](docs/cli.md) — all flags, usage examples, model downloads, Python API, output layout
+- [Settings reference](docs/settings.md) — WarpFusion settings mapping, schedules, consistency masks, video assembly, tiled VAE, noise modes, prompts/LORAs, vendored libraries
+- [Architecture](docs/architecture.md) — render pipeline, settings flow, and dependency diagrams
+- [GPU validation](docs/gpu-validation.md) — resumable notebook-parity suite and bulk reports
+- [Roadmap and known gaps](docs/roadmap.md) — what is verified against the notebook, what is not, and where to help
+
+## Requirements
+
+- NVIDIA GPU with CUDA support (8 GB+ VRAM recommended)
+- The one-click installer handles Python and ffmpeg for you (see below).
+  For a manual install you also need Python 3.11+ and ffmpeg on PATH.
+
+## Quickstart
+
+### 1. Install
+
+**One-click (recommended).** Downloads a private Python 3.14, ffmpeg, and all
+dependencies into this folder — nothing touches your system Python:
+
+- **Windows**: double-click `install.bat` (or run it from a terminal).
+- **Linux/macOS**: `./install.sh`
+
+Re-running is safe: completed steps are skipped. If your CUDA driver isn't
+12.8, edit the `torch_index` (`.bat`) / `TORCH_INDEX` (`.sh`) line at the top
+first — see https://pytorch.org/get-started/locally/.
+
+<details>
+<summary>Manual install (if you already manage your own Python/ffmpeg)</summary>
+
+```bash
+# virtual environment
+python -m venv env
+source env/bin/activate   # Linux/macOS
+env\Scripts\activate      # Windows
+
+# PyTorch matching your CUDA driver (example: CUDA 12.8)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# VibeWarp + remaining dependencies
+pip install -e .
+```
+
+Install ffmpeg from https://ffmpeg.org/download.html (Windows),
+`sudo apt install ffmpeg` (Linux), or `brew install ffmpeg` (macOS).
+</details>
+
+Everything else is vendored in `vibewarp/vendor/` — no external git clones
+needed.
+
+After the one-click install, use the `run` launcher for everything below — it
+activates the private environment and forwards all arguments to VibeWarp:
+`run.bat <args>` (Windows) or `./run.sh <args>` (Linux/macOS). With a manual
+install, use `python -m vibewarp <args>` inside your activated venv instead.
+
+### 2. Get models
+
+Downloads the checkpoint and all ControlNets referenced in your settings file:
+
+```bash
+run.bat --download-models --warpfusion-settings path/to/settings.txt
+```
+
+Models land in a `models/` folder under the current directory by default;
+override with `--models-root`. See [docs/cli.md](docs/cli.md) for manual
+download links.
+
+### 3. Render with your WarpFusion settings
+
+Use a settings file exported from the WarpFusion notebook as-is — the models
+root is auto-inferred from the checkpoint path in the file:
+
+```bash
+run.bat --warpfusion-settings path/to/settings.txt --video input.mp4
+```
+
+Optionally override resolution or frame range on top of the settings:
+
+```bash
+run.bat --warpfusion-settings settings.txt --video input.mp4 --max-size 768 --end-frame 30
+```
+
+Rendered frames and the assembled video appear under
+`images_out/<batch-name>/<run>/` ([details](docs/cli.md#output-layout)).
+
+### Optional web UI
+
+A Svelte web UI is available via `run-ui.bat` (Windows) / `./run-ui.sh`
+(Linux/macOS). It installs the lightweight FastAPI server from the `[ui]`
+extra on first launch and opens http://localhost:7860. The form is generated
+from `RunConfig`, with full config import/export, validation, queued rendering,
+live progress and logs, cancellation, and artifact previews.
+
+Prefill the UI from structured JSON, a VibeWarp settings snapshot, or a
+WarpFusion notebook settings file:
+
+```bash
+vibewarp-ui --settings path/to/settings.txt
+```
+
+The same files can be selected with **Import settings** after the UI opens.
+
+The **Preview & Debug** tab replays a finished (or in-progress) run frame by
+frame, showing the init video frame, the warped init, each ControlNet's source
+image and detected map, the diffusion input, and the rendered output side by
+side on a frame slider — so you can see exactly what a ControlNet was fed and
+what it produced.
+
+The ControlNet panel lists every net the engine supports for your base model
+(SD1.5 / SDXL), scans the model directory and tells you which checkpoints are
+actually present *before* you start a render. See
+[docs/settings.md](docs/settings.md#controlnet-modes-and-layer-weights) for how
+the ControlNet `mode` relates to layer weights.
+
+Editing the frontend requires a rebuild — the Svelte app is compiled into
+`vibewarp/web_static/`, which is what the server actually serves:
+
+```bash
+cd webui && npm install && npm run build
+```
+
+## License
+
+GPL-3.0 — see [LICENSE](LICENSE). Vendored third-party components and the
+rationale for the AGPL-3.0 → GPL-3.0 relicensing (2026-07-10) are documented
+in [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+
+Based on [WarpFusion](https://github.com/Sxela/WarpFusion) by Alex Spirin (MIT).
+
+## Contributing and security
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and test commands.
+Please report vulnerabilities using the private process in [SECURITY.md](SECURITY.md).
