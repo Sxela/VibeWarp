@@ -32,7 +32,7 @@ dependencies = [
     # NLD->LND, but open_clip >= ~2.25 made its residual blocks batch-first, so
     # newer versions blow up with "2D attn_mask is torch.Size([77, 77])" on SDXL
     # (bigG) and SD2.1. Matching the notebook also removes a parity variable.
-    "open-clip-torch==2.24.0",
+    "open-clip-torch==3.3.0",
     # Required by k-diffusion's SDE samplers (sample_dpmpp_sde, ..._2m_sde).
     # Version matches the reference notebook env.
     "torchsde==0.2.6",
