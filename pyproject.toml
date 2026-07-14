@@ -25,7 +25,7 @@ dependencies = [
     "scikit-image==0.26.0",
     "einops==0.8.2",
     "omegaconf==2.3.0",
-    "safetensors==0.7.0",
+    "safetensors==0.8.0",
     "transformers==5.5.4",
     # 2.24.0 is what the reference WarpFusion notebook env runs, and what the
     # vendored ldm/sgm OpenCLIP text encoders are written against: they permute
