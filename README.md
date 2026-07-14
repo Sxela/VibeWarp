@@ -6,6 +6,24 @@ Video-to-video style transfer pipeline, consolidated from [WarpFusion](https://g
 
 Takes an input video and a text prompt, then renders each frame through Stable Diffusion while using optical flow warping and ControlNets to maintain temporal coherence with the source video.
 
+## The interface
+
+A local web UI (Svelte + FastAPI), started with `run-ui.bat` / `run-ui.sh`. There is a full
+CLI too — see the [CLI reference](docs/cli.md).
+
+**Render** — settings grouped by how you actually use them: what you set once per project,
+what you change every run, and what you touch once or never. The input video is probed on
+the spot, so the resolution and frame count shown are what the render will genuinely
+produce, not an estimate.
+
+![The render view: project settings, the probed input video, and the live render monitor](docs/assets/ui-render.jpg)
+
+**History & Comparison** — every past run, inspectable frame by frame and layer by layer:
+the init frame, the warped init, each ControlNet's source and detected map, the diffusion
+input, and the output. Load any run's settings back into the form to iterate on it.
+
+![The history view: past runs on the left, and one frame compared across its layers](docs/assets/ui-history.jpg)
+
 ## Documentation
 
 - [CLI reference](docs/cli.md) — all flags, usage examples, model downloads, Python API, output layout
