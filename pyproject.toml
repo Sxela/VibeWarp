@@ -16,7 +16,7 @@ requires-python = ">=3.11"
 # wheel installed from the PyTorch index still satisfies it and CPU/other-CUDA
 # users aren't blocked.
 dependencies = [
-    "torch==2.11.0",
+    "torch==2.13.0",
     "torchvision==0.26.0",
     "numpy==2.4.6",
     "Pillow==12.3.0",
