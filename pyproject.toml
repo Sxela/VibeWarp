@@ -55,7 +55,7 @@ Issues = "https://github.com/Sxela/VibeWarp/issues"
 # Optional local web server and content-aware scheduling dependencies.
 ui = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
 sched = ["lpips"]  # content-aware scheduling with lpips/rmse+lpips diff
-dev = ["pytest==9.0.3", "pytest-cov==7.1.0"]
+dev = ["pytest==9.1.1", "pytest-cov==7.1.0"]
 
 [tool.setuptools.packages.find]
 include = ["vibewarp*"]
