@@ -81,6 +81,16 @@ class TestFlowToImage:
         img = flow_to_image(flow)
         assert img.shape == (16, 16, 3)
 
+    def test_matches_notebook_magnitude_dependent_colors(self):
+        # Fixed values copied through the notebook's flow_to_image algorithm.
+        # The low-magnitude vector must remain pale; the old implementation
+        # incorrectly colored all magnitudes at full saturation.
+        flow = np.array([[[0.0, 0.0], [0.25, 0.0]],
+                         [[0.0, 0.5], [1.0, 0.0]]], dtype=np.float32)
+        expected = np.array([[[255, 255, 255], [255, 191, 191]],
+                             [[255, 242, 127], [255, 0, 0]]], dtype=np.uint8)
+        np.testing.assert_array_equal(flow_to_image(flow), expected)
+
 
 class TestInputPadder:
     def test_pad_unpad_roundtrip(self):

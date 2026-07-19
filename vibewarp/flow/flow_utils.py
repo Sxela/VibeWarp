@@ -109,8 +109,33 @@ def make_colorwheel():
     return colorwheel
 
 
-def flow_to_image(flow_uv, clip_flow=None):
-    """Convert optical flow to an RGB visualization image.
+def flow_uv_to_colors(u, v, convert_to_bgr=False):
+    """Apply the notebook's Middlebury color wheel to normalized flow."""
+    flow_image = np.zeros((u.shape[0], u.shape[1], 3), np.uint8)
+    colorwheel = make_colorwheel()
+    ncols = colorwheel.shape[0]
+    rad = np.sqrt(np.square(u) + np.square(v))
+    angle = np.arctan2(-v, -u) / np.pi
+    fk = (angle + 1) / 2 * (ncols - 1)
+    k0 = np.clip(np.floor(fk).astype(np.int32), 0, ncols - 1)
+    k1 = np.clip(k0 + 1, 0, ncols - 1)
+    k1[k1 == ncols] = 0
+    f = fk - k0
+
+    for i in range(colorwheel.shape[1]):
+        col0 = colorwheel[k0, i] / 255.0
+        col1 = colorwheel[k1, i] / 255.0
+        col = (1 - f) * col0 + f * col1
+        inside = rad <= 1
+        col[inside] = 1 - rad[inside] * (1 - col[inside])
+        col[~inside] *= 0.75
+        channel = 2 - i if convert_to_bgr else i
+        flow_image[..., channel] = np.floor(255 * col)
+    return flow_image
+
+
+def flow_to_image(flow_uv, clip_flow=None, convert_to_bgr=False):
+    """Convert optical flow using WarpFusion's exact visualization math.
 
     Args:
         flow_uv: numpy array (H, W, 2)
@@ -119,37 +144,17 @@ def flow_to_image(flow_uv, clip_flow=None):
     Returns:
         numpy array (H, W, 3) with uint8 RGB values.
     """
-    assert flow_uv.ndim == 3 and flow_uv.shape[2] == 2
+    assert flow_uv.ndim == 3, 'input flow must have three dimensions'
+    assert flow_uv.shape[2] == 2, 'input flow must have shape [H,W,2]'
     if clip_flow is not None:
-        flow_uv = np.clip(flow_uv, -clip_flow, clip_flow)
+        flow_uv = np.clip(flow_uv, 0, clip_flow)
 
     u = flow_uv[:, :, 0]
     v = flow_uv[:, :, 1]
-    rad = np.sqrt(u**2 + v**2)
-    maxrad = max(np.max(rad), 1e-5)
-    u = u / maxrad
-    v = v / maxrad
-
-    colorwheel = make_colorwheel()
-    ncols = colorwheel.shape[0]
-    angle = np.arctan2(-v, -u) / np.pi
-    fk = (angle + 1) / 2 * (ncols - 1)
-    k0 = np.floor(fk).astype(np.int32)
-    k1 = k0 + 1
-    k1[k1 == ncols] = 0
-    f = fk - k0
-
-    h, w = flow_uv.shape[:2]
-    img = np.zeros((h, w, 3), dtype=np.uint8)
-    for i in range(3):
-        col0 = colorwheel[k0, i] / 255.0
-        col1 = colorwheel[k1, i] / 255.0
-        col = (1 - f) * col0 + f * col1
-        # Increase saturation with magnitude
-        col = 1 - rad[..., np.newaxis].squeeze() / maxrad * (1 - col) if False else col
-        img[:, :, i] = (col * 255).astype(np.uint8)
-
-    return img
+    rad_max = np.max(np.sqrt(np.square(u) + np.square(v)))
+    epsilon = 1e-5
+    return flow_uv_to_colors(
+        u / (rad_max + epsilon), v / (rad_max + epsilon), convert_to_bgr)
 
 
 def load_raft_model(half_precision: bool = False, device: str = 'cuda'):
@@ -338,14 +343,17 @@ def get_flow_and_cc(
     else:
         flow_bwd_clamped = flow_bwd
 
-    # Save backward flow at computation resolution (notebook does the same)
+    # The notebook returns the clamped flow for the current render but caches
+    # the original flow21. Preserve that slightly surprising resume behavior.
     os.makedirs(os.path.dirname(flow_path) or '.', exist_ok=True)
-    np.save(flow_path, flow_bwd_clamped)
+    np.save(flow_path, flow_bwd)
 
     # Compute consistency map if cc_path requested
     if cc_path:
         # Forward flow (1→2) needed for CC map
-        flow_fwd = compute_flow(f1, f2, model, half=half, num_flow_updates=num_flow_updates)
+        # WarpFusion omits num_flow_updates on the forward pass, so torchvision
+        # uses its default of 12 even when the backward pass is configured to 20.
+        flow_fwd = compute_flow(f1, f2, model, half=half, num_flow_updates=12)
         if flow_size is not None:
             flow_fwd = flow_fwd[:flow_size[1], :flow_size[0], ...]
         from vibewarp.flow.consistency import make_cc_map

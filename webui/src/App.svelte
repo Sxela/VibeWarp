@@ -4,6 +4,7 @@
   import ControlNetEditor from './ControlNetEditor.svelte';
   import VideoEditor from './VideoEditor.svelte';
   import Preview from './Preview.svelte';
+  import Supporters from './Supporters.svelte';
   const storageKey='vibewarp.config.v1';
   let config=$state(null), schema=$state(null), selected=$state('project'), job=$state(null), errors=$state([]), busy=$state(false), initialized=$state(false), logCollapsed=$state(false), logElement=$state(null), source;
   // Tabs come from the BACKEND (vibewarp/ui_layout.py stamps tier/group onto every field
@@ -17,6 +18,10 @@
   // The monitor thumbnail is small and it is the only look you get at a frame mid-render,
   // so it opens full size on click -- same gesture as the History view.
   let zoomShot=$state(null);
+  // Latches once ANY frame has rendered this session, so the supporters block appears
+  // while you wait for your first frame and then never interrupts again.
+  let seenFirstFrame=$state(false);
+  $effect(()=>{ if(job?.preview_available) seenFirstFrame=true; });
   let tabs=$derived(schema ? schema.tiers : []);
 
   // Flatten the schema into {section, name, schema, tier, group}, in declaration order.
@@ -289,6 +294,7 @@
       {:else}<div class="empty">Rendered frames will appear here</div>{/if}
       {#if job.state==='running' || job.state==='queued'}<button class="cancel" onclick={cancel}>Cancel render</button>{/if}
     {:else}<div class="empty tall"><strong>No active job</strong><span>Configure the render and start when ready.</span></div>{/if}
+    {#if !seenFirstFrame}<Supporters/>{/if}
   </aside>
 </main>
 {/if}
@@ -339,6 +345,9 @@
   /* The nav stays put while the settings scroll. `aside` was already sticky; `nav` was not,
      so it scrolled off the top and you had to scroll back up to change tab. */
   :global(main.render-shell>nav){position:sticky;top:78px;align-self:start}
+  /* A flex column so the supporters block can absorb whatever height is left below the
+     monitor, instead of sitting in a fixed strip with dead space under it. */
+  :global(main.render-shell>aside){display:flex;flex-direction:column}
   :global(.section-head){display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
   .search-box{position:relative;margin-bottom:22px}
   .search{width:260px;border:1px solid #303640;background:#0c0f13;color:#eef0f2;border-radius:9px;padding:9px 30px 9px 12px;font:12px Consolas,monospace}

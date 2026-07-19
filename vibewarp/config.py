@@ -51,13 +51,13 @@ class FlowConfig:
     flow_warp: bool = True
     check_consistency: bool = True
     use_legacy_cc: bool = False
-    flow_lq: bool = False
+    flow_lq: bool = True
     flow_save_img_preview: bool = False
     num_flow_updates: int = 20  # notebook default is 20, torchvision RAFT default is 12
     num_flow_workers: int = 0
     flow_threads: int = 4
     flow_maxsize: int = 0  # 0 = full resolution (matches notebook default)
-    missed_consistency_dilation: int = 1
+    missed_consistency_dilation: int = 2
     edge_consistency_width: int = 11
     # Per-component CC mask weights (0 = ignore that layer, 1 = full effect)
     missed_consistency_weight: float = 1.0

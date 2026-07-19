@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vibewarp.flow.consistency import (
+    _normalize_sobel_kernel_size,
     edge_detector,
     extract_occlusion_mask,
     filter_unreliable,
@@ -30,6 +31,19 @@ class TestEdgeDetector:
         img = np.random.randint(0, 255, (64, 48, 3), dtype=np.uint8)
         edges = edge_detector(img)
         assert edges.shape == (64, 48)
+
+    @pytest.mark.parametrize(('requested', 'expected'), [
+        (20, 21), (32, 31), (99, 31), (0, 1), (-4, 1),
+    ])
+    def test_normalizes_invalid_sobel_kernel_sizes(self, requested, expected):
+        assert _normalize_sobel_kernel_size(requested) == expected
+
+    def test_even_width_from_imported_settings_does_not_crash(self):
+        img = np.zeros((64, 64, 3), dtype=np.uint8)
+        img[:, 32:] = 255
+        edges = edge_detector(img, threshold=0.1, edge_width=20)
+        assert edges.shape == (64, 64)
+        assert edges.max() == 255
 
 
 class TestGetUnreliable:

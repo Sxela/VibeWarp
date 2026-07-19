@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from vibewarp.video.input import FrameDataset, fit_dimensions
+from vibewarp.video.input import FrameDataset, extract_frames, fit_dimensions
 from vibewarp.utils.compose import hstack, vstack
 
 
@@ -20,6 +20,48 @@ class TestFitDimensions:
 
     def test_does_not_upscale_smaller_video(self):
         assert fit_dimensions(320, 240, 512) == (320, 240)
+
+
+class TestExtractFrames:
+    @staticmethod
+    def _capture_ffmpeg(monkeypatch, video_input, extracted_name):
+        import types
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured['cmd'] = cmd
+            return types.SimpleNamespace(stderr=b'')
+
+        monkeypatch.setattr(video_input, '_find_ffmpeg', lambda: 'ffmpeg')
+        monkeypatch.setattr(video_input.subprocess, 'run', fake_run)
+        monkeypatch.setattr(video_input, 'glob', lambda pattern: [extracted_name])
+        return captured
+
+    def test_nonzero_range_preserves_absolute_frame_numbering(
+            self, monkeypatch, tmp_path):
+        import vibewarp.video.input as video_input
+
+        captured = self._capture_ffmpeg(
+            monkeypatch, video_input, '000061.jpg')
+        extract_frames(
+            'input.mp4', str(tmp_path), nth_frame=1,
+            start_frame=60, end_frame=70)
+
+        cmd = captured['cmd']
+        assert cmd[cmd.index('-start_number') + 1] == '61'
+        assert 'between(n\\,60\\,70)' in cmd[cmd.index('-vf') + 1]
+
+    def test_zero_range_keeps_normal_one_based_numbering(
+            self, monkeypatch, tmp_path):
+        import vibewarp.video.input as video_input
+
+        captured = self._capture_ffmpeg(
+            monkeypatch, video_input, '000001.jpg')
+        extract_frames('input.mp4', str(tmp_path), start_frame=0, end_frame=10)
+
+        cmd = captured['cmd']
+        assert cmd[cmd.index('-start_number') + 1] == '1'
 
 
 class TestFrameDataset:

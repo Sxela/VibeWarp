@@ -189,6 +189,9 @@ def extract_frames(video_path, output_dir, nth_frame=1, start_frame=0, end_frame
         '-vf', f'select=between(n\\,{start_frame}\\,{end_frame})*not(mod(n\\,{nth_frame}))',
         '-vsync', 'vfr',
         '-q:v', '2',
+        # Extracted video frames are one-based on disk while frame_range is
+        # zero-based. Preserve absolute numbering: frame 60 -> 000061.jpg.
+        '-start_number', str(start_frame + 1),
         os.path.join(output_dir, '%06d.jpg')
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

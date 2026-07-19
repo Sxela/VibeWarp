@@ -830,6 +830,18 @@ def warp_between_frames(
             if weights.shape[2] == 1:
                 weights = np.repeat(weights, 3, axis=2)
 
+    # Save the exact effective mask used by the blend. Frame N is produced by
+    # flow N-1 -> N, hence the +1 relative to this function's frame index.
+    if weights is not None and ctx.batch_folder:
+        debug_dir = os.path.join(ctx.batch_folder, 'debug')
+        os.makedirs(debug_dir, exist_ok=True)
+        effective = np.clip(weights, forward_clip, 1.0)
+        mask = effective[..., 0] if effective.ndim == 3 else effective
+        Image.fromarray(
+            np.clip(mask * 255.0, 0, 255).round().astype(np.uint8), mode='L',
+        ).save(os.path.join(
+            debug_dir, f"consistency_mask_{frame_num + 1:06d}.png"))
+
     warped = warp_frame(
         frame1=prev_frame,
         frame2=current_video_frame,

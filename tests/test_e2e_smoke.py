@@ -71,6 +71,37 @@ class TestEndToEndSmoke:
         assert os.path.exists(filepath)
         assert image.size == (64, 64)
 
+    def test_nonzero_start_uses_absolute_raw_video_frame(self, tmp_path):
+        """The first frame of range 60..70 initializes from 000061.jpg."""
+        vf_dir = str(tmp_path / 'video_frames')
+        batch_dir = str(tmp_path / 'batch')
+        os.makedirs(vf_dir)
+        os.makedirs(batch_dir)
+        raw_path = os.path.join(vf_dir, '000061.jpg')
+        Image.new('RGB', (64, 64), color='blue').save(raw_path)
+
+        config = RunConfig(
+            frame_range=[60, 70],
+            video=VideoConfig(width=64, height=64),
+            flow=FlowConfig(flow_warp=True),
+        )
+        ctx = RenderContext(
+            config=config,
+            batch_folder=batch_dir,
+            video_frames_folder=vf_dir,
+        )
+        state = FrameState(seed=42)
+
+        with patch('vibewarp.core.diffusion.render_frame') as mock_rf:
+            mock_rf.return_value = Image.new('RGB', (64, 64), color='red')
+            _render_single_frame(
+                ctx, state, frame_num=60, start_frame=60,
+                batch_folder=batch_dir, fmt='png',
+            )
+
+        assert state.init_image == raw_path
+        assert mock_rf.call_args.args[1].init_image == raw_path
+
     def test_run_frames_standard_mode(self, tmp_path):
         """Standard run_frames should render each frame sequentially."""
         vf_dir = self._create_video_frames(tmp_path, n_frames=3)

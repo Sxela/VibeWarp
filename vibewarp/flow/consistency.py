@@ -7,6 +7,23 @@ from scipy.ndimage import binary_fill_holes
 from skimage.morphology import disk, binary_erosion, binary_dilation
 
 
+_WARNED_EDGE_WIDTHS = set()
+
+
+def _normalize_sobel_kernel_size(edge_width):
+    """Return the closest safe OpenCV Sobel kernel, preferring the next odd size."""
+    requested = int(edge_width)
+    normalized = min(max(requested, 1), 31)
+    if normalized % 2 == 0:
+        normalized += 1
+    if normalized != requested and requested not in _WARNED_EDGE_WIDTHS:
+        print(
+            f"Consistency edge width {requested} is invalid for OpenCV Sobel; "
+            f"using {normalized} (must be odd and between 1 and 31).")
+        _WARNED_EDGE_WIDTHS.add(requested)
+    return normalized
+
+
 def extract_occlusion_mask(flow_tensor, threshold=10):
     """Extract occlusion mask from flow tensor.
 
@@ -29,11 +46,13 @@ def edge_detector(image, threshold=0.5, edge_width=1):
     Args:
         image: numpy BGR image (uint8)
         threshold: edge magnitude threshold (0-1)
-        edge_width: Sobel kernel size
+        edge_width: requested Sobel kernel size; normalized to an odd value in
+            OpenCV's supported 1..31 range
 
     Returns:
         Binary edge image (uint8, 0 or 255).
     """
+    edge_width = _normalize_sobel_kernel_size(edge_width)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=edge_width)
     sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=edge_width)

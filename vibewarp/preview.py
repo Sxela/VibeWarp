@@ -1,8 +1,8 @@
 """Render-output introspection for the web UI's preview/debug tab.
 
 Lets you scrub a finished (or in-progress) run frame by frame and put the init
-frame, the warped init, each ControlNet's source and detected map, the diffusion
-input, and the final render side by side.
+frame, warped init, processed consistency mask, each ControlNet source/detected
+map, diffusion input, and final render side by side.
 
 Frame numbers here are always the RENDER frame number (0-based), which is what
 the rest of the pipeline uses. That is not what every layer is called on disk:
@@ -25,6 +25,7 @@ IMAGE_EXTS = ('.png', '.jpg', '.jpeg')
 # Debug prefixes that aren't ControlNets.
 _DEBUG_LABELS = {
     'diffusion_input': ('Diffusion input', 'Diffusion'),
+    'consistency_mask': ('Consistency mask (white = keep warp)', 'Optical flow'),
 }
 
 

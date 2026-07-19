@@ -149,6 +149,47 @@ class TestGetFlowAndCC:
         assert cc.shape[2] == 3  # 3-channel consistency map
         assert os.path.exists(cc_path)
 
+    def test_notebook_uses_20_backward_and_12_forward_updates(
+            self, monkeypatch, two_frames, tmp_path):
+        import vibewarp.flow.flow_utils as flow_utils
+
+        calls = []
+
+        def fake_compute(frame1, frame2, model, half=False, num_flow_updates=20):
+            calls.append(num_flow_updates)
+            _, _, height, width = frame1.shape
+            return np.zeros((height, width, 2), dtype=np.float32)
+
+        monkeypatch.setattr(flow_utils, 'compute_flow', fake_compute)
+        p1, p2 = two_frames
+        get_flow_and_cc(
+            frame1_path=p1,
+            frame2_path=p2,
+            flow_path=str(tmp_path / 'flow.npy'),
+            cc_path=str(tmp_path / 'cc.png'),
+            model=object(),
+            num_flow_updates=20,
+        )
+        assert calls == [20, 12]
+
+    def test_caches_unclamped_flow_but_returns_clamped_flow(
+            self, monkeypatch, two_frames, tmp_path):
+        import vibewarp.flow.flow_utils as flow_utils
+
+        def tiny_flow(frame1, frame2, model, half=False, num_flow_updates=20):
+            _, _, height, width = frame1.shape
+            return np.full((height, width, 2), 0.1, dtype=np.float32)
+
+        monkeypatch.setattr(flow_utils, 'compute_flow', tiny_flow)
+        p1, p2 = two_frames
+        flow_path = str(tmp_path / 'flow.npy')
+        returned, _ = get_flow_and_cc(
+            frame1_path=p1, frame2_path=p2,
+            flow_path=flow_path, model=object(),
+        )
+        assert np.count_nonzero(returned) == 0
+        assert np.all(np.load(flow_path) == np.float32(0.1))
+
     def test_force_recompute(self, mock_raft, two_frames, tmp_path):
         p1, p2 = two_frames
         flow_path = str(tmp_path / "flow" / "000000.npy")

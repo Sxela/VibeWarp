@@ -40,6 +40,8 @@ class TestFlowConfig:
         cfg = FlowConfig()
         assert cfg.flow_warp is True
         assert cfg.num_flow_updates == 20
+        assert cfg.flow_lq is True
+        assert cfg.missed_consistency_dilation == 2
 
 
 class TestBrightnessConfig:

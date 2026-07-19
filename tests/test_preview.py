@@ -22,6 +22,7 @@ def build_run(tmp_path, run_id="0", batch="warpfusion", frames=3):
         (run / "debug" / f"diffusion_input_{n:06d}.jpg").write_bytes(b"dif")
         if n > 0:  # frame 0 has no previous frame to warp
             (run / f"_warped_{n:06d}.png").write_bytes(b"warp")
+            (run / "debug" / f"consistency_mask_{n:06d}.png").write_bytes(b"mask")
     return str(tmp_path)
 
 
@@ -93,6 +94,7 @@ class TestLayers:
             "debug:control_sd15_depth_source",
             "debug:control_sd15_depth_detected",
             "debug:diffusion_input",
+            "debug:consistency_mask",
         }
 
     def test_controlnet_layers_get_catalog_labels(self, tmp_path):
@@ -101,6 +103,9 @@ class TestLayers:
         assert layers["debug:control_sd15_depth_detected"]["label"] == "Depth — detected map"
         assert layers["debug:control_sd15_depth_source"]["group"] == "ControlNet"
         assert layers["debug:diffusion_input"]["label"] == "Diffusion input"
+        assert layers["debug:consistency_mask"]["label"] == \
+            "Consistency mask (white = keep warp)"
+        assert layers["debug:consistency_mask"]["group"] == "Optical flow"
 
     def test_warped_layer_has_no_frame_zero(self, tmp_path):
         root = build_run(tmp_path)

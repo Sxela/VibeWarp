@@ -1,10 +1,18 @@
-# VibeWarp
+# VibeWarp — The Impressionism of video2video
 
 [![CI](https://github.com/Sxela/VibeWarp/actions/workflows/ci.yml/badge.svg)](https://github.com/Sxela/VibeWarp/actions/workflows/ci.yml)
 
-Video-to-video style transfer pipeline, consolidated from [WarpFusion](https://github.com/Sxela/WarpFusion) v0.37 into a standalone Python package.
+Video-to-video style transfer, consolidated from [WarpFusion](https://github.com/Sxela/WarpFusion) v0.37 into a standalone Python package.
 
-Takes an input video and a text prompt, then renders each frame through Stable Diffusion while using optical flow warping and ControlNets to maintain temporal coherence with the source video.
+Feeds each frame of a video through Stable Diffusion, warping the previous render forward
+along optical flow so every frame builds on the last instead of being redrawn from scratch.
+The result is painterly and alive — it drifts, dissolves and reconstitutes.
+
+That texture is the point, not an artefact of it. A video model will give you a clean,
+coherent clip; this gives you something that looks made by hand.
+
+Optical flow, consistency masks and ControlNets are the controls for *how much* it holds
+together — turn them up for stability, down for dissolve.
 
 ## The interface
 
@@ -19,8 +27,9 @@ produce, not an estimate.
 ![The render view: project settings, the probed input video, and the live render monitor](docs/assets/ui-render.jpg)
 
 **History & Comparison** — every past run, inspectable frame by frame and layer by layer:
-the init frame, the warped init, each ControlNet's source and detected map, the diffusion
-input, and the output. Load any run's settings back into the form to iterate on it.
+the init frame, warped init, processed consistency mask, each ControlNet's source and
+detected map, the diffusion input, and the output. Load any run's settings back into the
+form to iterate on it.
 
 ![The history view: past runs on the left, and one frame compared across its layers](docs/assets/ui-history.jpg)
 

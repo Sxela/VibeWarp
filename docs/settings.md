@@ -123,6 +123,17 @@ marks a different type of warp unreliability:
 | G | `overshoot` | Areas where backward flow disagrees (ambiguous matches) |
 | B | `edges` | Flow discontinuities near moving object boundaries |
 
+`edge_consistency_width` is a Sobel kernel size. OpenCV requires an odd value
+between 1 and 31; imported values outside that range are safely normalized
+(for example, `20` becomes `21`) instead of failing during flow generation.
+
+The current non-legacy generator follows WarpFusion v0.37's RAFT behavior,
+including its magnitude-dependent flow coloring for the edge channel, 20 update
+iterations for backward flow and torchvision's default 12 for forward flow, and
+its distinction between the clamped flow returned immediately and the unclamped
+flow cached for resumed runs. The matching defaults are `flow_lq=True` and
+`missed_consistency_dilation=2`.
+
 **Post-processing pipeline** (matches notebook `load_cc()`):
 
 1. Weight each channel: `clip(1 - weight, 1)` — weight=0 ignores that layer, weight=1 = full effect
@@ -158,6 +169,11 @@ config = RunConfig(
 Values above 0 allow the warped previous render to partially "bleed through"
 in inconsistent regions, which can reduce flickering at the cost of some
 structural fidelity.
+
+The effective post-processed mask used for each blend is saved as
+`debug/consistency_mask_NNNNNN.png` and appears in History under **Optical
+flow**. White keeps the warped stylized frame; black falls back toward the raw
+current frame. Frame 0 has no mask because it has no preceding frame to warp.
 
 ## Video assembly
 

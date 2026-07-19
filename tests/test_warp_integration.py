@@ -141,6 +141,12 @@ class TestWarpBetweenFrames:
         # Consistency map should be saved
         cc_path = os.path.join(str(tmp_path / "flow"), "000000.jpg_12-21_cc.jpg")
         assert os.path.exists(cc_path)
+        # The processed mask used for flow 0 -> 1 is aligned to render frame 1.
+        mask_path = os.path.join(batch_folder, "debug", "consistency_mask_000001.png")
+        assert os.path.exists(mask_path)
+        mask = Image.open(mask_path)
+        assert mask.mode == 'L'
+        assert mask.size == (config.video.width, config.video.height)
 
     def test_different_blend_values(self, ctx_with_raft):
         prev_frame = Image.fromarray(
