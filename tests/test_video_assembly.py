@@ -211,6 +211,44 @@ class TestCreateVideoDeflicker:
             assert 'deflicker' not in vf_value
 
 
+class TestConsistencyCheckedVideoBlending:
+    def test_export_weights_and_notebook_mask_defaults_reach_load_cc(self, tmp_path):
+        from vibewarp.video import output
+
+        frames_dir = tmp_path / 'frames'
+        flow_dir = tmp_path / 'flow'
+        blend_dir = tmp_path / 'blend'
+        frames_dir.mkdir()
+        flow_dir.mkdir()
+        blend_dir.mkdir()
+        frames = []
+        for i, color in enumerate(('red', 'blue')):
+            path = frames_dir / f'batch(0)_{i:06d}.png'
+            Image.new('RGB', (8, 8), color).save(path)
+            frames.append(str(path))
+        np.save(flow_dir / 'batch(0)_000000.npy',
+                np.zeros((8, 8, 2), dtype=np.float32))
+        Image.new('RGB', (8, 8), 'white').save(
+            flow_dir / 'batch(0)_000000_12-21_cc.jpg')
+        captured = {}
+
+        def fake_load_cc(cc_map, missed, overshoot, edges, blur, dilate):
+            captured.update(
+                missed=missed, overshoot=overshoot, edges=edges,
+                blur=blur, dilate=dilate)
+            return np.ones((8, 8, 3), dtype=np.float32)
+
+        with patch('vibewarp.video.output.load_cc', side_effect=fake_load_cc):
+            output._blend_frames(
+                frames, str(blend_dir), 'optical flow', 0.5, str(flow_dir),
+                True, 1, None, 0.25, 0.5, 0.75)
+
+        assert captured == {
+            'missed': 0.25, 'overshoot': 0.5, 'edges': 0.75,
+            'blur': 2, 'dilate': 0,
+        }
+
+
 # ---- VideoAssemblyConfig defaults ----
 
 class TestVideoAssemblyConfig:
@@ -219,6 +257,9 @@ class TestVideoAssemblyConfig:
         cfg = VideoAssemblyConfig()
         assert cfg.keep_audio is True
         assert cfg.use_deflicker is False
+        assert cfg.missed_consistency_weight == 1.0
+        assert cfg.overshoot_consistency_weight == 1.0
+        assert cfg.edges_consistency_weight == 1.0
         assert cfg.upscale_ratio == 1
         assert cfg.upscale_model == 'realesr-animevideov3'
         assert cfg.use_background_mask_video is False

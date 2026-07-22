@@ -1,6 +1,8 @@
 import time
 from threading import Event
 
+import pytest
+
 from vibewarp.config import RunConfig
 from vibewarp.web_jobs import JobManager
 
@@ -25,6 +27,47 @@ def test_job_runs_and_records_progress_and_artifacts(tmp_path):
     assert job.progress == 100
     assert job.artifacts == [str(frame.resolve())]
     assert "loading model" in job.logs
+
+
+def test_job_progress_is_relative_to_selected_frame_range():
+    reported = Event()
+    release = Event()
+
+    def runner(config, progress_fn):
+        progress_fn(1, 11)
+        reported.set()
+        release.wait(1)
+        return []
+
+    config = RunConfig(frame_range=[60, 70])
+    manager = JobManager(runner=runner)
+    job = manager.submit(config)
+    assert reported.wait(1)
+
+    assert job.frame == 1
+    assert job.total_frames == 11
+    assert job.progress == pytest.approx(100 / 11)
+    assert job.message == "Rendering source frame 61 (1/11)"
+    release.set()
+    wait_terminal(job)
+
+
+def test_resume_job_passes_existing_run_and_reports_remaining_progress(tmp_path):
+    called = {}
+    def runner(config, progress_fn, **kwargs):
+        called.update(kwargs)
+        progress_fn(1, 2)
+        return []
+
+    manager = JobManager(runner=runner)
+    job = wait_terminal(manager.submit_resume(
+        RunConfig(frame_range=[60, 70]), str(tmp_path), 69))
+
+    assert job.state == "completed"
+    assert job.operation == "resume"
+    assert called == {"resume_from": 69, "existing_run_dir": str(tmp_path.resolve())}
+    assert job.message == "Completed with 0 rendered frames"
+    assert job.frame == 1 and job.total_frames == 2
 
 
 def test_queued_job_can_be_cancelled():
@@ -52,6 +95,25 @@ def test_running_job_cancels_at_progress_boundary():
     deadline = time.time() + 1
     while job.state == "queued" and time.time() < deadline: time.sleep(0.005)
     manager.cancel(job.id)
+    assert wait_terminal(job).state == "cancelled"
+
+
+def test_running_job_exposes_cancellation_inside_nested_work():
+    """Long backend waits can stop without waiting for a frame boundary."""
+    from vibewarp.cancellation import raise_if_cancelled
+
+    def runner(config, progress_fn):
+        while True:
+            raise_if_cancelled()
+            time.sleep(0.005)
+
+    manager = JobManager(runner=runner)
+    job = manager.submit(RunConfig())
+    deadline = time.time() + 1
+    while job.state == "queued" and time.time() < deadline:
+        time.sleep(0.005)
+    manager.cancel(job.id)
+
     assert wait_terminal(job).state == "cancelled"
 
 

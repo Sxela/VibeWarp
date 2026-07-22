@@ -34,11 +34,54 @@ from typing import Dict, Tuple
 # RunConfig fields use the section "main".
 LAYOUT: Dict[str, Tuple[str, str]] = {}
 
+# Model-family compatibility is part of the schema contract, alongside layout. Fields
+# omitted here work for every renderer; incompatible fields remain in settings files but
+# disappear from the form when another model family is selected.
+MODEL_FAMILY_BY_VERSION = {
+    'control_multi_v15': 'sd',
+    'control_multi_sdxl': 'sd',
+    'flux2_klein_edit': 'flux',
+    'hidream_o1_edit': 'hidream',
+}
+ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream')
+SECTION_MODEL_FAMILIES = {
+    'controlnet': ('sd',),
+    'freeu': ('sd',),
+    'animatediff': ('sd',),
+    'reconstruction_noise': ('sd',),
+    'ipadapter': ('sd',),
+    'vae': ('sd',),
+    'diffusion': ('sd',),
+    'flux': ('flux',),
+    'hidream': ('hidream',),
+}
+FIELD_MODEL_FAMILIES = {
+    # External edit renderers still use this seed as their base starting noise.
+    'diffusion.seed': ALL_MODEL_FAMILIES,
+    # These paths and precision settings belong to the local SD stack.
+    'main.sd_checkpoint_path': ('sd',),
+    'main.model_path': ('sd',),
+    'main.lora_dir': ('sd',),
+    'main.lora_merge_precision': ('sd',),
+    # Scene analysis and flow/consistency scheduling are shared. These templates
+    # specifically mutate SD conditioning/sampling fields and do nothing for edit models.
+    'scene.steps_template': ('sd',),
+    'scene.style_strength_template': ('sd',),
+    'scene.cfg_scale_template': ('sd',),
+    'scene.latent_scale_template': ('sd',),
+    'scene.init_scale_template': ('sd',),
+    'scene.image_scale_template': ('sd',),
+}
+
 # Display name overrides. The UI titles a field from its name ("enabled" -> "Enabled"),
 # which reads fine INSIDE its own section but is meaningless once a field is hoisted next
 # to strangers: `animatediff.enabled` on the Model card would just say "Enabled".
 LABELS: Dict[str, str] = {
     'animatediff.enabled': 'AnimateDiff (motion module)',
+    'flux.use_unwarped_style_reference': 'Use unwarped previous frame for style',
+    'hidream.use_unwarped_style_reference': 'Use unwarped previous frame for style',
+    'flux.label_raw_reference': 'Label raw input reference',
+    'hidream.label_raw_reference': 'Label raw input reference',
 }
 
 
@@ -77,10 +120,25 @@ _assign('render', 'Prompts',
 _assign('render', 'Diffusion',
         'diffusion.steps_schedule', 'diffusion.cfg_scale_schedule',
         'diffusion.style_strength_schedule', 'diffusion.sampler',
-        'diffusion.seed', 'diffusion.clip_skip')
+        'diffusion.clip_skip')
+_assign('render', 'Seed', 'diffusion.seed')
 _assign('render', 'ControlNet',
         'controlnet.enabled', 'controlnet.models', 'controlnet.mode',
         'controlnet.cond_image_src', 'controlnet.normalize_weights')
+# Flux 2 Klein Edit (diffusers). Only active when model_version='flux2_klein_edit';
+# the fields live on the Render tab so the edit knobs sit next to the prompts they
+# drive. model_repo is a machine path and goes to System > Paths (below).
+_assign('render', 'Flux Edit',
+        'flux.guidance_scale', 'flux.steps', 'flux.fixed_seed',
+        'flux.reference_mode', 'flux.use_unwarped_style_reference',
+        'flux.label_raw_reference', 'flux.label_style_reference',
+        'flux.feed_consistency_mask_as_context',
+        'flux.feed_prev_frame_as_context')
+_assign('render', 'HiDream-O1 Edit',
+        'hidream.guidance_scale', 'hidream.steps', 'hidream.fixed_seed',
+        'hidream.use_trained_resolution', 'hidream.reference_mode',
+        'hidream.use_unwarped_style_reference',
+        'hidream.label_raw_reference', 'hidream.label_style_reference')
 # The per-net settings (detectors, thresholds, mask options) live INSIDE the card of the
 # net they affect -- ControlNetEditor renders them from the catalog's `detectors` tuple.
 # Do not hoist them into an "advanced" tab: you would have to leave the ControlNet screen
@@ -103,7 +161,12 @@ _assign('system', 'Paths',
         'main.root_dir', 'main.model_path', 'main.lora_dir',
         'controlnet.model_dir', 'ipadapter.clip_vision_model_path',
         'animatediff.motion_module_path', 'video_assembly.upscale_model_path',
-        'reconstruction_noise.cache_dir')
+        'reconstruction_noise.cache_dir', 'flux.backend',
+        'flux.comfy_server_url', 'flux.comfy_unet_name',
+        'flux.comfy_clip_name', 'flux.comfy_vae_name',
+        'flux.comfy_timeout', 'flux.model_repo',
+        'hidream.comfy_server_url', 'hidream.comfy_checkpoint_name',
+        'hidream.comfy_timeout')
 # "Performance" was a junk drawer: tiled VAE, tiled sampler and the optical-flow workers
 # are three unrelated subsystems with their own knobs. Give each its own group so you can
 # see what a setting actually belongs to.
@@ -134,11 +197,20 @@ _assign('hidden', 'Superseded by schedule',
         'flow.missed_consistency_weight', 'flow.overshoot_consistency_weight',
         'flow.edges_consistency_weight', 'flow.consistency_blur',
         'flow.consistency_dilate', 'flow.soften_consistency_mask')
+_assign('hidden', 'Legacy Flux fields',
+        'flux.denoise', 'flux.max_sequence_length')
 # Not editable, but still in the config so settings files keep resolving:
 #   animation_mode  - 'Video Input' is the only value the engine supports.
 #   brightness.*    - the brightness adjuster is a legacy knob nobody should reach for.
 _assign('hidden', 'Not applicable',
         'main.animation_mode',
+        # Retained for WarpFusion/settings compatibility, but not useful in the
+        # image-space flow path exposed by VibeWarp. warp_num_k belongs to the
+        # unused k-means warp implementation; the other legacy warp controls
+        # stay at the established defaults because their alternatives are
+        # incomplete or tend to degrade the current image-space flow result.
+        'warp.warp_mode', 'warp.warp_strength', 'warp.warp_num_k',
+        'warp.warp_forward', 'warp.warp_towards_init',
         'brightness.enable', 'brightness.high_brightness_threshold',
         'brightness.high_brightness_adjust_ratio',
         'brightness.high_brightness_adjust_fix_amount',
@@ -158,8 +230,7 @@ _assign('advanced', 'Flow & Consistency',
         'flow.edges_consistency_schedule', 'flow.consistency_blur_schedule',
         'flow.consistency_dilate_schedule', 'flow.soften_consistency_schedule')
 _assign('advanced', 'Warp',
-        'warp.warp_mode', 'warp.warp_strength', 'warp.warp_num_k', 'warp.warp_forward',
-        'warp.warp_towards_init', 'warp.padding_ratio', 'warp.padding_mode')
+        'warp.padding_ratio', 'warp.padding_mode')
 _assign('advanced', 'Diffusion (advanced)',
         'diffusion.fixed_seed', 'diffusion.use_karras_noise',
         'diffusion.clip_final_layer_norm', 'diffusion.init_scale',
@@ -167,6 +238,13 @@ _assign('advanced', 'Diffusion (advanced)',
         'diffusion.code_randomness', 'diffusion.do_softcap',
         'diffusion.softcap_thresh', 'diffusion.softcap_q', 'diffusion.noise_mode',
         'diffusion.guidance_use_start_code')
+_assign('advanced', 'HiDream-O1',
+        'hidream.sampler', 'hidream.scheduler', 'hidream.noise_scale',
+        'hidream.multi_reference_instruction',
+        'hidream.patch_seam_smoothing', 'hidream.patch_seam_start',
+        'hidream.patch_seam_passes', 'hidream.patch_seam_blend')
+_assign('advanced', 'Flux Edit',
+        'flux.multi_reference_instruction')
 _assign('advanced', 'Reconstruction Noise',
         'reconstruction_noise.enabled', 'reconstruction_noise.randomness',
         'reconstruction_noise.cfg_scale', 'reconstruction_noise.steps_pct',
@@ -208,13 +286,18 @@ _assign('advanced', 'Render Mask',
         'mask.mask_clip_low', 'mask.mask_clip_high')
 _assign('advanced', 'Color',
         'color.match_color_strength', 'color.colormatch_method',
-        'color.colormatch_regrain', 'color.colormatch_after', 'color.colormatch_turbo')
+        'color.colormatch_regrain', 'color.colormatch_mode',
+        'color.colormatch_turbo')
+_assign('hidden', 'Legacy Color fields', 'color.colormatch_after')
 # NOTE: brightness.* is deliberately HIDDEN (see the hidden tier above). _assign is
 # last-write-wins and this block runs later, so re-listing it here would silently drag the
 # whole group back into Advanced.
 _assign('advanced', 'Video Output',
         'video_assembly.keep_audio', 'video_assembly.use_deflicker',
         'video_assembly.blend_mode', 'video_assembly.blend',
+        'video_assembly.missed_consistency_weight',
+        'video_assembly.overshoot_consistency_weight',
+        'video_assembly.edges_consistency_weight',
         'video_assembly.upscale_ratio', 'video_assembly.upscale_model',
         'video_assembly.use_background_mask_video', 'video_assembly.invert_mask_video',
         'video_assembly.background_video', 'video_assembly.background_source_video',
@@ -232,6 +315,26 @@ TIER_LABELS = {
 def classify(section: str, field: str) -> Tuple[str, str] | None:
     """(tier, group) for a field, or None if it has not been classified."""
     return LAYOUT.get(f'{section}.{field}')
+
+
+def model_families(section: str, field: str) -> Tuple[str, ...]:
+    """Renderer families for which a field has an effect."""
+    key = f'{section}.{field}'
+    return FIELD_MODEL_FAMILIES.get(
+        key, SECTION_MODEL_FAMILIES.get(section, ALL_MODEL_FAMILIES))
+
+
+def model_family_for_version(model_version: str) -> str:
+    """Resolve a configured model version without importing the heavy model loader."""
+    declared = MODEL_FAMILY_BY_VERSION.get(model_version)
+    if declared:
+        return declared
+    lowered = (model_version or '').lower()
+    if 'hidream' in lowered:
+        return 'hidream'
+    if 'flux' in lowered:
+        return 'flux'
+    return 'sd'
 
 
 def label(section: str, field: str) -> str | None:

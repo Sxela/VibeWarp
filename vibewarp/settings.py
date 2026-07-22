@@ -102,7 +102,7 @@ _VIBEWARP_SECTIONS = [
     # Longer prefixes must come before shorter ones that share a stem
     'reconstruction_noise', 'video_assembly', 'animatediff', 'ipadapter',
     'diffusion', 'brightness', 'captions', 'scene', 'freeu',
-    'color', 'warp', 'flow', 'video', 'mask', 'vae',
+    'color', 'warp', 'flow', 'video', 'mask', 'vae', 'hidream', 'flux',
 ]
 _VIBEWARP_TOP_LEVEL = {
     'sd_checkpoint_path', 'model_path', 'model_version', 'batch_name',
@@ -590,6 +590,11 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
             'match_color_strength': raw.get('match_color_strength', 0.0),
             'colormatch_method': raw.get('colormatch_method', 'PDF'),
             'colormatch_regrain': raw.get('colormatch_regrain') or False,
+            # WarpFusion exposed an exclusive before/after boolean. Preserve
+            # that meaning on import; VibeWarp additionally offers "both".
+            'colormatch_mode': raw.get(
+                'colormatch_mode',
+                'after' if raw.get('colormatch_after', True) else 'before'),
             'colormatch_after': raw.get('colormatch_after', True),
             'colormatch_turbo': raw.get('colormatch_turbo', False),
         },
@@ -679,6 +684,12 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
             'use_deflicker': raw.get('use_deflicker', False),
             'blend_mode': raw.get('blend_mode', 'optical flow'),
             'blend': float(raw.get('blend', 0.5)),
+            'missed_consistency_weight': float(
+                raw.get('missed_consistency_weight', 1.0)),
+            'overshoot_consistency_weight': float(
+                raw.get('overshoot_consistency_weight', 1.0)),
+            'edges_consistency_weight': float(
+                raw.get('edges_consistency_weight', 1.0)),
             'upscale_ratio': int(raw.get('upscale_ratio', 1)),
             'upscale_model': raw.get('upscale_model', 'realesr-animevideov3'),
             'upscale_model_path': raw.get('upscale_model_path', ''),

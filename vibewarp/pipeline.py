@@ -56,7 +56,7 @@ def _next_run_number(batch_dir: str) -> int:
     return max(existing, default=-1) + 1
 
 
-def setup_directories(config: RunConfig) -> dict:
+def setup_directories(config: RunConfig, existing_run_dir: Optional[str] = None) -> dict:
     """Create all required output directories for a run.
 
     Each run gets its own numbered subdirectory under the batch folder
@@ -69,9 +69,14 @@ def setup_directories(config: RunConfig) -> dict:
         Dict mapping directory names to their paths.
     """
     root = config.root_dir
-    batch_base = os.path.join(root, config.output_dir, config.batch_name)
-    run_num = _next_run_number(batch_base)
-    run_dir = os.path.join(batch_base, str(run_num))
+    if existing_run_dir is not None:
+        run_dir = os.path.abspath(existing_run_dir)
+        if not os.path.isdir(run_dir):
+            raise FileNotFoundError(f"Run directory not found: {run_dir}")
+    else:
+        batch_base = os.path.join(root, config.output_dir, config.batch_name)
+        run_num = _next_run_number(batch_base)
+        run_dir = os.path.join(batch_base, str(run_num))
 
     dirs = {
         'output': os.path.join(root, config.output_dir),
@@ -100,7 +105,13 @@ def load_models(config: RunConfig, device: str = 'cuda') -> dict:
         Dict with 'sd_model', 'model_wrap', 'model_wrap_cfg', and optionally
         'controlnets' and 'motion_module' keys.
     """
-    from vibewarp.core.model_loader import MODEL_CONFIGS
+    from vibewarp.core.model_loader import MODEL_CONFIGS, is_edit_model
+
+    # Flux edit models use the diffusers pipeline, not the CompVis/k-diffusion
+    # stack — load it and return before any SD-specific setup runs.
+    if is_edit_model(config.model_version):
+        from vibewarp.core.edit import load_edit_backend
+        return {'edit_backend': load_edit_backend(config, device=device)}
 
     # Resolve config path
     config_name = MODEL_CONFIGS.get(config.model_version, 'cldm_v15.yaml')
@@ -353,6 +364,7 @@ def run(
     config: RunConfig,
     resume_from: int = 0,
     progress_fn: Optional[Callable] = None,
+    existing_run_dir: Optional[str] = None,
 ) -> List[str]:
     """Run the full vid2vid style transfer pipeline.
 
@@ -384,7 +396,7 @@ def run(
         print(f"  Source aspect resolution: {config.video.width}x{config.video.height} "
               f"(max size {config.video.max_size})")
     # 1. Setup directories
-    dirs = setup_directories(config)
+    dirs = setup_directories(config, existing_run_dir=existing_run_dir)
 
     # 2. Save settings
     settings = settings_to_dict(config)
@@ -402,13 +414,19 @@ def run(
                 f"Input video not found: {config.video.video_init_path}")
         start_f = config.frame_range[0] if config.frame_range and config.frame_range[0] > 0 else 0
         end_f = config.frame_range[1] if config.frame_range and len(config.frame_range) > 1 and config.frame_range[1] > 0 else 999999999
-        extract_frames(
-            video_path=config.video.video_init_path,
-            output_dir=video_frames_folder,
-            nth_frame=config.video.extract_nth_frame,
-            start_frame=start_f,
-            end_frame=end_f,
-        )
+        existing_frames = any(
+            name.lower().endswith(('.jpg', '.jpeg', '.png'))
+            for name in os.listdir(video_frames_folder))
+        if existing_run_dir and existing_frames:
+            print(f"  Reusing extracted frames: {video_frames_folder}")
+        else:
+            extract_frames(
+                video_path=config.video.video_init_path,
+                output_dir=video_frames_folder,
+                nth_frame=config.video.extract_nth_frame,
+                start_frame=start_f,
+                end_frame=end_f,
+            )
 
     # 4a-0. Content-aware scene analysis (notebook cells 26–28). Needed when
     # schedules are template-driven or captioning uses content-aware keyframes.
@@ -480,52 +498,62 @@ def run(
         from vibewarp.flow.flow_utils import load_raft_model
         raft_model = load_raft_model(half_precision=config.flow.flow_lq)
 
-    # 5c. Inject AnimateDiff motion modules if loaded
-    motion_module = models.get('motion_module')
-    if motion_module is not None:
-        from vibewarp.core.animatediff import inject_motion_modules
-        inject_motion_modules(models['sd_model'], motion_module)
+    # Flux uses the diffusers pipeline directly; the AnimateDiff / IP-Adapter /
+    # ControlNet / tiled-VAE / k-diffusion setup below is all SD-specific and
+    # would dereference an sd_model that Flux never loads. Skip it wholesale.
+    from vibewarp.core.model_loader import is_edit_model
+    is_edit = is_edit_model(config.model_version)
 
-    # 5d. Hook IP-Adapters if loaded
-    ipadapters = models.get('ipadapters', {})
-    if ipadapters:
-        _apply_ipadapter_hooks(models['sd_model'], ipadapters, config)
+    motion_module = None
+    ipadapters = {}
+    loaded_controlnets = {}
+    if not is_edit:
+        # 5c. Inject AnimateDiff motion modules if loaded
+        motion_module = models.get('motion_module')
+        if motion_module is not None:
+            from vibewarp.core.animatediff import inject_motion_modules
+            inject_motion_modules(models['sd_model'], motion_module)
 
-    # 5e. Always use the unified ControlNet-capable forward. With empty model
-    # and hint dictionaries it is identical to the stock UNet forward.
-    loaded_controlnets = models.get('controlnets', {})
-    validate_stock_forward = os.environ.get('VIBEWARP_VALIDATE_STOCK_FORWARD') == '1'
-    _configure_unified_forward(
-        models['sd_model'], loaded_controlnets, config.freeu,
-        normalize_cn_weights=config.controlnet.normalize_weights,
-        validate_stock_forward=validate_stock_forward)
+        # 5d. Hook IP-Adapters if loaded
+        ipadapters = models.get('ipadapters', {})
+        if ipadapters:
+            _apply_ipadapter_hooks(models['sd_model'], ipadapters, config)
 
-    # 5f. Offload VAE and CLIP text encoder to CPU (moved to GPU on demand)
-    sd_model = models['sd_model']
-    if hasattr(sd_model, 'cond_stage_model'):
-        sd_model.cond_stage_model.cpu()
-    if hasattr(sd_model, 'first_stage_model'):
-        sd_model.first_stage_model.cpu()
-    torch.cuda.empty_cache()
+        # 5e. Always use the unified ControlNet-capable forward. With empty model
+        # and hint dictionaries it is identical to the stock UNet forward.
+        loaded_controlnets = models.get('controlnets', {})
+        validate_stock_forward = os.environ.get('VIBEWARP_VALIDATE_STOCK_FORWARD') == '1'
+        _configure_unified_forward(
+            models['sd_model'], loaded_controlnets, config.freeu,
+            normalize_cn_weights=config.controlnet.normalize_weights,
+            validate_stock_forward=validate_stock_forward)
 
-    # 5g. Patch tiled VAE if enabled
-    if config.vae.use_tiled_vae:
-        from vibewarp.core.vae import patch_model_for_tiled_vae
-        patch_model_for_tiled_vae(models['sd_model'], config.vae)
+        # 5f. Offload VAE and CLIP text encoder to CPU (moved to GPU on demand)
+        sd_model = models['sd_model']
+        if hasattr(sd_model, 'cond_stage_model'):
+            sd_model.cond_stage_model.cpu()
+        if hasattr(sd_model, 'first_stage_model'):
+            sd_model.first_stage_model.cpu()
+        torch.cuda.empty_cache()
+
+        # 5g. Patch tiled VAE if enabled
+        if config.vae.use_tiled_vae:
+            from vibewarp.core.vae import patch_model_for_tiled_vae
+            patch_model_for_tiled_vae(models['sd_model'], config.vae)
 
     # 6. Build render context
     flow_folder = os.path.join(dirs['batch'], 'flow')
-    loaded_controlnets = models.get('controlnets', {})
     ctx = RenderContext(
         config=config,
-        sd_model=models['sd_model'],
-        model_wrap=models['model_wrap'],
-        model_wrap_cfg=models['model_wrap_cfg'],
+        sd_model=models.get('sd_model'),
+        model_wrap=models.get('model_wrap'),
+        model_wrap_cfg=models.get('model_wrap_cfg'),
+        edit_backend=models.get('edit_backend'),
         loaded_controlnets=loaded_controlnets,
         loaded_ipadapters=ipadapters,
         raft_model=raft_model,
-        motion_module=models.get('motion_module'),
-        sampler_fn=get_sampler_fn(config.diffusion.sampler),
+        motion_module=motion_module,
+        sampler_fn=None if is_edit else get_sampler_fn(config.diffusion.sampler),
         batch_folder=dirs['batch'],
         video_frames_folder=video_frames_folder,
         flow_folder=flow_folder,
@@ -541,8 +569,8 @@ def run(
         from vibewarp.core.animatediff import eject_motion_modules
         eject_motion_modules(models['sd_model'], motion_module)
 
-    # 7b2. Unpatch tiled VAE if it was applied
-    if config.vae.use_tiled_vae:
+    # 7b2. Unpatch tiled VAE if it was applied (never patched on the Flux path)
+    if config.vae.use_tiled_vae and not is_edit:
         from vibewarp.core.vae import unpatch_model_tiled_vae
         unpatch_model_tiled_vae(models['sd_model'])
 
@@ -553,36 +581,8 @@ def run(
 
     # 8. Assemble video
     if output_paths:
-        video_output_path = os.path.join(
-            dirs['batch'],
-            f"{config.batch_name}.mp4"
-        )
-        va = config.video_assembly
         try:
-            create_video(
-                frames_dir=dirs['batch'],
-                output_path=video_output_path,
-                fps=12.0,
-                batch_name=config.batch_name,
-                img_format=config.video.save_img_format,
-                blend_mode=va.blend_mode if config.flow.flow_warp else 'None',
-                blend=va.blend,
-                flow_dir=flow_folder if config.flow.flow_warp else None,
-                check_consistency=config.flow.check_consistency,
-                keep_audio=va.keep_audio,
-                source_video=config.video.video_init_path,
-                use_deflicker=va.use_deflicker,
-                upscale_ratio=va.upscale_ratio,
-                upscale_model=va.upscale_model,
-                upscale_model_path=va.upscale_model_path,
-                use_background_mask_video=va.use_background_mask_video,
-                invert_mask_video=va.invert_mask_video,
-                background_video=va.background_video,
-                background_source_video=va.background_source_video,
-                video_frames_folder=video_frames_folder,
-                mask_clip_low=va.mask_clip_low,
-                mask_clip_high=va.mask_clip_high,
-            )
+            assemble_video(config, dirs['batch'])
         except Exception as e:
             print(f"Video assembly failed: {e}")
 
@@ -593,3 +593,40 @@ def run(
     release_vram()
 
     return output_paths
+
+
+def assemble_video(config: RunConfig, run_dir: str) -> str:
+    """Build (or rebuild) a video from every completed frame in an existing run."""
+    run_dir = os.path.abspath(run_dir)
+    if not os.path.isdir(run_dir):
+        raise FileNotFoundError(f"Run directory not found: {run_dir}")
+    va = config.video_assembly
+    flow_folder = os.path.join(run_dir, 'flow')
+    print(f"  Assembling video from completed frames in: {run_dir}")
+    return create_video(
+        frames_dir=run_dir,
+        output_path=os.path.join(run_dir, f"{config.batch_name}.mp4"),
+        fps=12.0,
+        batch_name=config.batch_name,
+        img_format=config.video.save_img_format,
+        blend_mode=va.blend_mode if config.flow.flow_warp else 'None',
+        blend=va.blend,
+        flow_dir=flow_folder if config.flow.flow_warp else None,
+        check_consistency=config.flow.check_consistency,
+        missed_consistency_weight=va.missed_consistency_weight,
+        overshoot_consistency_weight=va.overshoot_consistency_weight,
+        edges_consistency_weight=va.edges_consistency_weight,
+        keep_audio=va.keep_audio,
+        source_video=config.video.video_init_path,
+        use_deflicker=va.use_deflicker,
+        upscale_ratio=va.upscale_ratio,
+        upscale_model=va.upscale_model,
+        upscale_model_path=va.upscale_model_path,
+        use_background_mask_video=va.use_background_mask_video,
+        invert_mask_video=va.invert_mask_video,
+        background_video=va.background_video,
+        background_source_video=va.background_source_video,
+        video_frames_folder=os.path.join(run_dir, 'video_frames'),
+        mask_clip_low=va.mask_clip_low,
+        mask_clip_high=va.mask_clip_high,
+    )

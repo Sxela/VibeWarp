@@ -58,6 +58,29 @@ def test_validation_reports_inputs_and_resolution():
     assert {"sd_checkpoint_path", "video.video_init_path", "video.width"} <= paths
 
 
+@pytest.mark.parametrize('model_version', ['flux2_klein_edit', 'hidream_o1_edit'])
+def test_edit_models_ignore_hidden_sd_validation(model_version, tmp_path):
+    config = RunConfig(model_version=model_version)
+    config.video.video_init_path = str(tmp_path / 'video.mp4')
+    config.sd_checkpoint_path = ''
+    config.model_path = str(tmp_path / 'missing-model-root')
+    config.lora_dir = str(tmp_path / 'missing-loras')
+    config.controlnet.enabled = True
+    config.animatediff.enabled = True
+    config.diffusion.steps = 0
+    config.diffusion.style_strength = 2
+    config.diffusion.sampler_tile_size = 3
+
+    paths = {e['path'] for e in validate_config(
+        config, require_inputs=True, check_paths=True)}
+
+    assert 'sd_checkpoint_path' not in paths
+    assert 'model_path' not in paths
+    assert 'lora_dir' not in paths
+    assert not any(path.startswith('animatediff.') for path in paths)
+    assert not any(path.startswith('diffusion.') for path in paths)
+
+
 def test_validation_reports_invalid_tiled_sampler_geometry():
     config = RunConfig()
     config.diffusion.sampler_tile_size = 510

@@ -126,6 +126,39 @@ def test_path_exists_endpoint_reports_missing_files(tmp_path):
     assert client.get("/api/fs/exists", params={"path": ""}).json()["checked"] is False
 
 
+def test_comfy_status_reports_reachable_and_unavailable_ports(monkeypatch):
+    import vibewarp.web as web
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_args): pass
+
+    calls = []
+    monkeypatch.setattr(web.socket, 'create_connection',
+                        lambda address, timeout: calls.append((address, timeout)) or Connection())
+    client = TestClient(create_app(JobManager(runner=lambda *_a, **_k: [])))
+    available = client.get('/api/comfy/status',
+                           params={'url': 'http://localhost:8188'}).json()
+    assert available['available'] is True
+    assert available['host'] == 'localhost' and available['port'] == 8188
+    assert calls == [(('localhost', 8188), 0.5)]
+
+    def refused(*_args, **_kwargs):
+        raise ConnectionRefusedError('port closed')
+    monkeypatch.setattr(web.socket, 'create_connection', refused)
+    unavailable = client.get('/api/comfy/status',
+                             params={'url': 'http://127.0.0.1:9191'}).json()
+    assert unavailable['available'] is False
+    assert unavailable['port'] == 9191
+
+
+def test_comfy_status_rejects_invalid_server_urls():
+    client = TestClient(create_app(JobManager(runner=lambda *_a, **_k: [])))
+    status = client.get('/api/comfy/status', params={'url': 'localhost:8188'}).json()
+    assert status['available'] is False
+    assert status['message'].startswith('Invalid ComfyUI URL:')
+
+
 def test_system_settings_survive_a_settings_import(tmp_path, monkeypatch):
     """Importing someone else's settings must not repoint YOUR model paths."""
     import json

@@ -43,6 +43,26 @@ The UNet always uses the ControlNet-capable forward; when no ControlNet is
 selected its model and hint dictionaries are empty, yielding stock-equivalent
 math while keeping one production path and allowing FreeU consistently.
 
+## External image-edit models (separate render path)
+
+`model_version="flux2_klein_edit"` and `model_version="hidream_o1_edit"`
+bypass the CompVis/k-diffusion stack. The model-agnostic frame loop is reused:
+optical-flow warping, consistency blending, pre/post color matching, frame
+feedback, prompts, and output handling remain VibeWarp-owned. `core/edit.py`
+dispatches the prepared RGB edit target to the selected backend.
+
+Flux2 and HiDream-O1 use one reference on the first frame, then can use two
+ordered references: raw current content followed by the warped,
+consistency-composited style/continuity target. The prompt names those roles
+explicitly. Independent optional `raw input` and `style reference` footers can
+visually label the roles supplied to the model. Raw-only and warped-only modes
+remain available. A shared toggle can replace the second reference with the
+untouched previous stylized output, keeping optical-flow artifacts and raw-frame
+consistency fallback out of the model's style example. Both Comfy graphs begin from an empty output latent, so the
+images are edit conditioning rather than a noised img2img latent.
+See [Flux settings](settings.md#flux-2-klein-edit) and [HiDream
+settings](settings.md#hidream-o1-edit).
+
 ## Configuration and settings flow
 
 All entry points resolve to the same `RunConfig`. WarpFusion settings retain
@@ -71,6 +91,14 @@ config codec used by the CLI, then queues them for the single GPU render
 worker. Job state and logs stream back over server-sent events. Model paths are
 resolved during settings loading/setup; schedules remain declarative until the
 frame loop selects the value for the current frame.
+
+The schema also declares each field's compatible renderer families. Switching
+between SD, Flux, and HiDream filters the form and search results immediately:
+SD checkpoint, k-diffusion, tiled VAE, ControlNet, IP-Adapter, AnimateDiff,
+FreeU, LORA, and reconstruction-noise controls are not shown for external edit
+models, while Flux and HiDream expose only their own backend controls. Hidden
+values remain in the config for lossless model switching and settings imports;
+validation ignores fields that cannot affect the selected renderer.
 
 ## Dependency layout
 

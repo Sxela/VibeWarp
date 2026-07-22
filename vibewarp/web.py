@@ -1,19 +1,47 @@
 """Local FastAPI server for the VibeWarp Svelte application."""
-import argparse, asyncio, copy, json, math, mimetypes, os, tempfile, webbrowser
+import argparse, asyncio, copy, json, math, mimetypes, os, socket, tempfile, webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from threading import Timer
+from urllib.parse import urlsplit
 from vibewarp.config import RunConfig
 from vibewarp.config_io import ConfigError, apply_path_defaults, config_from_dict, config_from_settings, config_schema, strip_path_quotes, validate_config
 from vibewarp.controlnet_catalog import CONTROLNET_MODES, MODE_PRESETS, specs_for_version
 from vibewarp import system_settings
-from vibewarp.preview import describe_run, image_path, list_runs, run_dir, runs_root, settings_file
+from vibewarp.preview import (describe_run, image_path, list_runs, resume_status,
+                              run_dir, runs_root, set_run_label, settings_file,
+                              video_file)
 from vibewarp.video.input import first_visible_frame, fit_dimensions, probe_video
 from vibewarp.web_jobs import JobManager, TERMINAL_STATES
 
 STATIC_DIR = Path(__file__).with_name("web_static")
 CHECKPOINT_SUFFIXES = (".pth", ".safetensors", ".ckpt", ".bin")
 manager = JobManager()
+
+
+def _comfy_port_status(server_url: str, timeout: float = 0.5) -> dict:
+    """Check whether the TCP port configured for ComfyUI accepts connections."""
+    url = (server_url or '').strip().rstrip('/')
+    try:
+        parsed = urlsplit(url)
+        if parsed.scheme not in ('http', 'https') or not parsed.hostname:
+            raise ValueError('expected an http:// or https:// server URL')
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+    except ValueError as exc:
+        return {'url': url, 'available': False, 'message': f'Invalid ComfyUI URL: {exc}'}
+
+    try:
+        with socket.create_connection((parsed.hostname, port), timeout=timeout):
+            pass
+    except OSError as exc:
+        return {
+            'url': url, 'host': parsed.hostname, 'port': port,
+            'available': False, 'message': str(exc),
+        }
+    return {
+        'url': url, 'host': parsed.hostname, 'port': port,
+        'available': True, 'message': 'ComfyUI port is reachable',
+    }
 
 def _ui_config(config: RunConfig) -> RunConfig:
     config = copy.deepcopy(config)
@@ -52,6 +80,19 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
             raise HTTPException(422, detail=errors)
         return config
 
+    def saved_run_config(run: str) -> RunConfig:
+        path = settings_file(run)
+        if path is None:
+            raise HTTPException(404, detail="This run saved no settings")
+        try:
+            config = config_from_settings(path)
+            # Keep portable run settings, but restore this installation's model
+            # paths and machine-specific values exactly as settings loading does.
+            return apply_path_defaults(config_from_dict(
+                system_settings.overlay(asdict(config))))
+        except (ConfigError, ValueError, json.JSONDecodeError, TypeError) as exc:
+            raise HTTPException(422, detail=str(exc))
+
     @app.get("/api/config")
     def get_config_metadata():
         # This machine's paths/VRAM tuning win over the shipped defaults.
@@ -80,6 +121,11 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
             "exists": target.exists(),
             "is_dir": target.is_dir(),
         }
+
+    @app.get('/api/comfy/status')
+    def comfy_status(url: str = ''):
+        """Fast UI preflight for Comfy-backed models; no render is submitted."""
+        return _comfy_port_status(url)
 
     @app.get("/api/video/probe")
     def probe_video_endpoint(path: str = "", max_size: int = 0, extract_nth_frame: int = 1):
@@ -190,6 +236,20 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
             raise HTTPException(404, detail="Unknown run")
         return described
 
+    @app.put("/api/preview/runs/{run_id}/label")
+    async def preview_run_label(request: Request, run_id: str,
+                                output_dir: str = "images_out",
+                                batch_name: str = "warpfusion"):
+        payload = await request.json()
+        try:
+            label = set_run_label(
+                output_dir, batch_name, run_id, payload.get('label'))
+        except FileNotFoundError:
+            raise HTTPException(404, detail="Unknown run")
+        except ValueError as exc:
+            raise HTTPException(422, detail=str(exc))
+        return {'id': run_id, 'label': label}
+
     @app.post("/api/preview/runs/{run_id}/settings")
     def preview_run_settings(run_id: str, output_dir: str = "images_out",
                              batch_name: str = "warpfusion"):
@@ -220,6 +280,43 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         if path is None:
             raise HTTPException(404, detail="No image for that layer/frame")
         return FileResponse(path, media_type=mimetypes.guess_type(path)[0])
+
+    @app.get("/api/preview/runs/{run_id}/video")
+    def preview_video(run_id: str, output_dir: str = "images_out",
+                      batch_name: str = "warpfusion"):
+        run = run_dir(output_dir, batch_name, run_id)
+        path = video_file(run, batch_name) if run else None
+        if path is None:
+            raise HTTPException(404, detail="This run has no assembled video")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.post("/api/preview/runs/{run_id}/video", status_code=202)
+    def build_preview_video(run_id: str, output_dir: str = "images_out",
+                            batch_name: str = "warpfusion"):
+        run = run_dir(output_dir, batch_name, run_id)
+        if run is None:
+            raise HTTPException(404, detail="Unknown run")
+        described = describe_run(output_dir, batch_name, run_id)
+        output = next((layer for layer in described['layers']
+                       if layer['id'] == 'output'), None)
+        if not output or not output['frames']:
+            raise HTTPException(422, detail="This run has no completed frames")
+        return jobs.submit_video(saved_run_config(run), run).snapshot(include_config=True)
+
+    @app.post("/api/preview/runs/{run_id}/resume", status_code=202)
+    def resume_preview_run(run_id: str, output_dir: str = "images_out",
+                           batch_name: str = "warpfusion"):
+        run = run_dir(output_dir, batch_name, run_id)
+        if run is None:
+            raise HTTPException(404, detail="Unknown run")
+        config = saved_run_config(run)
+        if config.animatediff.enabled:
+            raise HTTPException(
+                422, detail="Resuming AnimateDiff batches is not supported yet")
+        frame = resume_status(run, batch_name, run_id)
+        if frame is None:
+            raise HTTPException(409, detail="This run already has every configured frame")
+        return jobs.submit_resume(config, run, frame).snapshot(include_config=True)
 
     @app.post("/api/config/import")
     async def import_config(request: Request):

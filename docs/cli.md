@@ -171,6 +171,6 @@ images_out/warpfusion/0/
   settings/                  # saved run config
   video_frames/              # extracted input frames
   flow/                      # cached optical flow + consistency maps
-  debug/                     # CN source images, detected maps, diffusion inputs
+  debug/                     # CN maps, diffusion inputs, exact edit references
   _warped_NNNNNN.png         # per-frame warped init images (temp, used as CN source)
 ```

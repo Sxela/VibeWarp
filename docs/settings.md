@@ -221,10 +221,25 @@ When `keep_audio=True` and a source video is set, the audio track is remuxed
 into the output without re-encoding (`-c:v copy`). If the source has no audio
 stream, the error is silently suppressed and the silent video is kept.
 
-### Deflicker
+### Video blending (post-processing)
 
-Adds a `deflicker=mode=pm:size=10` ffmpeg filter to the encode pass. Useful
-for reducing frame-to-frame brightness flicker in generated videos.
+This is WarpFusion's consistency-aware export smoothing path. Set
+`video_assembly.blend_mode="optical flow"` and `flow.check_consistency=True` to
+warp and blend the previous processed output using the saved flow and
+forward/backward consistency map. `video_assembly.blend` and the three
+`video_assembly.*_consistency_weight` fields match the notebook panel. Video
+assembly uses the notebook's export mask settings (`blur=2`, `dilate=0`) rather
+than the render loop's mask post-processing values. This works for SD, Flux, and
+HiDream outputs.
+
+### FFmpeg deflicker
+
+Separately, `video_assembly.use_deflicker=True` adds the notebook's
+`deflicker=mode=pm:size=10` ffmpeg filter during encoding.
+
+This is distinct from the notebook's sampling-time `deflicker_scale` and
+`deflicker_latent_scale` losses. Those require gradients inside the SD denoiser
+and therefore cannot be applied through the remote ComfyUI edit backends.
 
 ### Background mask compositing
 
@@ -371,6 +386,208 @@ prompt is what gets encoded.
 ```python
 config = RunConfig(lora_dir="/models/loras", lora_merge_precision="fp32")
 ```
+
+## Flux 2 Klein Edit
+
+Selecting `model_version="flux2_klein_edit"` switches VibeWarp to FLUX.2 Klein
+Edit on a render path entirely separate from the CompVis/k-diffusion stack. The
+default backend submits a native Flux2 graph to a running ComfyUI server. The SD
+checkpoint, ControlNets, IP-Adapters, LORAs, k-diffusion sampler, and VibeWarp's
+tiled VAE are skipped; `FluxConfig` drives the render instead.
+
+The warp-stylization loop is unchanged. The first frame uses the raw video frame.
+On later frames, the default `raw + warped` mode sends the raw current frame as
+ordered reference 1 and the flow-warped, consistency-weighted previous render as
+reference 2. A prepended instruction assigns content/composition to the first and
+style/temporal continuity to the second. Klein starts from an empty noisy latent;
+the references are conditioning, not img2img starting latents.
+
+### Inputs by frame number
+
+`reference_mode` can instead send only the raw current frame or only the prepared
+warped composite. `use_unwarped_style_reference` replaces that warped style image
+with the untouched previous stylized frame while retaining the raw current frame's
+structural role. Optional consistency-mask and unwarped-previous references are
+appended after those primary role references.
+
+```mermaid
+flowchart TD
+    start([Render frame N]) --> which{N == first frame?}
+
+    which -->|yes| raw0[Raw video frame<br/>edit target]
+    which -->|no| prev[Stylized frame N-1] --> warp[Flow-warp +<br/>consistency weights] --> target[Warped previous render<br/>edit target]
+
+    raw0 --> pipe
+    target --> mode{reference_mode}
+    mode -->|raw + warped| rawref[Reference 1:<br/>raw current frame] --> pipe
+    mode -->|raw + warped| styleref[Reference 2:<br/>warped style/continuity] --> pipe
+    mode -->|raw only| rawonly[Raw current frame] --> pipe
+    mode -->|warped only| warponly[Warped composite] --> pipe
+    target --> maskgate{feed_consistency_mask_as_context?}
+    maskgate -->|yes| maskref[Processed consistency mask<br/>white = keep warp] --> pipe
+    prev --> prevgate{feed_prev_frame_as_context?}
+    prevgate -->|yes| prevref[Unwarped previous stylized frame<br/>additional reference] --> pipe
+    prompt[Prompt for frame N<br/>+ role instruction in two-ref mode] --> pipe
+    pipe["Comfy Flux2 graph<br/>reference-latent conditioning"]
+
+    pipe --> out[Stylized frame N]
+    out -->|warped, becomes<br/>next frame's target| prev
+```
+
+On the first frame the prepared image is already the raw frame, so it is not
+duplicated. Independent visible-label toggles can burn a `raw input` footer into
+the raw/content reference and a `style reference` footer into reference 2.
+Every exact image sent to FLUX.2, including either baked label
+and any optional extra references, is saved in History/Debug.
+
+### ComfyUI and model setup
+
+1. Install ComfyUI from the [official download
+   page](https://www.comfy.org/download), or clone the
+   [official ComfyUI repository](https://github.com/Comfy-Org/ComfyUI) for a
+   portable/manual install. Update it to the current version so that the native
+   Flux2 nodes are available.
+2. Download these three files from Hugging Face and place them below ComfyUI's
+   model directory (the model directory selected during Desktop setup, or
+   `<ComfyUI>/models` for portable/manual installs):
+
+   | Hugging Face download | Destination |
+   |---|---|
+   | [`flux-2-klein-4b-fp8.safetensors`](https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/blob/main/flux-2-klein-4b-fp8.safetensors) | `models/diffusion_models/` |
+   | [`qwen_3_4b.safetensors`](https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/blob/main/split_files/text_encoders/qwen_3_4b.safetensors) | `models/text_encoders/` |
+   | [`flux2-vae.safetensors`](https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/blob/main/split_files/vae/flux2-vae.safetensors) | `models/vae/` |
+
+   The distilled FP8 model above is the file expected by VibeWarp's default
+   four-step ComfyUI workflow. The complete
+   [`black-forest-labs/FLUX.2-klein-4B`](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B)
+   repository is only needed when `flux.backend="diffusers"` is selected.
+3. Restart ComfyUI after copying the files, start its local server, and leave it
+   running while VibeWarp renders. Set `flux.comfy_server_url` if its address is
+   not `http://127.0.0.1:8188`.
+
+The optional Diffusers backend also requires `pip install vibewarp[flux]`.
+
+| Config field | Default | Notes |
+|---|---|---|
+| `flux.backend` | `comfy` | `comfy` uses the HTTP server; `diffusers` uses a complete Hugging Face repository. |
+| `flux.comfy_server_url` | `http://127.0.0.1:8188` | ComfyUI HTTP address. |
+| `flux.comfy_unet_name` | `flux-2-klein-4b-fp8.safetensors` | Filename visible to Comfy's `UNETLoader`. |
+| `flux.comfy_clip_name` | `qwen_3_4b.safetensors` | Filename visible to Comfy's `CLIPLoader`. |
+| `flux.comfy_vae_name` | `flux2-vae.safetensors` | Filename visible to Comfy's `VAELoader`. |
+| `flux.comfy_timeout` | `600` | Maximum seconds to wait for a submitted frame. |
+| `flux.guidance_scale` | `1.0` | CFG used by the distilled reference workflow. |
+| `flux.steps` | `4` | Flux2Scheduler steps, independent of `diffusion.steps_schedule`. |
+| `flux.fixed_seed` | `True` | Reuse identical starting noise on every frame to reduce stochastic temporal and palette changes. |
+| `flux.reference_mode` | `raw + warped` | `raw only` always edits the current source frame; `warped only` feeds back the prepared temporal composite; the default provides both as ordered references. Frame zero is necessarily raw-only. |
+| `flux.use_unwarped_style_reference` | `False` | On later style-reference modes, use the untouched previous stylized frame instead of the flow-warped, consistency-composited image. The warped image remains VibeWarp's temporal/color-match input but is not sent to FLUX as style. |
+| `flux.label_raw_reference` | `False` | Burn a black footer reading `raw input` into the raw/current-frame reference, including frame zero. History saves the labeled pixels sent to the model. |
+| `flux.label_style_reference` | `False` | In `raw + warped` mode, burn a black footer reading `style reference` into reference 2 only. |
+| `flux.multi_reference_instruction` | `Transform reference image 1 ...` | Instruction prepended only in two-reference mode to assign content and style roles. |
+| `flux.feed_consistency_mask_as_context` | `False` | Add the processed consistency mask as another reference on later warped frames. |
+| `flux.feed_prev_frame_as_context` | `False` | Add the previous stylized frame before optical-flow warping as another reference on later frames. |
+| `flux.model_repo` | `black-forest-labs/FLUX.2-klein-4B` | Used only by the Diffusers backend. |
+
+> **Status:** the Comfy graph has been exercised successfully on a real Klein 4B
+> FP8 checkpoint. It reproduces the default workflow's Euler sampler, four-step
+> Flux2 schedule, CFG 1, empty output latent, and positive/negative
+> `ReferenceLatent` conditioning.
+
+## HiDream-O1 Edit
+
+Selecting `model_version="hidream_o1_edit"` uses HiDream-O1's native
+pixel-space instruction-edit workflow through ComfyUI. It reuses the same
+outer VibeWarp loop as the SD and Flux paths: frame zero uses the raw input;
+later frames use the flow-warped previous render blended with the current frame
+through the consistency mask, with the configured pre/post color matching.
+
+HiDream starts sampling from an empty pixel-space latent at denoise `1.0`. This
+is intentionally not classic img2img with noise added to an encoded target. On
+frame zero it receives the raw frame as one instruction-edit reference. On later
+frames, the default experimental mode supplies the raw current frame as ordered
+reference 1 and the prepared flow-warped stylized composite as reference 2. A
+prepended instruction assigns content/composition to the first and style plus
+temporal continuity to the second. `reference_mode` can instead feed only the
+raw current frame on every frame, or only the prepared warped composite. Comfy
+describes 2–10 references as subject-personalization conditioning, so compare
+the modes; the text-assigned content/style roles are an experimental use of
+that path. Enabling `use_unwarped_style_reference` keeps reference 1 raw but
+replaces reference 2 with the untouched previous stylized output, avoiding flow
+seams and consistency-mask raw fallback in the image used to communicate style.
+
+### ComfyUI and model setup
+
+1. Install ComfyUI from the [official download
+   page](https://www.comfy.org/download), or clone the
+   [official ComfyUI repository](https://github.com/Comfy-Org/ComfyUI) for a
+   portable/manual install. Update it to the current version so that the native
+   HiDream-O1 nodes are available.
+2. Download
+   [`hidream_o1_image_fp8_scaled.safetensors`](https://huggingface.co/Comfy-Org/HiDream-O1-Image/blob/main/checkpoints/hidream_o1_image_fp8_scaled.safetensors)
+   from the Comfy-Org Hugging Face repository and place it in
+   `models/checkpoints/` below ComfyUI's model directory (the model directory
+   selected during Desktop setup, or `<ComfyUI>/models/checkpoints` for
+   portable/manual installs).
+3. Restart ComfyUI after copying the checkpoint, start its local server, and
+   leave it running while VibeWarp renders. Set `hidream.comfy_server_url` if
+   its address is not `http://127.0.0.1:8188`.
+
+The checkpoint is loaded by `CheckpointLoaderSimple` and includes the required
+conditioning components; no separate Gemma/Qwen text-encoder file is configured
+for direct prompts in VibeWarp. ComfyUI's separately downloadable
+[`gemma4_e4b_it_fp8_scaled.safetensors`](https://huggingface.co/Comfy-Org/gemma-4/blob/main/text_encoders/gemma4_e4b_it_fp8_scaled.safetensors)
+is an optional prompt-enhancement model, not a required core conditioning
+encoder, and this first test backend bypasses that enhancement stage.
+
+| Config field | Default | Notes |
+|---|---|---|
+| `hidream.comfy_server_url` | `http://127.0.0.1:8188` | ComfyUI HTTP address. |
+| `hidream.comfy_checkpoint_name` | `hidream_o1_image_fp8_scaled.safetensors` | Filename visible to Comfy's checkpoint loader. |
+| `hidream.comfy_timeout` | `1200` | Maximum seconds to wait for one frame. |
+| `hidream.steps` | `40` | Native Full workflow steps, independent of the SD schedule. |
+| `hidream.guidance_scale` | `5.0` | Classifier-free guidance value. |
+| `hidream.sampler` | `dpmpp_2m_sde_gpu` | Sampler used by ComfyUI's native Full workflow. |
+| `hidream.scheduler` | `normal` | Scheduler used by ComfyUI's native Full workflow. |
+| `hidream.noise_scale` | `8.0` | Locks Full's absolute training noise scale, matching the native ComfyUI workflow. |
+| `hidream.use_trained_resolution` | `True` | Sample at the nearest ~4MP O1 training preset, then resize to the configured video dimensions. Required for reliable output at ordinary 512–1024px video sizes. |
+| `hidream.fixed_seed` | `True` | Reuse the same starting noise across frames. |
+| `hidream.reference_mode` | `raw + warped` | `raw only` always edits the current source frame; `warped only` feeds back the prepared temporal composite; the default provides both as ordered references. Frame zero is necessarily raw-only. |
+| `hidream.use_unwarped_style_reference` | `False` | On later style-reference modes, send the untouched previous stylized frame as the style reference instead of the warped/consistency composite. The raw current frame still supplies structure in `raw + warped` mode. |
+| `hidream.label_raw_reference` | `False` | Burn a black footer reading `raw input` into the raw/current-frame reference, including frame zero. |
+| `hidream.label_style_reference` | `False` | In `raw + warped` mode, burn a black footer reading `style reference` into reference 2 only. |
+| `hidream.multi_reference_instruction` | `Transform reference image 1 ...` | Instruction prepended only in two-reference mode. It assigns content/composition to image 1 and style/temporal continuity to image 2. |
+| `hidream.patch_seam_smoothing` | `True` | Apply the native late-step patch seam smoother used by Full's official workflow. |
+| `hidream.patch_seam_start` | `0.8` | Sampling progress at which seam smoothing begins. |
+| `hidream.patch_seam_passes` | `ramp_2_4` | Shifted model evaluations in the smoothing phase; higher/ramped modes cost more time. |
+| `hidream.patch_seam_blend` | `median` | How shifted late-step predictions are combined. |
+
+The exact PNGs sent to ComfyUI are saved per frame as
+`debug/hidream_reference_1_NNNNNN.png` and, in multi-reference mode,
+`debug/hidream_reference_2_NNNNNN.png`. These are captured after trained-size
+resampling and after the optional `style reference` footer is applied. They
+appear under **Edit inputs** in History & Comparison. Comfy uploads also use
+frame-specific filenames so older prompts retain the correct inputs in ComfyUI
+history instead of pointing at a file overwritten by a later frame.
+
+> **Status:** validated live with the FP8-scaled Full checkpoint through ComfyUI
+> on an RTX 4090 Laptop GPU. Square 2048x2048 sampling produced a clean edit;
+> direct 1024x1024 sampling produced noise, so trained-resolution sampling is
+> enabled by default.
+
+## Color matching modes
+
+`color.match_color_strength` enables inter-frame color matching; `0` disables
+it. `color.colormatch_mode` controls where the configured transfer method runs:
+
+- `before` matches the raw/current contribution toward the warped previous
+  frame before diffusion.
+- `after` lets the first render establish the stylized palette, then matches
+  each later rendered frame toward its warped diffusion input before saving and
+  feeding it into the next frame.
+- `both` applies both stages.
+
+WarpFusion's legacy `colormatch_after` boolean is translated on import:
+`False` becomes `before` and `True` becomes `after`. New VibeWarp settings should
+use `colormatch_mode`; `both` has no legacy equivalent.
 
 ## Vendored libraries
 

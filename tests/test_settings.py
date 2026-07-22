@@ -308,6 +308,9 @@ class TestFlowMapping:
         assert cfg['flow']['missed_consistency_weight'] == 0.5
         assert cfg['flow']['overshoot_consistency_weight'] == 0.8
         assert cfg['flow']['edges_consistency_weight'] == 0.2
+        assert cfg['video_assembly']['missed_consistency_weight'] == 0.5
+        assert cfg['video_assembly']['overshoot_consistency_weight'] == 0.8
+        assert cfg['video_assembly']['edges_consistency_weight'] == 0.2
 
     def test_consistency_blur_dilate(self, tmp_path):
         cfg = _load(tmp_path, {'consistency_blur': 3, 'consistency_dilate': 5})
@@ -354,6 +357,18 @@ class TestColorMapping:
     def test_colormatch_after(self, tmp_path):
         cfg = _load(tmp_path, {'colormatch_after': False})
         assert cfg['color']['colormatch_after'] is False
+        assert cfg['color']['colormatch_mode'] == 'before'
+
+    def test_legacy_colormatch_after_true_maps_to_after_mode(self, tmp_path):
+        cfg = _load(tmp_path, {'colormatch_after': True})
+        assert cfg['color']['colormatch_mode'] == 'after'
+
+    def test_explicit_colormatch_mode_supports_both(self, tmp_path):
+        cfg = _load(tmp_path, {
+            'colormatch_after': False,
+            'colormatch_mode': 'both',
+        })
+        assert cfg['color']['colormatch_mode'] == 'both'
 
     def test_colormatch_turbo(self, tmp_path):
         cfg = _load(tmp_path, {'colormatch_turbo': True})

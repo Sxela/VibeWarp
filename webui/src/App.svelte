@@ -5,6 +5,7 @@
   import VideoEditor from './VideoEditor.svelte';
   import Preview from './Preview.svelte';
   import Supporters from './Supporters.svelte';
+  import { comfyConnection, fieldSupportsModel, modelFamily } from './modelCompatibility.js';
   const storageKey='vibewarp.config.v1';
   let config=$state(null), schema=$state(null), selected=$state('project'), job=$state(null), errors=$state([]), busy=$state(false), initialized=$state(false), logCollapsed=$state(false), logElement=$state(null), source;
   // Tabs come from the BACKEND (vibewarp/ui_layout.py stamps tier/group onto every field
@@ -25,7 +26,7 @@
   let tabs=$derived(schema ? schema.tiers : []);
 
   // Flatten the schema into {section, name, schema, tier, group}, in declaration order.
-  let entries=$derived.by(()=>{
+  let allEntries=$derived.by(()=>{
     if(!schema) return [];
     let out=[];
     for(let [name,prop] of Object.entries(schema.properties)){
@@ -36,6 +37,10 @@
     }
     return out;
   });
+  let activeModelFamily=$derived(modelFamily(config?.model_version, schema));
+  let comfyTarget=$derived(comfyConnection(config, schema));
+  let comfyStatus=$state(null);
+  let entries=$derived(allEntries.filter(e=>fieldSupportsModel(e.schema,activeModelFamily)));
   // Groups for the selected tab, preserving field order within each.
   let groups=$derived.by(()=>{
     let out=[];
@@ -137,6 +142,12 @@
     config={...config,[section]:{...config[section],[name]:v}};
   }
   function fieldHint(item){
+    if((item.section==='flux'||item.section==='hidream')
+        && item.name==='use_unwarped_style_reference')
+      return 'Uses frame N-1 before flow warping or consistency fallback; the raw current frame still supplies structure.';
+    if((item.section==='flux'||item.section==='hidream')
+        && item.name==='label_raw_reference')
+      return 'Burns a “raw input” footer into the current-frame reference sent to the edit model and saved in History.';
     if(item.section!=='diffusion'||item.name!=='sampler_tile_size') return '';
     let vanillaSdxl=(config?.model_version||'').toLowerCase().includes('sdxl')&&!config?.animatediff?.enabled;
     return vanillaSdxl
@@ -145,15 +156,55 @@
   }
   const enabledDot=(section)=>config?.[section]?.enabled||config?.[section]?.flow_warp||config?.[section]?.do_freeunet||config?.[section]?.make_captions||config?.[section]?.use_background_mask;
   function mergeDefaults(defaults,saved){if(!saved||typeof saved!=='object'||Array.isArray(saved))return defaults;let result={...defaults};for(let key of Object.keys(saved)){if(defaults[key]&&typeof defaults[key]==='object'&&!Array.isArray(defaults[key]))result[key]=mergeDefaults(defaults[key],saved[key]);else result[key]=saved[key]}return result}
-  async function init(){let r=await fetch('/api/config');let d=await r.json();schema=d.schema;let saved=null;if(!d.prefilled){try{saved=JSON.parse(localStorage.getItem(storageKey))}catch{localStorage.removeItem(storageKey)}}config=mergeDefaults(d.defaults,saved);initialized=true} init();
+  async function init(){
+    let [configResponse,jobsResponse]=await Promise.all([fetch('/api/config'),fetch('/api/jobs')]);
+    let d=await configResponse.json();schema=d.schema;let saved=null;
+    if(!d.prefilled){try{saved=JSON.parse(localStorage.getItem(storageKey))}catch{localStorage.removeItem(storageKey)}}
+    config=mergeDefaults(d.defaults,saved);initialized=true;
+    // The renderer lives on the server, so a browser reload must reconnect to
+    // it rather than forgetting the only handle that can cancel the active job.
+    if(jobsResponse.ok){
+      let existing=await jobsResponse.json();
+      let active=existing.find(item=>item.state==='running')
+              || existing.find(item=>item.state==='queued');
+      if(active) trackJob(active);
+    }
+  } init();
+  // Selecting a Comfy-backed model should explain a stopped/misconfigured server now,
+  // not after the user submits a render and waits for backend initialization to fail.
+  $effect(()=>{
+    let target=comfyTarget;
+    if(!initialized||!target?.url){comfyStatus=null;return}
+    let controller=new AbortController();
+    comfyStatus={checking:true,available:false,...target};
+    let timer=setTimeout(async()=>{
+      try{
+        let r=await fetch(`/api/comfy/status?url=${encodeURIComponent(target.url)}`,
+                          {signal:controller.signal});
+        let result=await r.json();
+        comfyStatus={checking:false,...target,...result};
+      }catch(error){
+        if(error.name!=='AbortError') comfyStatus={checking:false,available:false,...target,
+          message:'Could not check the ComfyUI server'};
+      }
+    },250);
+    return()=>{clearTimeout(timer);controller.abort()};
+  });
   $effect(()=>{if(initialized&&config)localStorage.setItem(storageKey,JSON.stringify(config))});
   $effect(()=>{job?.revision;if(!logCollapsed&&logElement)requestAnimationFrame(()=>{logElement.scrollTop=logElement.scrollHeight})});
   function listen(id){source?.close();source=new EventSource(`/api/jobs/${id}/events`);source.onmessage=(e)=>{job=JSON.parse(e.data);if(['completed','failed','cancelled'].includes(job.state))source.close()}}
+  function trackJob(next){job=next;listen(next.id)}
   async function run(){busy=true;errors=[];let r=await fetch('/api/jobs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(config)});let d=await r.json();busy=false;if(!r.ok){errors=Array.isArray(d.detail)?d.detail:[{message:d.detail||'Submission failed'}];return}job=d;listen(job.id)}
-  async function cancel(){if(job)await fetch(`/api/jobs/${job.id}/cancel`,{method:'POST'})}
+  async function cancel(){
+    if(!job || job.cancel_requested) return;
+    // Apply the server snapshot immediately; the event stream will carry the
+    // terminal state once the renderer and (if applicable) Comfy have stopped.
+    let r=await fetch(`/api/jobs/${job.id}/cancel`,{method:'POST'});
+    if(r.ok) job=await r.json();
+  }
   // System-tier fields describe the MACHINE (model paths, VRAM, threads), so they are
   // stripped from an export and never travel to someone else's install.
-  let systemFields=$derived(entries.filter(e=>e.tier==='system'));
+  let systemFields=$derived(allEntries.filter(e=>e.tier==='system'));
   function withoutSystem(c){
     let out=structuredClone($state.snapshot(c));
     for(let e of systemFields){
@@ -190,12 +241,12 @@
       <button class="ghost" onclick={resetConfig}>Reset</button>
       <button class="ghost" onclick={exportConfig}>Export</button>
     {/if}
-    <button class="run" onclick={run} disabled={busy||job?.state==='running'}>{busy?'Loading…':'Start render'}</button>
+    <button class="run" onclick={run} disabled={busy||['queued','running'].includes(job?.state)}>{busy?'Loading…':'Start render'}</button>
   </div>
 </header>
 {#if mode==='preview'}
   <div class="preview-shell" style={`--log-height:${logCollapsed?'42px':'282px'}`}>
-    <Preview {config} {job} onload={(c)=>{config=c;errors=[];}}/>
+    <Preview {config} {job} onload={(c)=>{config=c;errors=[];}} onjob={trackJob}/>
   </div>
 {:else}
 <main class="render-shell" class:compact-log={logCollapsed} style={`--log-height:${logCollapsed?'42px':'282px'}`}>
@@ -212,6 +263,19 @@
           {#if query}<button class="clear" onclick={()=>query=''} aria-label="Clear search">×</button>{/if}
         </div>
       </div>
+      {#if comfyStatus}
+        <div class="comfy-state" class:checking={comfyStatus.checking}
+             class:available={comfyStatus.available} role="status" aria-live="polite">
+          <i></i>
+          <div>
+            <b>ComfyUI {comfyStatus.checking ? 'checking…' : comfyStatus.available ? 'connected' : 'unavailable'}</b>
+            <span>{comfyStatus.checking ? `Checking ${comfyStatus.url}`
+              : comfyStatus.available ? `${comfyStatus.label} will use ${comfyStatus.url}`
+              : `Nothing is listening at ${comfyStatus.url}. Start ComfyUI or change its server URL.`}</span>
+          </div>
+          <button onclick={()=>goToError(comfyStatus.path)}>Server settings</button>
+        </div>
+      {/if}
       {#if query.trim()}
         {#if !hits.length}
           <div class="panel"><div class="empty">Nothing matches “{query}”.</div></div>
@@ -292,7 +356,7 @@
           <img class="preview" src={`/api/jobs/${job.id}/preview?v=${job.revision}`} alt="Latest render"/>
         </button>
       {:else}<div class="empty">Rendered frames will appear here</div>{/if}
-      {#if job.state==='running' || job.state==='queued'}<button class="cancel" onclick={cancel}>Cancel render</button>{/if}
+      {#if job.state==='running' || job.state==='queued'}<button class="cancel" onclick={cancel} disabled={job.cancel_requested}>{job.cancel_requested?'Cancelling...':'Cancel render'}</button>{/if}
     {:else}<div class="empty tall"><strong>No active job</strong><span>Configure the render and start when ready.</span></div>{/if}
     {#if !seenFirstFrame}<Supporters/>{/if}
   </aside>
@@ -350,6 +414,14 @@
   :global(main.render-shell>aside){display:flex;flex-direction:column}
   :global(.section-head){display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
   .search-box{position:relative;margin-bottom:22px}
+  .comfy-state{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:11px;margin:0 0 16px;padding:12px 14px;border:1px solid #713b41;background:#2b171a;border-radius:10px;color:#f3c3c7}
+  .comfy-state>i{width:8px;height:8px;border-radius:50%;background:#e2636d;box-shadow:0 0 10px #e2636d88}
+  .comfy-state b,.comfy-state span{display:block}.comfy-state b{font-size:12px;color:#fff}.comfy-state span{margin-top:3px;font-size:11px;color:#dba3a8}
+  .comfy-state button{border:1px solid #75454a;background:#351d21;color:#f0c3c6;border-radius:7px;padding:7px 10px;cursor:pointer;font-size:11px}
+  .comfy-state button:hover{border-color:#b85a63;background:#48242a;color:#fff}
+  .comfy-state.checking{border-color:#3b4652;background:#171c22;color:#b9c1cb}.comfy-state.checking>i{background:#7f8995;box-shadow:none;animation:comfy-pulse 1s ease-in-out infinite}.comfy-state.checking span{color:#818b97}
+  .comfy-state.available{border-color:#42552f;background:#172014;color:#d8efb7}.comfy-state.available>i{background:#a9d64e;box-shadow:0 0 10px #a9d64e66}.comfy-state.available span{color:#94a57e}.comfy-state.available button{border-color:#42552f;background:#1c2817;color:#c7dda8}
+  @keyframes comfy-pulse{50%{opacity:.35}}
   .search{width:260px;border:1px solid #303640;background:#0c0f13;color:#eef0f2;border-radius:9px;padding:9px 30px 9px 12px;font:12px Consolas,monospace}
   .search:focus{border-color:#8ea834;outline:none}
   /* Only rendered when there is something to clear — an always-on × next to an empty box
@@ -378,6 +450,13 @@
   .err-jump span{display:block;margin-top:3px;color:#c78d93;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
   /* The monitor image is a button so it can be zoomed; strip the button chrome. */
   .shot{display:block;width:100%;padding:0;border:0;background:none;cursor:zoom-in}
+  :global(button.cancel){cursor:pointer;transition:background .12s,border-color .12s,color .12s,transform .08s,box-shadow .12s}
+  :global(button.cancel:hover:not(:disabled)){background:#351b1f;border-color:#b74f59;color:#ffb7bd;box-shadow:0 0 0 1px #8b3d45}
+  :global(button.cancel:active:not(:disabled)){transform:translateY(1px);background:#4a2429}
+  :global(button.cancel:disabled){cursor:wait;background:#28171a;border-color:#7d3b42;color:#f3a2aa;opacity:1;animation:cancel-pulse 1.1s ease-in-out infinite}
+  :global(button.cancel:disabled::before){content:'';display:inline-block;width:10px;height:10px;margin-right:8px;vertical-align:-1px;border:2px solid #f3a2aa55;border-top-color:#f3a2aa;border-radius:50%;animation:cancel-spin .7s linear infinite}
+  @keyframes cancel-spin{to{transform:rotate(360deg)}}
+  @keyframes cancel-pulse{50%{box-shadow:0 0 0 2px #7d3b4244}}
   .lightbox{position:fixed;inset:0;z-index:30;background:#05070aee;display:grid;place-items:center;padding:32px;cursor:zoom-out;overflow:auto}
   .lightbox img{max-width:100%;max-height:100%;object-fit:contain}
   .close{position:fixed;top:18px;right:24px;width:36px;height:36px;border:1px solid #353a42;border-radius:50%;background:#12151a;color:#d9dce0;font-size:19px;line-height:1;cursor:pointer}

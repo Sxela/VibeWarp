@@ -91,6 +91,45 @@ class TestRunFramesDelegation:
                     pass  # May fail without real models
                 mock_ad.assert_not_called()
 
+    def test_normal_progress_counts_within_nonzero_range(self, tmp_path):
+        cfg = RunConfig(frame_range=[60, 70])
+        progress = []
+        ctx = RenderContext(
+            config=cfg, batch_folder=str(tmp_path),
+            progress_fn=lambda current, total: progress.append((current, total)))
+
+        def rendered(ctx, state, frame_num, start_frame, batch_folder, fmt):
+            return Image.new('RGB', (8, 8)), str(tmp_path / f'{frame_num}.png')
+
+        with patch('vibewarp.core.diffusion._render_single_frame', side_effect=rendered):
+            run_frames(ctx, frame_range=[60, 70])
+
+        assert progress[0] == (1, 11)
+        assert progress[-1] == (11, 11)
+        assert [current for current, _ in progress] == list(range(1, 12))
+
+    def test_resume_restores_previous_output_and_original_sequence_start(self, tmp_path):
+        """A resumed edit must use the preceding stylized frame, not restart raw."""
+        cfg = RunConfig(frame_range=[0, 3], batch_name='resume')
+        previous = tmp_path / 'resume(0)_000001.png'
+        Image.new('RGB', (2, 2), (12, 34, 56)).save(previous)
+        ctx = RenderContext(config=cfg, batch_folder=str(tmp_path))
+        seen = []
+
+        def rendered(context, state, frame_num, start_frame, batch_folder, fmt):
+            seen.append((frame_num, start_frame, state.prev_frame.getpixel((0, 0))))
+            path = tmp_path / f'resume(0)_{frame_num:06d}.png'
+            image = Image.new('RGB', (2, 2))
+            image.save(path)
+            state.prev_frame = image
+            return image, str(path)
+
+        with patch('vibewarp.core.diffusion._render_single_frame', side_effect=rendered):
+            paths = run_frames(ctx, frame_range=[0, 3], resume_from=2)
+
+        assert seen[0] == (2, 0, (12, 34, 56))
+        assert len(paths) == 2
+
 
 class TestRunFramesAnimatediff:
     """The renderer must denoise a BATCH of frames jointly, not loop per frame.
@@ -141,6 +180,19 @@ class TestRunFramesAnimatediff:
             run_frames_animatediff(ctx, frame_range=[0, 20])
         assert sizes
         assert all(size >= ctx.config.animatediff.context_length for size in sizes)
+
+    def test_progress_counts_unique_frames_not_overlap_work(self, tmp_path):
+        ctx = self._ctx(tmp_path, frames=20, batch_length=16, overlap=4)
+        progress = []
+        ctx.progress_fn = lambda current, total: progress.append((current, total))
+        with patch('vibewarp.core.diffusion._adiff_run_batch') as run_batch:
+            run_batch.side_effect = lambda ctx, frames, *a, **k: [
+                Image.new('RGB', (64, 64)) for _ in frames]
+            run_frames_animatediff(ctx, frame_range=[0, 20])
+
+        assert progress[0] == (1, 21)
+        assert progress[-1] == (21, 21)
+        assert [current for current, _ in progress] == list(range(1, 22))
 
     def test_refuses_fewer_frames_than_a_context_window(self, tmp_path):
         """A window shorter than context_length would rearrange to the wrong

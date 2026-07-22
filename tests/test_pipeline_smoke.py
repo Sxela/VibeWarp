@@ -6,7 +6,8 @@ import pytest
 
 from vibewarp.config import FreeUConfig, RunConfig
 from vibewarp.core.diffusion import FrameState, RenderContext, get_frame_schedule
-from vibewarp.pipeline import _configure_unified_forward, _resolve_controlnet_path, setup_directories
+from vibewarp.pipeline import (assemble_video, _configure_unified_forward,
+                               _resolve_controlnet_path, setup_directories)
 
 
 class TestSetupDirectories:
@@ -24,6 +25,28 @@ class TestSetupDirectories:
         cfg = RunConfig(root_dir=str(tmp_path))
         setup_directories(cfg)
         setup_directories(cfg)  # should not raise
+
+    def test_resume_reuses_exact_run_directory(self, tmp_path):
+        run = tmp_path / 'images_out' / 'batch' / '7'
+        run.mkdir(parents=True)
+        cfg = RunConfig(root_dir=str(tmp_path), batch_name='batch')
+        dirs = setup_directories(cfg, existing_run_dir=str(run))
+        assert dirs['batch'] == str(run.resolve())
+        assert not (run.parent / '8').exists()
+
+
+def test_assemble_video_uses_all_frames_in_existing_run(tmp_path, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        'vibewarp.pipeline.create_video',
+        lambda **kwargs: captured.update(kwargs) or kwargs['output_path'])
+    config = RunConfig(batch_name='clip')
+
+    result = assemble_video(config, str(tmp_path))
+
+    assert captured['frames_dir'] == str(tmp_path.resolve())
+    assert captured['batch_name'] == 'clip'
+    assert result == str(tmp_path / 'clip.mp4')
 
 
 class TestControlNetDirectory:

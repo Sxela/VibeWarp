@@ -64,6 +64,11 @@ that hid five bugs in AnimateDiff before it was finally compared.
   softcap · tiled VAE · colormatch · temporalnet CN · reference CN · `fixed_code` noise ·
   `pingpong_noise` · `batched_adiff_rec_noise` · `rec_sliding_ctx`** — no parity test
   exists for any of these.
+- **Flux 2 Klein Edit** (`model_version="flux2_klein_edit"`) — an edit model on
+  its own render path, reusing the warp loop but none of the k-diffusion stack.
+  The Comfy server backend and native reference-latent graph are CPU-tested and
+  GPU-validated with the Klein 4B FP8 checkpoint. Video feedback-loop quality,
+  multi-reference tuning, and longer-run temporal behavior still need evaluation.
 
 ---
 

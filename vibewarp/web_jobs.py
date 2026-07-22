@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
 from vibewarp.config import RunConfig
+from vibewarp.cancellation import cancellation_scope
 from vibewarp.utils.misc import release_vram
 
 
@@ -48,6 +49,8 @@ class Job:
     run_dir: Optional[str] = field(default=None, repr=False)
     logs: List[str] = field(default_factory=list)
     revision: int = 0
+    operation: str = "render"
+    resume_from: int = 0
     condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
 
     def snapshot(self, *, include_config: bool = False) -> dict:
@@ -61,6 +64,7 @@ class Job:
             "artifacts": list(self.artifacts),
             "preview_available": bool(self.preview_path),
             "logs": list(self.logs), "revision": self.revision,
+            "operation": self.operation,
         }
         if include_config:
             data["config"] = asdict(self.config)
@@ -100,6 +104,35 @@ class JobManager:
 
     def submit(self, config: RunConfig) -> Job:
         job = Job(id=uuid.uuid4().hex, config=copy.deepcopy(config))
+        with self._wake:
+            self._jobs[job.id] = job
+            self._queue.append(job.id)
+            self._ensure_worker()
+            self._wake.notify_all()
+        return job
+
+    def submit_resume(self, config: RunConfig, run_dir: str, resume_from: int) -> Job:
+        job = Job(
+            id=uuid.uuid4().hex,
+            config=copy.deepcopy(config),
+            operation="resume",
+            resume_from=resume_from,
+            run_dir=os.path.abspath(run_dir),
+            message=f"Waiting to resume from frame {resume_from + 1}",
+        )
+        return self._enqueue(job)
+
+    def submit_video(self, config: RunConfig, run_dir: str) -> Job:
+        job = Job(
+            id=uuid.uuid4().hex,
+            config=copy.deepcopy(config),
+            operation="video",
+            run_dir=os.path.abspath(run_dir),
+            message="Waiting to assemble video",
+        )
+        return self._enqueue(job)
+
+    def _enqueue(self, job: Job) -> Job:
         with self._wake:
             self._jobs[job.id] = job
             self._queue.append(job.id)
@@ -165,7 +198,11 @@ class JobManager:
                 if job.cancel_requested:
                     continue
                 job.state, job.stage = "running", "starting"
-                job.message, job.started_at = "Starting render", _now()
+                job.message = (
+                    "Starting video assembly" if job.operation == "video"
+                    else "Starting resumed render" if job.operation == "resume"
+                    else "Starting render")
+                job.started_at = _now()
                 self._touch(job)
             self._run(job)
             self._prune()
@@ -188,18 +225,40 @@ class JobManager:
                 job.stage = "rendering"
                 job.frame, job.total_frames = frame, total
                 job.progress = min(100.0, frame / total * 100) if total else 0.0
-                job.message = f"Rendering frame {frame}/{total}"
-                update_preview(frame)
+                selected = job.config.frame_range
+                source_start = (job.resume_from if job.operation == "resume" else
+                                selected[0] if selected and selected != [0, 0] else 0)
+                # Config/source frames are zero-based; the UI describes them in
+                # the same human one-based numbering used for extracted frames.
+                source_frame = source_start + max(0, frame - 1) + 1
+                job.message = (
+                    f"Rendering source frame {source_frame} ({frame}/{total})")
+                update_preview(source_frame - 1)
                 self._touch(job)
 
         writer = _LineWriter(lambda line: self._log(job, line))
         try:
-            runner = self._runner
-            if runner is None:
-                from vibewarp.pipeline import run
-                runner = run
             with redirect_stdout(writer), redirect_stderr(writer):
-                paths = runner(job.config, progress_fn=progress)
+                with cancellation_scope(lambda: job.cancel_requested):
+                    if job.operation == "video":
+                        from vibewarp.pipeline import assemble_video
+                        with self._lock:
+                            job.stage = "assembling"
+                            job.message = "Assembling video from completed frames"
+                            self._touch(job)
+                        paths = [assemble_video(job.config, job.run_dir)]
+                    else:
+                        runner = self._runner
+                        if runner is None:
+                            from vibewarp.pipeline import run
+                            runner = run
+                        kwargs = {"progress_fn": progress}
+                        if job.operation == "resume":
+                            kwargs.update(
+                                resume_from=job.resume_from,
+                                existing_run_dir=job.run_dir,
+                            )
+                        paths = runner(job.config, **kwargs)
             writer.flush()
             with self._lock:
                 job.artifacts = [os.path.abspath(path) for path in (paths or [])]
@@ -207,7 +266,9 @@ class JobManager:
                     job.preview_path = job.artifacts[-1]
                 job.state = job.stage = "completed"
                 job.progress = 100.0
-                job.message = f"Completed with {len(job.artifacts)} rendered frames"
+                job.message = (
+                    "Video is ready" if job.operation == "video" else
+                    f"Completed with {len(job.artifacts)} rendered frames")
         except KeyboardInterrupt:
             with self._lock:
                 job.state = job.stage = "cancelled"

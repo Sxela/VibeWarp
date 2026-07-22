@@ -22,6 +22,7 @@ import torchvision.transforms.functional as TF
 from PIL import Image
 from tqdm import tqdm
 
+from vibewarp.cancellation import raise_if_cancelled
 from vibewarp.config import RunConfig
 from vibewarp.utils.scheduling import get_scheduled_arg, interpolate_array
 
@@ -63,6 +64,10 @@ class RenderContext:
     clip_vision_model: Any = None  # CLIP vision model for IP-Adapter encoding
     # AnimateDiff MotionWrapper — the renderer must tell it the context length.
     motion_module: Any = None
+    # Flux edit pipeline (diffusers) — set for model_version='flux2_klein_edit'
+    # instead of sd_model/model_wrap. See core/flux.py.
+    edit_backend: Any = None
+    flux_pipe: Any = None
 
     # Sampler function (from k_diffusion.sampling)
     sampler_fn: Optional[Callable] = None
@@ -775,14 +780,12 @@ def warp_between_frames(
             dilate=cc_dilate,
         )
 
-    # Set up color matching callback
+    # Set up input color matching callback. "after" is handled once the model
+    # returns in _render_single_frame; "both" enables both locations.
     match_color_fn = None
-    if config.color.match_color_strength > 0:
-        from vibewarp.color.matching import match_color_var
-        opacity = config.color.match_color_strength
-        match_color_fn = lambda stylized, raw: match_color_var(
-            stylized, raw, opacity=opacity,
-        ).astype(np.float64)
+    if _uses_colormatch(config, 'before'):
+        match_color_fn = lambda stylized, raw: _match_color_array(
+            stylized, raw, config).astype(np.float64)
 
     # Set up brightness callback
     adjust_brightness_fn = None
@@ -862,6 +865,57 @@ def warp_between_frames(
             warped, frame_num + 1, config, ctx.video_frames_folder)
 
     return warped
+
+
+def _uses_colormatch(config: RunConfig, phase: str) -> bool:
+    """Whether color matching is enabled for the before/after render phase."""
+    if config.color.match_color_strength <= 0:
+        return False
+    mode = config.color.colormatch_mode
+    return mode == phase or mode == 'both'
+
+
+def _match_color_array(reference, target, config: RunConfig) -> np.ndarray:
+    """Match target colors to reference using the configured transfer method."""
+    from vibewarp.color.matching import match_color_var
+
+    transfer_fn = None
+    regrain_fn = None
+    method = config.color.colormatch_method.lower()
+    if method in ('lab', 'mean') or config.color.colormatch_regrain:
+        from vibewarp.vendor.python_color_transfer.color_transfer import ColorTransfer
+        transfer = ColorTransfer()
+        if method == 'lab':
+            transfer_fn = transfer.lab_transfer
+        elif method == 'mean':
+            transfer_fn = transfer.mean_std_transfer
+        if config.color.colormatch_regrain:
+            regrain_fn = transfer.RG.regrain
+
+    return match_color_var(
+        reference,
+        target,
+        opacity=config.color.match_color_strength,
+        transfer_fn=transfer_fn,
+        regrain_fn=regrain_fn,
+        regrain=config.color.colormatch_regrain,
+    )
+
+
+def _apply_post_colormatch(
+    image: Image.Image,
+    reference_path: Optional[str],
+    config: RunConfig,
+) -> Image.Image:
+    """Match a rendered frame to its warped input palette when requested."""
+    if not _uses_colormatch(config, 'after'):
+        return image
+    if not reference_path or not os.path.exists(reference_path):
+        return image
+    reference = Image.open(reference_path).convert('RGB').resize(
+        image.size, Image.LANCZOS)
+    matched = _match_color_array(reference, image.convert('RGB'), config)
+    return Image.fromarray(matched)
 
 
 # ---- Per-frame IP-Adapter ----
@@ -1092,6 +1146,13 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
         Rendered PIL Image for this frame.
     """
     config = ctx.config
+
+    # Flux edit models take an entirely separate render path (diffusers DiT),
+    # not the CompVis / k-diffusion sampler below.
+    from vibewarp.core.model_loader import is_edit_model
+    if is_edit_model(config.model_version):
+        return render_frame_edit(ctx, state)
+
     frame_num = state.frame_num
     W = config.video.width
     H = config.video.height
@@ -1386,6 +1447,135 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
     return image
 
 
+def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
+    """Render a single frame with the configured image-edit backend.
+
+    The model-agnostic frame loop (`_render_single_frame`) has already set
+    `state.init_image` to the image to restyle: the raw video frame on the first
+    frame, the flow-warped consistency-weighted previous render thereafter. This
+    function edits that image with the frame's prompt.
+
+    Both edit backends can use raw current content as reference 1 and the
+    prepared warp as style/temporal reference 2, or either image on its own.
+    """
+    config = ctx.config
+    from vibewarp.core.model_loader import is_flux_model
+    flux_backend = is_flux_model(config.model_version)
+    edit_config = config.flux if flux_backend else config.hidream
+    frame_num = state.frame_num
+    W = config.video.width
+    H = config.video.height
+
+    sched = get_frame_schedule(frame_num, config)
+    seed = sched['seed']
+    if not edit_config.fixed_seed and frame_num > 0:
+        seed += frame_num
+
+    # Prompts (with {caption} substitution, matching the SD path). LORA tags are
+    # meaningless for Flux, so we do not strip/apply them here.
+    text_prompt = _get_prompt_for_frame(frame_num, config.text_prompts)
+    neg_prompt = _get_prompt_for_frame(frame_num, config.negative_prompts)
+    from vibewarp.core.captioning import get_caption, apply_caption
+    _captions_folder = (ctx.video_frames_folder + 'Captions'
+                        if ctx.video_frames_folder else '')
+    text_prompt = apply_caption(text_prompt, get_caption(frame_num, _captions_folder))
+
+    # Edit target: the warped previous render (or raw frame 0). Falls back to the
+    # raw current video frame if init_image was never set.
+    edit_path = state.init_image
+    if not edit_path or not os.path.exists(edit_path):
+        edit_path = os.path.join(
+            ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg") if ctx.video_frames_folder else None
+    if not edit_path or not os.path.exists(edit_path):
+        raise FileNotFoundError(
+            f"Edit frame {frame_num}: no edit image (init_image={state.init_image!r})")
+    using_unwarped_style = bool(
+        frame_num > 0
+        and edit_config.reference_mode != 'raw only'
+        and edit_config.use_unwarped_style_reference
+        and state.prev_frame is not None)
+    if using_unwarped_style:
+        edit_image = state.prev_frame.convert('RGB')
+        if edit_image.size != (W, H):
+            edit_image = edit_image.resize((W, H), Image.LANCZOS)
+        print(
+            f"  Edit frame {frame_num}: using unwarped frame {frame_num - 1} "
+            "as the style reference")
+    else:
+        edit_image = Image.open(edit_path).convert('RGB').resize((W, H), Image.LANCZOS)
+
+    # warp_between_frames has already persisted the exact processed mask used
+    # for this render frame. Feed the grayscale keep/fallback map as RGB because
+    # Flux reference latents use the same image path as ordinary references.
+    mask_context_image = None
+    if (flux_backend and frame_num > 0
+            and config.flux.feed_consistency_mask_as_context
+            and ctx.batch_folder):
+        mask_path = os.path.join(
+            ctx.batch_folder, 'debug', f"consistency_mask_{frame_num:06d}.png")
+        if os.path.exists(mask_path):
+            mask_context_image = Image.open(mask_path).convert('RGB').resize(
+                (W, H), Image.NEAREST)
+
+    # The final frame N-1 image is still in state.prev_frame here; the frame loop
+    # only replaces it after this render. Supplying it separately lets Klein see
+    # background content that the optical-flow warp moved outside the edit target.
+    prev_context_image = None
+    if (flux_backend and frame_num > 0 and config.flow.flow_warp
+            and config.flux.feed_prev_frame_as_context
+            and not using_unwarped_style
+            and state.prev_frame is not None):
+        prev_context_image = state.prev_frame.convert('RGB')
+        if prev_context_image.size != (W, H):
+            prev_context_image = prev_context_image.resize((W, H), Image.LANCZOS)
+
+    # Structural context: the raw current video frame. Edit backends resolve its
+    # ordered role from their reference-mode setting.
+    context_image = None
+    feed_raw_reference = (
+        config.flux.reference_mode in ('raw only', 'raw + warped') if flux_backend
+        else config.hidream.reference_mode in ('raw only', 'raw + warped')
+    )
+    if feed_raw_reference and ctx.video_frames_folder:
+        raw_path = os.path.join(ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg")
+        # Frame zero already uses the raw frame as its primary reference. Avoid
+        # conditioning twice on the same image.
+        if (os.path.exists(raw_path)
+                and os.path.abspath(raw_path) != os.path.abspath(edit_path)):
+            context_image = Image.open(raw_path).convert('RGB').resize((W, H), Image.LANCZOS)
+
+    from vibewarp.core.edit import render_edit_frame as run_edit_backend
+    with _phase(ctx, 'run_sd_total'):
+        image = run_edit_backend(
+            ctx.edit_backend if ctx.edit_backend is not None else ctx.flux_pipe,
+            config,
+            edit_image=edit_image,
+            prompt=text_prompt,
+            negative_prompt=neg_prompt,
+            seed=seed,
+            width=W, height=H,
+            context_image=context_image,
+            prev_context_image=prev_context_image,
+            mask_context_image=mask_context_image,
+            debug_dir=(os.path.join(ctx.batch_folder, 'debug')
+                       if ctx.batch_folder else None),
+            frame_num=frame_num,
+        )
+
+    if image.size != (W, H):
+        image = image.resize((W, H), Image.LANCZOS)
+
+    state.prev_frame = image
+    gc.collect()
+    torch.cuda.empty_cache()
+    return image
+
+
+def render_frame_flux(ctx: RenderContext, state: FrameState) -> Image.Image:
+    """Backward-compatible alias for the generalized edit renderer."""
+    return render_frame_edit(ctx, state)
+
+
 def _get_prompt_for_frame(frame_num: int, prompts: Dict[int, str]) -> str:
     """Get the active prompt for a given frame number.
 
@@ -1520,6 +1710,15 @@ def _render_single_frame(
     image = render_frame(ctx, state)
     _rlog(f"diffusion render (frame {frame_num})", _rtime.time() - _t_render)
 
+    # Let the first rendered frame establish the stylized palette. From the
+    # second frame onward, "after" matches each new output back to the warped
+    # input that carried the previous stylized frame's colors. This applies to
+    # both the SD and Flux render paths and updates the feedback image too.
+    if frame_num > start_frame:
+        with _phase(ctx, 'colormatch_after'):
+            image = _apply_post_colormatch(image, state.init_image, config)
+        state.prev_frame = image
+
     # Save
     filename = f"{config.batch_name}(0)_{frame_num:06d}.{fmt}"
     filepath = os.path.join(batch_folder, filename)
@@ -1590,7 +1789,8 @@ def run_frames(
     if config.animatediff.enabled:
         return run_frames_animatediff(ctx, frame_range=frame_range, resume_from=resume_from)
 
-    start_frame, end_frame = _resolve_frame_range(ctx, frame_range, resume_from)
+    sequence_start, end_frame = _resolve_frame_range(ctx, frame_range, 0)
+    start_frame = max(sequence_start, resume_from)
     fmt = config.video.save_img_format
 
     state = FrameState(
@@ -1601,24 +1801,40 @@ def run_frames(
     output_paths = []
     batch_folder = ctx.batch_folder
 
+    # A resumed frame is still temporally downstream of the configured first
+    # frame. Restore the last completed output so optical-flow/edit-reference
+    # feedback continues exactly where the cancelled job stopped.
+    if start_frame > sequence_start:
+        previous_path = os.path.join(
+            batch_folder,
+            f"{config.batch_name}(0)_{start_frame - 1:06d}.{fmt}",
+        )
+        if not os.path.isfile(previous_path):
+            raise FileNotFoundError(
+                f"Cannot resume at frame {start_frame}: previous output is missing: "
+                f"{previous_path}")
+        with Image.open(previous_path) as previous:
+            state.prev_frame = previous.convert('RGB').copy()
+
     # Pre-cache all unique prompt embeddings (CLIP on GPU once, then offload)
     _precache_conditioning(ctx, start_frame, end_frame)
 
     pbar = tqdm(range(start_frame, end_frame), desc="Rendering frames")
     for frame_num in pbar:
+        raise_if_cancelled()
         frame_ts = time.time()
         if _PROFILE_ENABLED:
             ctx._phase_times = {}
 
         image, filepath = _render_single_frame(
-            ctx, state, frame_num, start_frame, batch_folder, fmt,
+            ctx, state, frame_num, sequence_start, batch_folder, fmt,
         )
         output_paths.append(filepath)
 
         if ctx.save_frame_fn:
             ctx.save_frame_fn(image, frame_num)
         if ctx.progress_fn:
-            ctx.progress_fn(frame_num, end_frame)
+            ctx.progress_fn(frame_num - start_frame + 1, end_frame - start_frame)
 
         # Inter-frame memory cleanup
         gc.collect()
@@ -2060,12 +2276,15 @@ def run_frames_animatediff(
             filename = f"{config.batch_name}(0)_{frame_num:06d}.{fmt}"
             filepath = os.path.join(ctx.batch_folder, filename)
             image.save(filepath)
-            if filepath not in output_paths:
+            is_new_frame = filepath not in output_paths
+            if is_new_frame:
                 output_paths.append(filepath)
             if ctx.save_frame_fn:
                 ctx.save_frame_fn(image, frame_num)
-            if ctx.progress_fn:
-                ctx.progress_fn(frame_num, end_frame)
+            if ctx.progress_fn and is_new_frame:
+                # Overlapping AnimateDiff batches revisit seam frames. Progress
+                # counts unique selected frames, not batch work or source indices.
+                ctx.progress_fn(len(output_paths), end_frame - start_frame)
 
         previous_tail = images[-ad.batch_overlap:] if ad.batch_overlap > 0 else []
         gc.collect()

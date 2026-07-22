@@ -190,6 +190,10 @@ class ColorConfig:
     match_color_strength: float = 0.0
     colormatch_method: str = 'PDF'
     colormatch_regrain: bool = False
+    # before: stabilize the warped diffusion input; after: stabilize the newly
+    # rendered frame against that input; both: apply both stages.
+    colormatch_mode: str = 'before'
+    # Legacy WarpFusion import field. New code uses colormatch_mode.
     colormatch_after: bool = True
     colormatch_turbo: bool = False
 
@@ -244,6 +248,11 @@ class VideoAssemblyConfig:
     use_deflicker: bool = False                     # ffmpeg deflicker=mode=pm:size=10 filter
     blend_mode: str = 'optical flow'                # 'None', 'linear', or 'optical flow'
     blend: float = 0.5                              # blend factor for linear/optical-flow modes
+    # WarpFusion's export-time consistency mask channel weights. These are
+    # intentionally separate from the render-loop FlowConfig mask controls.
+    missed_consistency_weight: float = 1.0
+    overshoot_consistency_weight: float = 1.0
+    edges_consistency_weight: float = 1.0
     upscale_ratio: int = 1                          # 1 = disabled; 2 or 4 via RealESRGAN
     upscale_model: str = 'realesr-animevideov3'     # RealESRGAN model name
     upscale_model_path: str = ''                    # path to .pth weights file (required when upscale_ratio>1)
@@ -448,6 +457,111 @@ class IPAdapterConfig:
 
 
 @dataclass
+class FluxConfig:
+    """FLUX.2 Klein Edit through ComfyUI or the optional Diffusers backend.
+
+    The first frame uses the raw video frame as its reference. Later frames can
+    use raw current content, VibeWarp's flow-warped consistency-weighted previous
+    render, or both as ordered content/style references. The unwarped previous
+    stylized frame and consistency mask remain optional additional references.
+    """
+    # Comfy is the exploratory/default backend because it directly supports the
+    # split FP8/GGUF ecosystem checkpoints. Diffusers remains available for a
+    # complete Hugging Face diffusers-format repository.
+    backend: str = 'comfy'
+    comfy_server_url: str = 'http://127.0.0.1:8188'
+    comfy_unet_name: str = 'flux-2-klein-4b-fp8.safetensors'
+    comfy_clip_name: str = 'qwen_3_4b.safetensors'
+    comfy_vae_name: str = 'flux2-vae.safetensors'
+    comfy_timeout: float = 600.0
+    model_repo: str = 'black-forest-labs/FLUX.2-klein-4B'
+    # Legacy field retained while the experimental Diffusers backend remains.
+    # Klein reference editing through Comfy does not expose img2img strength.
+    denoise: float = 1.0
+    guidance_scale: float = 1.0
+    steps: int = 4
+    # Reference editing starts every frame from noise. Reusing that noise is
+    # important for temporal stability; opt out only for deliberate variation.
+    fixed_seed: bool = True
+    # Choose raw-only instruction editing, warped-only temporal feedback, or
+    # ordered raw-content + warped-style multi-reference conditioning.
+    reference_mode: str = 'raw + warped'
+    # Replace the warped/consistency-composited style reference with frame
+    # N-1's untouched final render. The raw current frame can still carry the
+    # new frame's structure in ``raw + warped`` mode.
+    use_unwarped_style_reference: bool = False
+    # Burn a visible ``raw input`` footer into the current-frame content
+    # reference. The saved debug image contains the same labeled pixels.
+    label_raw_reference: bool = False
+    # Overlay a visible footer on the warped style reference. Raw content is
+    # never labeled.
+    label_style_reference: bool = False
+    multi_reference_instruction: str = (
+        'Transform reference image 1 into the visual style shown in reference '
+        'image 2. Preserve the composition, geometry, objects, and motion of '
+        'image 1; use image 2 as the style and temporal continuity reference.'
+    )
+    # Pass the processed optical-flow consistency mask as an additional visual
+    # reference. White marks trusted warp pixels; black marks raw-frame fallback.
+    feed_consistency_mask_as_context: bool = False
+    # Also pass frame N-1's final stylized image, before optical-flow warping,
+    # so the edit model can see background content displaced by the warp.
+    feed_prev_frame_as_context: bool = False
+    # Prompt token budget used only by the Diffusers backend.
+    max_sequence_length: int = 512
+
+
+@dataclass
+class HiDreamConfig:
+    """HiDream-O1 pixel-space instruction editing through ComfyUI.
+
+    Frame zero uses the raw image as a single instruction-edit reference. Later
+    frames can use the raw current frame as content and the consistency-composited,
+    flow-warped previous render as a second style/continuity reference. The model
+    starts from fixed pixel-space noise; ``fixed_seed`` controls whether that
+    noise is reused across the video.
+    """
+    comfy_server_url: str = 'http://127.0.0.1:8188'
+    comfy_checkpoint_name: str = 'hidream_o1_image_fp8_scaled.safetensors'
+    comfy_timeout: float = 1200.0
+    # Defaults mirror ComfyUI's native Full workflow. ModelNoiseScale is not a
+    # cosmetic tuning knob: Full was trained at absolute noise scale 8.
+    steps: int = 40
+    guidance_scale: float = 5.0
+    sampler: str = 'dpmpp_2m_sde_gpu'
+    scheduler: str = 'normal'
+    noise_scale: float = 8.0
+    # O1 is sharply resolution-dependent: 1024x1024 produces noise-like output.
+    # Render at the nearest ~4MP training preset, then downsample to video size.
+    use_trained_resolution: bool = True
+    fixed_seed: bool = True
+    # Choose raw-only instruction editing, warped-only temporal feedback, or
+    # ordered raw-content + warped-style multi-reference conditioning.
+    reference_mode: str = 'raw + warped'
+    # Replace the warped/consistency-composited style reference with frame
+    # N-1's untouched final render. This avoids baking flow seams and raw-frame
+    # consistency fallback into the model's visual style reference.
+    use_unwarped_style_reference: bool = False
+    # Burn a visible ``raw input`` footer into the current-frame content
+    # reference. This is independent from the style-reference label.
+    label_raw_reference: bool = False
+    # Overlay a visible footer on reference 2 so the model can recognize its
+    # role. The raw content reference is never labeled.
+    label_style_reference: bool = False
+    multi_reference_instruction: str = (
+        'Transform reference image 1 into the visual style shown in reference '
+        'image 2. Preserve the composition, geometry, objects, and motion of '
+        'image 1; use image 2 as the style and temporal continuity reference.'
+    )
+    # Full's official workflow smooths 32-pixel patch-grid seams during the
+    # final sampling phase. This costs extra model evaluations only near the end.
+    patch_seam_smoothing: bool = True
+    patch_seam_start: float = 0.8
+    patch_seam_passes: str = 'ramp_2_4'
+    patch_seam_blend: str = 'median'
+
+
+@dataclass
 class RunConfig:
     """Top-level run configuration combining all sub-configs."""
     # Paths
@@ -493,3 +607,5 @@ class RunConfig:
     animatediff: AnimateDiffConfig = field(default_factory=AnimateDiffConfig)
     ipadapter: IPAdapterConfig = field(default_factory=IPAdapterConfig)
     reconstruction_noise: ReconstructionNoiseConfig = field(default_factory=ReconstructionNoiseConfig)
+    flux: FluxConfig = field(default_factory=FluxConfig)
+    hidream: HiDreamConfig = field(default_factory=HiDreamConfig)

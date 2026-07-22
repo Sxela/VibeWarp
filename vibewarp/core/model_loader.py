@@ -236,6 +236,26 @@ def is_sdxl_model(model_version: str) -> bool:
     return 'sdxl' in model_version.lower()
 
 
+def is_flux_model(model_version: str) -> bool:
+    """Check if a model version string refers to a Flux (diffusers) model.
+
+    Flux models take an entirely separate render path (core/flux.py) — a
+    flow-matching DiT driven through `diffusers` — rather than the CompVis /
+    k-diffusion stack the SD/SDXL versions use.
+    """
+    return 'flux' in model_version.lower()
+
+
+def is_hidream_model(model_version: str) -> bool:
+    """Check if a model version selects the HiDream-O1 edit backend."""
+    return 'hidream' in model_version.lower()
+
+
+def is_edit_model(model_version: str) -> bool:
+    """Whether rendering is delegated to an external image-edit backend."""
+    return is_flux_model(model_version) or is_hidream_model(model_version)
+
+
 def configure_sdxl_clip_layer_norm(sd_model: Any, apply_final_layer_norm: bool) -> None:
     """Toggle CLIP's final layer norm on SDXL's clip-skipped hidden state.
 

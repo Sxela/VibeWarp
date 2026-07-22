@@ -277,6 +277,10 @@ def create_video(
     video_frames_folder: str = '',
     mask_clip_low: int = 0,
     mask_clip_high: int = 255,
+    # Export-time consistency channel weights (appended for call compatibility)
+    missed_consistency_weight: float = 1.0,
+    overshoot_consistency_weight: float = 1.0,
+    edges_consistency_weight: float = 1.0,
 ) -> str:
     """Assemble rendered frames into a video file.
 
@@ -296,6 +300,9 @@ def create_video(
         blend_mode: 'None', 'linear', or 'optical flow'
         blend: blend factor for inter-frame blending
         check_consistency: use consistency maps for flow blending
+        missed_consistency_weight: export CC weight for missed pixels (R)
+        overshoot_consistency_weight: export CC weight for overshoot pixels (G)
+        edges_consistency_weight: export CC weight for edge pixels (B)
         threads: number of processing threads
         ffmpeg_path: path to ffmpeg executable
         flow_dir: directory with optical flow files
@@ -358,7 +365,9 @@ def create_video(
 
     if blend_mode != 'None' and len(frames) > 1:
         _blend_frames(frames, blend_dir, blend_mode, blend, flow_dir,
-                      check_consistency, threads, _postprocess)
+                      check_consistency, threads, _postprocess,
+                      missed_consistency_weight, overshoot_consistency_weight,
+                      edges_consistency_weight)
     else:
         for i, f in enumerate(tqdm(frames, desc="Copying frames")):
             img = _postprocess(Image.open(f), i)
@@ -383,7 +392,7 @@ def create_video(
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
-        print(f"ffmpeg error: {result.stderr}")
+        raise RuntimeError(f"ffmpeg video encoding failed: {result.stderr}")
 
     # Clean up upsampler before audio pass
     if upsampler is not None:
@@ -398,7 +407,10 @@ def create_video(
 
 
 def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
-                  check_consistency, threads, postprocess_fn=None):
+                  check_consistency, threads, postprocess_fn=None,
+                  missed_consistency_weight=1.0,
+                  overshoot_consistency_weight=1.0,
+                  edges_consistency_weight=1.0):
     """Blend consecutive frames for smoother video output.
 
     Args:
@@ -437,7 +449,16 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
                         cc_path = _find_cc_file(flow_dir, flow_path)
                         if cc_path and os.path.exists(cc_path):
                             cc_map = np.array(Image.open(cc_path).convert('RGB'))
-                            weights = load_cc(cc_map)
+                            # The notebook's video-blending cell uses load_cc's
+                            # export defaults, not the render-mask defaults.
+                            weights = load_cc(
+                                cc_map,
+                                missed_consistency_weight,
+                                overshoot_consistency_weight,
+                                edges_consistency_weight,
+                                blur=2,
+                                dilate=0,
+                            )
                     img = warp_frame(
                         Image.fromarray(prev), Image.fromarray(curr),
                         flow, blend=blend, weights=weights, video_mode=True,

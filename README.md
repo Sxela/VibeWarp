@@ -29,7 +29,9 @@ produce, not an estimate.
 **History & Comparison** — every past run, inspectable frame by frame and layer by layer:
 the init frame, warped init, processed consistency mask, each ControlNet's source and
 detected map, the diffusion input, and the output. Load any run's settings back into the
-form to iterate on it.
+form to iterate on it. Cancelled runs keep their completed frames: resume from the first
+missing frame, assemble a partial video at any time, and play assembled videos in place.
+Ctrl/Cmd-click any two runs to compare every changed saved setting side by side.
 
 ![The history view: past runs on the left, and one frame compared across its layers](docs/assets/ui-history.jpg)
 
@@ -101,6 +103,28 @@ Models land in a `models/` folder under the current directory by default;
 override with `--models-root`. See [docs/cli.md](docs/cli.md) for manual
 download links.
 
+The FLUX.2 and HiDream backends require a separate, current ComfyUI install.
+Get it from the [official ComfyUI download page](https://www.comfy.org/download)
+and update it before installing the models; both backends use native ComfyUI
+nodes. Portable and manual-install users can use the
+[official GitHub repository](https://github.com/Comfy-Org/ComfyUI).
+
+For the experimental FLUX.2 Klein Edit path, start ComfyUI separately with its
+Klein diffusion model, Qwen text encoder, and Flux2 VAE installed. Select
+`model_version="flux2_klein_edit"`; VibeWarp connects to
+`http://127.0.0.1:8188` by default. The server URL and Comfy-visible model
+filenames are configurable under **System → Paths**. See
+[Flux 2 Klein Edit setup and settings](docs/settings.md#flux-2-klein-edit) for
+the exact Hugging Face downloads and destination folders.
+
+For experimental pixel-space editing with HiDream-O1, put
+`hidream_o1_image_fp8_scaled.safetensors` in ComfyUI's `models/checkpoints`
+folder and select `model_version="hidream_o1_edit"`. No disjoint text encoder
+is required for direct prompts; ComfyUI's optional Gemma 4 model is a prompt
+enhancer, not the model's core conditioning encoder. See
+[HiDream-O1 setup and settings](docs/settings.md#hidream-o1-edit) for the exact
+Hugging Face download and destination folder.
+
 ### 3. Render with your WarpFusion settings
 
 Use a settings file exported from the WarpFusion notebook as-is — the models
@@ -125,7 +149,8 @@ A Svelte web UI is available via `run-ui.bat` (Windows) / `./run-ui.sh`
 (Linux/macOS). It installs the lightweight FastAPI server from the `[ui]`
 extra on first launch and opens http://localhost:7860. The form is generated
 from `RunConfig`, with full config import/export, validation, queued rendering,
-live progress and logs, cancellation, and artifact previews.
+live progress and logs, cancellation/resume, partial video assembly and playback, and
+artifact previews.
 
 Prefill the UI from structured JSON, a VibeWarp settings snapshot, or a
 WarpFusion notebook settings file:
@@ -141,6 +166,10 @@ frame, showing the init video frame, the warped init, each ControlNet's source
 image and detected map, the diffusion input, and the rendered output side by
 side on a frame slider — so you can see exactly what a ControlNet was fed and
 what it produced.
+
+Cancelling does not discard rendered frames. In **History & Comparison**, use **Resume**
+to continue the same run with its previous stylized frame restored, or **Make video** to
+encode only the frames completed so far. **Play video** opens the result in the app.
 
 The ControlNet panel lists every net the engine supports for your base model
 (SD1.5 / SDXL), scans the model directory and tells you which checkpoints are

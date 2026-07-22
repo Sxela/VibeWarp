@@ -8,9 +8,10 @@ These tests make that a build failure instead.
 import pytest
 
 from vibewarp.config import RunConfig
-from vibewarp.config_io import config_schema
+from vibewarp.config_io import FIELD_CHOICES, config_schema
 from vibewarp.ui_layout import (LAYOUT, TIERS, all_config_keys, classify,
-                                system_keys, unclassified)
+                                MODEL_FAMILY_BY_VERSION, model_families,
+                                model_family_for_version, system_keys, unclassified)
 
 
 def test_every_config_field_has_a_tab():
@@ -45,6 +46,44 @@ def test_schema_carries_tier_and_group():
     # the scalar superseded by that schedule is hidden, not deleted
     assert diffusion['steps']['tier'] == 'hidden'
     assert [t['id'] for t in schema['tiers']] == list(TIERS)
+
+
+def test_unused_warp_variants_remain_compatible_but_are_hidden():
+    warp = config_schema()['properties']['warp']['properties']
+    for field in ('warp_mode', 'warp_strength', 'warp_num_k',
+                  'warp_forward', 'warp_towards_init'):
+        assert warp[field]['tier'] == 'hidden'
+    # Padding is still used by the production image-space warp.
+    assert warp['padding_ratio']['tier'] == 'advanced'
+
+
+def test_schema_carries_model_family_compatibility():
+    schema = config_schema()
+    props = schema['properties']
+
+    assert schema['model_family_by_version']['flux2_klein_edit'] == 'flux'
+    assert schema['model_family_by_version']['hidream_o1_edit'] == 'hidream'
+    assert props['sd_checkpoint_path']['model_families'] == ['sd']
+    assert props['controlnet']['properties']['enabled']['model_families'] == ['sd']
+    assert props['flux']['properties']['steps']['model_families'] == ['flux']
+    assert props['hidream']['properties']['steps']['model_families'] == ['hidream']
+    # Shared outer-loop settings and the edit renderers' base seed remain visible.
+    assert 'model_families' not in props['warp']['properties']['flow_blend_schedule']
+    assert 'model_families' not in props['diffusion']['properties']['seed']
+
+
+def test_sd_only_and_edit_only_sections_are_declared_consistently():
+    assert model_families('animatediff', 'enabled') == ('sd',)
+    assert model_families('freeu', 'do_freeunet') == ('sd',)
+    assert model_families('vae', 'use_tiled_vae') == ('sd',)
+    assert model_families('flux', 'steps') == ('flux',)
+    assert model_families('hidream', 'steps') == ('hidream',)
+    assert model_family_for_version('legacy_control_multi') == 'sd'
+    assert model_family_for_version('future_hidream_edit') == 'hidream'
+
+
+def test_every_ui_model_version_declares_its_family():
+    assert set(FIELD_CHOICES['RunConfig.model_version']) <= set(MODEL_FAMILY_BY_VERSION)
 
 
 @pytest.mark.parametrize('section,field,tier', [

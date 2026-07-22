@@ -9,7 +9,7 @@ from dataclasses import MISSING, asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Union, get_args, get_origin, get_type_hints
 
-from vibewarp.config import RunConfig
+from vibewarp.config import FluxConfig, HiDreamConfig, RunConfig
 from vibewarp.controlnet_catalog import (
     CONTROLNET_CATALOG,
     CONTROLNET_MODES,
@@ -24,7 +24,21 @@ FIELD_CHOICES = {
     # loads all of them (core/model_loader.MODEL_CONFIGS) for settings files that
     # name them; this list only controls what the UI offers.
     # Selecting an SDXL version also switches the ControlNet panel to the SDXL nets.
-    "RunConfig.model_version": ["control_multi_v15", "control_multi_sdxl"],
+    # External edit models ignore the SD checkpoint / ControlNet / IP-Adapter
+    # stack while retaining VibeWarp's flow, consistency and colour pipeline.
+    "RunConfig.model_version": [
+        "control_multi_v15", "control_multi_sdxl",
+        "flux2_klein_edit", "hidream_o1_edit",
+    ],
+    "FluxConfig.backend": ["comfy", "diffusers"],
+    "FluxConfig.reference_mode": ["raw + warped", "raw only", "warped only"],
+    "HiDreamConfig.sampler": [
+        "dpmpp_2m_sde_gpu", "dpmpp_2m_sde", "dpmpp_2m", "euler", "heun",
+    ],
+    "HiDreamConfig.scheduler": ["simple", "normal", "sgm_uniform"],
+    "HiDreamConfig.reference_mode": ["raw + warped", "raw only", "warped only"],
+    "HiDreamConfig.patch_seam_passes": ["2", "4", "ramp_2_4", "ramp_2_4_8"],
+    "HiDreamConfig.patch_seam_blend": ["median", "average", "window"],
     "RunConfig.lora_merge_precision": ["fp16", "fp32"],
     "RunConfig.animation_mode": ["Video Input"],
     "WarpConfig.warp_mode": ["use_image"],
@@ -35,6 +49,7 @@ FIELD_CHOICES = {
     "DiffusionConfig.noise_mode": ["default", "fixed", "reconstructed"],
     "VideoConfig.save_img_format": ["png", "jpg"],
     "ColorConfig.colormatch_method": ["PDF", "LAB", "mean"],
+    "ColorConfig.colormatch_mode": ["before", "after", "both"],
     # 'custom' keeps hand-authored layer_weights/zero_uncond instead of deriving
     # them from a preset — see vibewarp.controlnet_catalog.resolve_mode.
     "ControlNetEntry.mode": list(CONTROLNET_MODES),
@@ -104,6 +119,25 @@ def config_from_dict(data: Any, cls: type = RunConfig, path: str = "config") -> 
     """Construct a dataclass recursively, rejecting unknown fields."""
     if not isinstance(data, dict):
         raise ConfigError(f"{path} must be an object")
+    if cls is FluxConfig and 'feed_init_as_context' in data:
+        # Migrate the original multi-reference boolean. Explicit new selectors
+        # take precedence when a settings file happens to contain both.
+        data = dict(data)
+        feed_raw = data.pop('feed_init_as_context')
+        if not isinstance(feed_raw, bool):
+            raise ConfigError(f"{path}.feed_init_as_context must be bool")
+        data.setdefault(
+            'reference_mode', 'raw + warped' if feed_raw else 'warped only')
+    if cls is HiDreamConfig and 'feed_raw_frame_as_reference' in data:
+        # Migrate the short-lived boolean surface from the first multi-reference
+        # implementation. Explicit new selectors take precedence.
+        data = dict(data)
+        feed_raw = data.pop('feed_raw_frame_as_reference')
+        if not isinstance(feed_raw, bool):
+            raise ConfigError(
+                f"{path}.feed_raw_frame_as_reference must be bool")
+        data.setdefault(
+            'reference_mode', 'raw + warped' if feed_raw else 'warped only')
     known = {field.name: field for field in fields(cls)}
     unknown = sorted(set(data) - set(known))
     if unknown:
@@ -212,29 +246,35 @@ def validate_config(
     def error(path: str, message: str) -> None:
         errors.append({"path": path, "message": message})
 
-    if require_inputs and not config.sd_checkpoint_path:
+    from vibewarp.ui_layout import model_family_for_version
+    uses_sd_stack = model_family_for_version(config.model_version) == 'sd'
+
+    if require_inputs and uses_sd_stack and not config.sd_checkpoint_path:
         error("sd_checkpoint_path", "A Stable Diffusion checkpoint is required")
     if require_inputs and not config.video.video_init_path:
         error("video.video_init_path", "An input video is required")
-    if check_paths and config.sd_checkpoint_path and not os.path.isfile(config.sd_checkpoint_path):
+    if (check_paths and uses_sd_stack and config.sd_checkpoint_path
+            and not os.path.isfile(config.sd_checkpoint_path)):
         error("sd_checkpoint_path", f"Checkpoint file does not exist: {config.sd_checkpoint_path}")
     if check_paths and config.video.video_init_path and not os.path.isfile(config.video.video_init_path):
         error("video.video_init_path", f"Input video does not exist: {config.video.video_init_path}")
-    input_directories = {
-        "root_dir": config.root_dir,
-        "lora_dir": config.lora_dir,
-        "controlnet.model_dir": config.controlnet.model_dir,
-    }
+    input_directories = {"root_dir": config.root_dir}
+    if uses_sd_stack:
+        input_directories.update({
+            "lora_dir": config.lora_dir,
+            "controlnet.model_dir": config.controlnet.model_dir,
+        })
     if check_paths:
         for path, directory in input_directories.items():
             if directory and not os.path.isdir(directory):
                 error(path, f"Directory does not exist: {directory}")
-        if config.model_path and not os.path.exists(config.model_path):
+        if (uses_sd_stack and config.model_path
+                and not os.path.exists(config.model_path)):
             error("model_path", f"Model path does not exist: {config.model_path}")
     # A ControlNet only fits the base model it was trained for — an SD1.5 net on an
     # SDXL model dies at load with a shape mismatch. Easy to hit by switching
     # model_version in the UI with nets already configured, so catch it up front.
-    if config.controlnet.enabled and config.controlnet.models:
+    if uses_sd_stack and config.controlnet.enabled and config.controlnet.models:
         family = normalize_model_version(config.model_version)
         if family:
             for key in config.controlnet.models:
@@ -247,10 +287,11 @@ def validate_config(
     # Without a motion module, `enabled` still switches the render into AnimateDiff
     # batch mode but no temporal attention is injected — you pay the batching cost
     # and the output looks unchanged. Fail instead of quietly doing nothing.
-    if config.animatediff.enabled and not config.animatediff.motion_module_path:
+    if (uses_sd_stack and config.animatediff.enabled
+            and not config.animatediff.motion_module_path):
         error("animatediff.motion_module_path",
               "AnimateDiff is enabled but no motion module is set")
-    if (check_paths and config.animatediff.enabled
+    if (check_paths and uses_sd_stack and config.animatediff.enabled
             and config.animatediff.motion_module_path
             and not os.path.isfile(config.animatediff.motion_module_path)):
         error("animatediff.motion_module_path",
@@ -263,16 +304,18 @@ def validate_config(
         error("frame_range", "Frame range must contain two non-negative frame numbers")
     elif config.frame_range[1] and config.frame_range[1] < config.frame_range[0]:
         error("frame_range", "End frame must be zero (auto) or at least the start frame")
-    if config.diffusion.steps < 1:
-        error("diffusion.steps", "Diffusion steps must be at least 1")
-    if not 0 <= config.diffusion.style_strength <= 1:
-        error("diffusion.style_strength", "Style strength must be between 0 and 1")
-    if config.diffusion.sampler_tile_size < 8 or config.diffusion.sampler_tile_size % 8:
-        error("diffusion.sampler_tile_size",
-              "Sampler tile size must be at least 8 pixels and divisible by 8")
-    if not 0 <= config.diffusion.sampler_tile_overlap <= 50:
-        error("diffusion.sampler_tile_overlap",
-              "Sampler tile overlap must be between 0 and 50 percent")
+    if uses_sd_stack:
+        if config.diffusion.steps < 1:
+            error("diffusion.steps", "Diffusion steps must be at least 1")
+        if not 0 <= config.diffusion.style_strength <= 1:
+            error("diffusion.style_strength", "Style strength must be between 0 and 1")
+        if (config.diffusion.sampler_tile_size < 8
+                or config.diffusion.sampler_tile_size % 8):
+            error("diffusion.sampler_tile_size",
+                  "Sampler tile size must be at least 8 pixels and divisible by 8")
+        if not 0 <= config.diffusion.sampler_tile_overlap <= 50:
+            error("diffusion.sampler_tile_overlap",
+                  "Sampler tile overlap must be between 0 and 50 percent")
     if config.video.extract_nth_frame < 1:
         error("video.extract_nth_frame", "Frame extraction interval must be at least 1")
     if config.video.max_size < 0:
@@ -300,7 +343,8 @@ def _type_schema(annotation: Any) -> dict:
 
 
 def _dataclass_schema(cls: type, section: str | None = None) -> dict:
-    from vibewarp.ui_layout import classify, label
+    from vibewarp.ui_layout import (ALL_MODEL_FAMILIES, classify, label,
+                                    model_families)
 
     hints = get_type_hints(cls)
     properties = {}
@@ -324,6 +368,9 @@ def _dataclass_schema(cls: type, section: str | None = None) -> dict:
             placed = classify(section, item.name)
             if placed:
                 schema["tier"], schema["group"] = placed
+            compatible = model_families(section, item.name)
+            if compatible != ALL_MODEL_FAMILIES:
+                schema["model_families"] = list(compatible)
             # A hoisted field needs a name that means something away from its section:
             # animatediff.enabled on the Model card would otherwise just say "Enabled".
             display = label(section, item.name)
@@ -339,9 +386,12 @@ def config_schema() -> dict:
     Top-level RunConfig fields are classified under the section name "main".
     """
     schema = _dataclass_schema(RunConfig, section="main")
-    from vibewarp.ui_layout import GROUP_ORDER, TIER_LABELS, TIERS
+    from vibewarp.ui_layout import (GROUP_ORDER, MODEL_FAMILY_BY_VERSION,
+                                    TIER_LABELS, TIERS)
     # `groups` is the DECLARED order (ui_layout), not the order fields happen to appear on
     # RunConfig -- otherwise "Input Video" would sort behind "Output" and "Model".
     schema["tiers"] = [{"id": tier, "label": TIER_LABELS[tier],
                         "groups": list(GROUP_ORDER.get(tier, []))} for tier in TIERS]
+    schema["model_family_by_version"] = dict(MODEL_FAMILY_BY_VERSION)
+    schema["default_model_family"] = "sd"
     return schema
