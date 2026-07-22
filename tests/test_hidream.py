@@ -202,7 +202,10 @@ def test_hidream_raw_and_style_labels_match_uploaded_references(tmp_path):
     style = uploaded[1][1]
     assert uploaded[0][0] == 'content_frame_000007.png'
     assert uploaded[1][0] == 'style_reference_000007.png'
-    assert content.getpixel((160, 230)) == (0, 0, 0)
+    # Left edge of the label band, not the centre: centred text there is an anti-aliased
+    # glyph whose value depends on the available font (0,0,0 default vs ~28 with DejaVuSans
+    # on CI). The band background is reliably black.
+    assert content.getpixel((0, 230)) == (0, 0, 0)
     assert content.getpixel((0, 0)) == (0, 128, 0)
     assert style.getpixel((0, 230)) == (0, 0, 0)
     assert style.getpixel((0, 0)) == (255, 0, 0)
@@ -231,7 +234,7 @@ def test_hidream_can_label_first_raw_edit_target(tmp_path):
 
     assert len(uploaded) == 1
     assert uploaded[0].getpixel((0, 0)) == (0, 128, 0)
-    assert uploaded[0].getpixel((160, 230)) == (0, 0, 0)
+    assert uploaded[0].getpixel((0, 230)) == (0, 0, 0)   # band, left edge (see note above)
     assert list(Image.open(tmp_path / 'hidream_reference_1_000000.png').getdata()) == \
         list(uploaded[0].getdata())
 

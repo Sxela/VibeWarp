@@ -145,7 +145,10 @@ def test_comfy_style_label_and_debug_match_uploaded_references(tmp_path):
         context_image=Image.new('RGB', (320, 240), 'green'),
         debug_dir=str(tmp_path), frame_num=7)
 
-    assert uploaded[0].getpixel((160, 230)) == (0, 0, 0)
+    # Sample the label band at its LEFT edge, not the centre: the label text is centred,
+    # so an interior pixel lands on an anti-aliased glyph whose exact value is font- and
+    # platform-dependent (0,0,0 with the default font, ~28,28,28 with DejaVuSans-Bold on CI).
+    assert uploaded[0].getpixel((0, 230)) == (0, 0, 0)
     assert uploaded[0].getpixel((0, 0)) == (0, 128, 0)
     assert uploaded[1].getpixel((0, 230)) == (0, 0, 0)
     assert list(Image.open(tmp_path / 'flux_reference_1_000007.png').getdata()) == \
@@ -171,6 +174,6 @@ def test_comfy_can_label_first_raw_edit_target(tmp_path):
 
     assert len(uploaded) == 1
     assert uploaded[0].getpixel((0, 0)) == (0, 128, 0)
-    assert uploaded[0].getpixel((160, 230)) == (0, 0, 0)
+    assert uploaded[0].getpixel((0, 230)) == (0, 0, 0)   # band, left edge (see note above)
     assert list(Image.open(tmp_path / 'flux_reference_1_000000.png').getdata()) == \
         list(uploaded[0].getdata())
