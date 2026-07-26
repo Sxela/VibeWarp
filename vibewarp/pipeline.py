@@ -212,30 +212,59 @@ def load_models(config: RunConfig, device: str = 'cuda') -> dict:
         result['controlnets'] = loaded_cns
 
     # Load IP-Adapter models if configured
+    if config.ipadapter.enabled and not config.ipadapter.models:
+        raise ValueError(
+            "IP-Adapter is enabled but no adapter models are configured")
     if config.ipadapter.enabled and config.ipadapter.models:
         from vibewarp.core.ipadapter import load_ipadapter_model, detect_ipadapter_type
+        from vibewarp.ipadapter_catalog import resolve_ipadapter_path
         loaded_ipa = {}
+        weights_by_path = {}
         for ipa_key, ipa_entry in config.ipadapter.models.items():
-            if ipa_entry.path and os.path.exists(ipa_entry.path):
-                try:
-                    ipa_weights = load_ipadapter_model(ipa_entry.path)
-                    ipa_type = detect_ipadapter_type(ipa_weights)
-                    loaded_ipa[ipa_key] = {
-                        'weights': ipa_weights,
-                        'type_info': ipa_type,
-                        'path': ipa_entry.path,
-                        'weight': ipa_entry.weight,
-                        'start': ipa_entry.start,
-                        'end': ipa_entry.end,
-                        'source_image': ipa_entry.source_image,
-                        'weight_type': ipa_entry.weight_type,
-                        'combine_embeds': getattr(ipa_entry, 'combine_embeds', 'concat'),
-                        'embeds_scaling': ipa_entry.embeds_scaling,
-                    }
-                    print(f"Loaded IP-Adapter: {ipa_key} "
-                          f"(plus={ipa_type['is_plus']}, sdxl={ipa_type['is_sdxl']})")
-                except Exception as e:
-                    print(f"Failed to load IP-Adapter {ipa_key}: {e}")
+            if ipa_entry.weight == 0:
+                print(f"Skipping IP-Adapter {ipa_key}: weight=0")
+                continue
+            model_key = getattr(ipa_entry, 'model_key', '') or ipa_key
+            ipa_path = resolve_ipadapter_path(
+                model_key, ipa_entry.path, config.controlnet.model_dir)
+            if not ipa_path:
+                raise ValueError(
+                    f"IP-Adapter {ipa_key} is enabled but no checkpoint path "
+                    "is configured")
+            if not os.path.isfile(ipa_path):
+                raise FileNotFoundError(
+                    f"IP-Adapter {ipa_key} checkpoint not found: {ipa_path}")
+
+            # Repeated instances share immutable checkpoint tensors but receive
+            # separate hooks, sources, weights, and schedules.
+            try:
+                ipa_weights = weights_by_path.get(ipa_path)
+                if ipa_weights is None:
+                    ipa_weights = load_ipadapter_model(ipa_path)
+                    weights_by_path[ipa_path] = ipa_weights
+                ipa_type = detect_ipadapter_type(ipa_weights)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Failed to load IP-Adapter {ipa_key} from {ipa_path}: "
+                    f"{exc}") from exc
+            loaded_ipa[ipa_key] = {
+                'model_key': model_key,
+                'weights': ipa_weights,
+                'type_info': ipa_type,
+                'path': ipa_path,
+                'weight': ipa_entry.weight,
+                'start': ipa_entry.start,
+                'end': ipa_entry.end,
+                'source_image': ipa_entry.source_image,
+                'source_images': list(
+                    getattr(ipa_entry, 'source_images', None) or []),
+                'weight_type': ipa_entry.weight_type,
+                'combine_embeds': getattr(ipa_entry, 'combine_embeds', 'concat'),
+                'embeds_scaling': ipa_entry.embeds_scaling,
+            }
+            print(
+                f"Loaded IP-Adapter {ipa_key}: {ipa_path} "
+                f"(plus={ipa_type['is_plus']}, sdxl={ipa_type['is_sdxl']})")
         result['ipadapters'] = loaded_ipa
 
     return result
@@ -259,74 +288,43 @@ def _apply_ipadapter_hooks(
     sd_model: any,
     ipadapters: Dict,
     config: RunConfig,
-) -> None:
-    """Apply IP-Adapter hooks to the SD model.
-
-    For each loaded IP-Adapter, generates CLIP embeddings from the source image
-    and hooks the adapter into the UNet's cross-attention blocks.
-
-    Args:
-        sd_model: loaded SD model
-        ipadapters: dict of loaded IP-Adapter data from load_models()
-        config: run configuration (for CLIP model path)
-    """
+) -> Dict[str, any]:
+    """Load encoders now; defer hooks until immediately before sampling."""
     from vibewarp.core.ipadapter import (
-        hook_ipadapter,
-        load_image_for_clip,
-        encode_clip_vision,
-        IPAdapterEmbeddingCache,
+        detect_clip_variant,
+        load_clip_vision_model,
     )
 
-    # Load CLIP vision model if needed
-    clip_model = None
-    if config.ipadapter.clip_vision_model_path:
-        try:
-            from transformers import CLIPVisionModelWithProjection
-            clip_model = CLIPVisionModelWithProjection.from_pretrained(
-                config.ipadapter.clip_vision_model_path
-            ).half().cuda().eval()
-        except ImportError:
-            print("transformers not installed — CLIP vision encoding unavailable")
-        except Exception as e:
-            print(f"Failed to load CLIP vision model: {e}")
-
-    embed_cache = IPAdapterEmbeddingCache() if config.ipadapter.cache_embeddings else None
-
+    variants = set()
     for ipa_key, ipa_data in ipadapters.items():
-        source_image = ipa_data.get('source_image', '')
-        clip_output = None
+        variant = detect_clip_variant(
+            ipa_data.get('model_key', '') or ipa_key,
+            ipa_data.get('weights'))
+        ipa_data['clip_variant'] = variant
+        variants.add(variant)
 
-        if source_image and os.path.exists(source_image) and clip_model is not None:
-            # Check cache
-            cache_key = f"{source_image}_{ipa_key}"
-            if embed_cache and cache_key in embed_cache:
-                clip_output = embed_cache.get(cache_key)
-            else:
-                image_tensor = load_image_for_clip(source_image, device='cuda')
-                clip_output = encode_clip_vision(clip_model, image_tensor)
-                if embed_cache:
-                    embed_cache.put(cache_key, clip_output)
+    configured_path = config.ipadapter.clip_vision_model_path
+    if not configured_path:
+        raise ValueError(
+            "IP-Adapter is enabled but clip_vision_model_path is empty")
 
-        if clip_output is None:
-            # Create dummy embeddings for hookup (will produce zero contribution)
-            clip_output = {'image_embeds': torch.zeros(1, 768)}
-
-        # Notebook: is_v2 = 'v2' in the adapter checkpoint filename
-        adapter_path = ipa_data.get('path', '') or ''
-        hook_ipadapter(
-            sd_model=sd_model,
-            adapter_weights=ipa_data['weights'],
-            clip_vision_output=clip_output,
-            weight=ipa_data['weight'],
-            start=ipa_data['start'],
-            end=ipa_data['end'],
-            weight_type=ipa_data['weight_type'],
-            embeds_scaling=ipa_data['embeds_scaling'],
-            is_v2='v2' in os.path.basename(adapter_path).lower(),
-            combine_embeds=ipa_data.get('combine_embeds', 'concat'),
-            flip_uc=config.ipadapter.flip_uc,
-        )
-        print(f"Hooked IP-Adapter: {ipa_key} (weight={ipa_data['weight']})")
+    filenames = {
+        'vit_h': 'clip_vision_vit_h.safetensors',
+        'vit_g': 'clip_vision_vit_bigg.safetensors',
+    }
+    models = {}
+    for variant in variants:
+        model_path = configured_path
+        if os.path.isdir(configured_path):
+            candidate = os.path.join(configured_path, filenames[variant])
+            if os.path.isfile(candidate):
+                model_path = candidate
+            elif len(variants) > 1:
+                raise FileNotFoundError(
+                    f"IP-Adapter needs {filenames[variant]} in {configured_path}")
+        models[variant] = load_clip_vision_model(model_path, variant=variant)
+        print(f"Loaded IP-Adapter CLIP vision encoder: {variant}")
+    return models
 
 
 def _configure_unified_forward(
@@ -506,6 +504,7 @@ def run(
 
     motion_module = None
     ipadapters = {}
+    clip_vision_models = {}
     loaded_controlnets = {}
     if not is_edit:
         # 5c. Inject AnimateDiff motion modules if loaded
@@ -517,7 +516,8 @@ def run(
         # 5d. Hook IP-Adapters if loaded
         ipadapters = models.get('ipadapters', {})
         if ipadapters:
-            _apply_ipadapter_hooks(models['sd_model'], ipadapters, config)
+            clip_vision_models = _apply_ipadapter_hooks(
+                models['sd_model'], ipadapters, config)
 
         # 5e. Always use the unified ControlNet-capable forward. With empty model
         # and hint dictionaries it is identical to the stock UNet forward.
@@ -551,6 +551,7 @@ def run(
         edit_backend=models.get('edit_backend'),
         loaded_controlnets=loaded_controlnets,
         loaded_ipadapters=ipadapters,
+        clip_vision_model=clip_vision_models,
         raft_model=raft_model,
         motion_module=motion_module,
         sampler_fn=None if is_edit else get_sampler_fn(config.diffusion.sampler),

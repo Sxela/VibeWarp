@@ -102,6 +102,56 @@ class TestEndToEndSmoke:
         assert state.init_image == raw_path
         assert mock_rf.call_args.args[1].init_image == raw_path
 
+    @pytest.mark.parametrize(
+        ('mode', 'expected_name'),
+        [
+            ('prev stylized', 'warpfusion(0)_000000.png'),
+            ('prev warped', '_warped_no_cc_000001.png'),
+            ('prev warped + cc', '_warped_000001.png'),
+        ],
+    )
+    def test_sd_temporal_guidance_mode_selects_init_image(
+        self, tmp_path, mode, expected_name,
+    ):
+        vf_dir = self._create_video_frames(tmp_path, n_frames=2)
+        batch_dir = str(tmp_path / 'batch')
+        os.makedirs(batch_dir)
+        previous_path = os.path.join(
+            batch_dir, 'warpfusion(0)_000000.png')
+        Image.new('RGB', (64, 64), color='red').save(previous_path)
+
+        config = RunConfig(
+            frame_range=[0, 2],
+            model_version='control_multi_v15',
+            video=VideoConfig(width=64, height=64),
+            flow=FlowConfig(flow_warp=True),
+            diffusion=DiffusionConfig(guidance_mode=mode),
+        )
+        ctx = RenderContext(
+            config=config,
+            batch_folder=batch_dir,
+            video_frames_folder=vf_dir,
+        )
+        state = FrameState(
+            seed=42, prev_frame=Image.new('RGB', (64, 64), color='red'))
+        warped_cc = Image.new('RGB', (64, 64), color='green')
+        warped_no_cc = Image.new('RGB', (64, 64), color='blue')
+
+        with (
+            patch(
+                'vibewarp.core.diffusion.warp_between_frames',
+                return_value=(warped_cc, warped_no_cc),
+            ),
+            patch('vibewarp.core.diffusion.render_frame') as mock_rf,
+        ):
+            mock_rf.return_value = Image.new('RGB', (64, 64), color='white')
+            _render_single_frame(
+                ctx, state, frame_num=1, start_frame=0,
+                batch_folder=batch_dir, fmt='png',
+            )
+
+        assert os.path.basename(mock_rf.call_args.args[1].init_image) == expected_name
+
     def test_run_frames_standard_mode(self, tmp_path):
         """Standard run_frames should render each frame sequentially."""
         vf_dir = self._create_video_frames(tmp_path, n_frames=3)

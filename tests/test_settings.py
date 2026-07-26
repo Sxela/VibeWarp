@@ -6,11 +6,15 @@ import tempfile
 
 import pytest
 
-from vibewarp.config import RunConfig, DiffusionConfig
+from vibewarp.config import (
+    RunConfig, DiffusionConfig, IPAdapterConfig, IPAdapterEntry,
+)
+from vibewarp.config_io import config_from_settings
 from vibewarp.settings import (
     generate_file_hash,
     is_vibewarp_settings,
     load_settings,
+    load_vibewarp_settings,
     load_warpfusion_settings,
     save_settings,
     settings_to_dict,
@@ -108,6 +112,54 @@ class TestSettingsToDict:
         cfg = RunConfig(text_prompts={0: 'hello', 10: 'world'})
         d = settings_to_dict(cfg)
         assert d['text_prompts'] == {0: 'hello', 10: 'world'}
+
+    def test_ipadapter_models_remain_nested_and_round_trip(self, tmp_path):
+        cfg = RunConfig(ipadapter=IPAdapterConfig(
+            enabled=True,
+            models={
+                'ipadapter_sd15': IPAdapterEntry(
+                    model_key='ipadapter_sd15',
+                    path='C:/models/ip-adapter_sd15.safetensors',
+                    source_images=[
+                        {'source': 'upload', 'image_path': 'C:/refs/style.png'}],
+                    combine_embeds='average',
+                ),
+            },
+        ))
+        flat = settings_to_dict(cfg)
+        assert 'ipadapter_models' in flat
+        assert 'ipadapter_sd15_weight' not in flat
+
+        path = _write_settings(tmp_path, flat)
+        loaded = config_from_settings(path)
+        entry = loaded.ipadapter.models['ipadapter_sd15']
+        assert entry.source_images == [
+            {'source': 'upload', 'image_path': 'C:/refs/style.png'}]
+        assert entry.combine_embeds == 'average'
+
+    def test_legacy_flattened_ipadapter_models_are_migrated(self, tmp_path):
+        path = _write_settings(tmp_path, {
+            'flow_flow_warp': True,
+            'ipadapter_enabled': True,
+            'ipadapter_sd15_model_key': 'ipadapter_sd15',
+            'ipadapter_sd15_path': 'C:/models/ip-adapter_sd15.safetensors',
+            'ipadapter_sd15_weight': 0.7,
+            'ipadapter_sd15_start': 0.1,
+            'ipadapter_sd15_end': 0.9,
+            'ipadapter_sd15_source_images': [
+                {'source': 'previous', 'image_path': ''},
+                {'source': 'upload', 'image_path': 'C:/refs/style.png'},
+            ],
+            'ipadapter_sd15_weight_type': 'style transfer',
+            'ipadapter_sd15_combine_embeds': 'average',
+            'ipadapter_sd15_embeds_scaling': 'K+V',
+        })
+        nested = load_vibewarp_settings(path)
+        assert set(nested['ipadapter']) == {'enabled', 'models'}
+        entry = config_from_settings(path).ipadapter.models['ipadapter_sd15']
+        assert entry.weight == 0.7
+        assert entry.source_images[1]['image_path'] == 'C:/refs/style.png'
+        assert entry.combine_embeds == 'average'
 
 
 # ---------------------------------------------------------------------------

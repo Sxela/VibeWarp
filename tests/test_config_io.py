@@ -41,13 +41,17 @@ def test_schema_marks_booleans_and_limited_values_for_ui_controls():
     assert schema["diffusion"]["properties"]["noise_mode"]["choices"] == [
         "default", "fixed", "reconstructed"
     ]
+    assert schema["diffusion"]["properties"]["guidance_mode"]["choices"] == [
+        "prev stylized", "prev warped", "prev warped + cc"
+    ]
     assert "sample_lcm" in schema["diffusion"]["properties"]["sampler"]["choices"]
     assert schema["diffusion"]["properties"]["sampler_tile_size"]["choices"] == [
         256, 512, 768, 1024
     ]
     assert schema["video_assembly"]["properties"]["upscale_ratio"]["choices"] == [1, 2, 4]
     entry = schema["ipadapter"]["properties"]["models"]["additional"]
-    assert entry["properties"]["combine_embeds"]["choices"] == ["concat", "add"]
+    assert entry["properties"]["combine_embeds"]["choices"] == [
+        "concat", "add", "subtract", "average", "norm average"]
 
 
 def test_validation_reports_inputs_and_resolution():
@@ -98,6 +102,22 @@ def test_validation_rejects_reference_label_opacity_outside_fraction():
     paths = {error["path"] for error in validate_config(
         config, require_inputs=False)}
     assert "reference_label_opacity" in paths
+
+
+def test_ipadapter_rejects_raw_source_and_missing_fixed_image():
+    config = RunConfig()
+    config.ipadapter.enabled = True
+    config.ipadapter.models = {
+        'raw': IPAdapterEntry(source_image={
+            'source': 'raw_frame', 'image_path': ''}),
+        'fixed': IPAdapterEntry(source_image={
+            'source': 'upload', 'image_path': ''}),
+    }
+    messages = [
+        error['message'] for error in validate_config(
+            config, require_inputs=False)]
+    assert any('raw-frame input is not supported' in message for message in messages)
+    assert any('choose a fixed reference image' in message for message in messages)
 
 
 def test_validation_rejects_color_match_strengths_outside_fraction():

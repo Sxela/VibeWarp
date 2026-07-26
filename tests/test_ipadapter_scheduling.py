@@ -41,14 +41,50 @@ class TestResolveIpadapterSource:
         Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(str(styl))
         state = FrameState(frame_num=3)
         state.init_image = str(styl)
+        state.prev_frame = Image.new('RGB', (8, 8))
         assert _resolve_ipadapter_source('stylized', 3, ctx, state) == str(styl)
 
-    def test_stylized_frame0_falls_back_to_raw(self, tmp_path):
+    def test_stylized_first_frame_is_not_sent(self, tmp_path):
         ctx = self._ctx(tmp_path)
         state = FrameState(frame_num=0)
         state.init_image = None
-        p = _resolve_ipadapter_source('stylized', 0, ctx, state)
-        assert p and p.endswith('000001.jpg')
+        assert _resolve_ipadapter_source('stylized', 0, ctx, state) is None
+
+    def test_temporal_sources_are_off_at_first_configured_range_frame(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        ctx._sequence_start_frame = 12
+        ctx.batch_folder = str(tmp_path)
+        ctx.config.batch_name = 'run'
+        state = FrameState(
+            frame_num=12,
+            init_image=str(tmp_path / 'warped.png'),
+            prev_frame=Image.new('RGB', (8, 8)),
+        )
+        Image.new('RGB', (8, 8)).save(state.init_image)
+        Image.new('RGB', (8, 8)).save(tmp_path / 'run(0)_000011.png')
+
+        assert _resolve_ipadapter_source(
+            {'source': 'previous', 'image_path': ''}, 12, ctx, state) is None
+        assert _resolve_ipadapter_source(
+            {'source': 'warped', 'image_path': ''}, 12, ctx, state) is None
+
+    def test_previous_and_fixed_sources_after_range_start(self, tmp_path):
+        ctx = self._ctx(tmp_path)
+        ctx._sequence_start_frame = 4
+        ctx.batch_folder = str(tmp_path)
+        ctx.config.batch_name = 'run'
+        previous = tmp_path / 'run(0)_000004.png'
+        fixed = tmp_path / 'style.png'
+        Image.new('RGB', (8, 8)).save(previous)
+        Image.new('RGB', (8, 8)).save(fixed)
+        state = FrameState(frame_num=5, prev_frame=Image.new('RGB', (8, 8)))
+
+        assert _resolve_ipadapter_source(
+            {'source': 'previous', 'image_path': ''}, 5, ctx, state
+        ) == str(previous)
+        assert _resolve_ipadapter_source(
+            {'source': 'upload', 'image_path': str(fixed)}, 4, ctx, state
+        ) == str(fixed)
 
     def test_schedule_dict(self, tmp_path):
         ctx = self._ctx(tmp_path)
@@ -56,6 +92,7 @@ class TestResolveIpadapterSource:
         Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(str(img))
         state = FrameState(frame_num=7)
         assert _resolve_ipadapter_source({0: str(img)}, 7, ctx, state) == str(img)
+        assert _resolve_ipadapter_source({'0': str(img)}, 7, ctx, state) == str(img)
 
     def test_missing_returns_none(self, tmp_path):
         ctx = self._ctx(tmp_path)
@@ -80,7 +117,8 @@ class TestPerFrameRehook:
         loaded = {}
         for i, src in enumerate(sources):
             loaded[f'ipa{i}'] = {
-                'source_image': src,
+                'source_image': src[0] if isinstance(src, list) else src,
+                'source_images': src if isinstance(src, list) else [],
                 'weights': {'image_proj': {}, 'ip_adapter': {}},
                 'path': f'ip-adapter_v2_{i}.bin' if i else 'ip-adapter.bin',
                 'weight': 0.5, 'start': 0.0, 'end': 1.0,
@@ -122,17 +160,20 @@ class TestPerFrameRehook:
         """The old implementation unhooked ALL adapters inside its per-adapter
         loop — hooking adapter B wiped adapter A. Now: clear once, hook all."""
         ctx = self._setup(tmp_path, ['init', 'init'])
-        hook, clear, _ = self._run(ctx, 0, monkeypatch)
+        hook, clear, encode = self._run(ctx, 0, monkeypatch)
         assert clear.call_count == 1
         assert hook.call_count == 2
+        # Same image + encoder shares cached CLIP output, while each adapter
+        # instance remains a separate attention hook with its own settings.
+        assert encode.call_count == 1
 
-    def test_static_sources_noop(self, tmp_path, monkeypatch):
+    def test_static_sources_rehook_after_preprocessing(self, tmp_path, monkeypatch):
         img = tmp_path / 'static.png'
         Image.fromarray(np.zeros((8, 8, 3), dtype=np.uint8)).save(str(img))
         ctx = self._setup(tmp_path, [str(img)])
         hook, clear, _ = self._run(ctx, 0, monkeypatch)
-        assert clear.call_count == 0
-        assert hook.call_count == 0
+        assert clear.call_count == 1
+        assert hook.call_count == 1
 
     def test_embeds_cache_hits_on_unchanged_source(self, tmp_path, monkeypatch):
         ctx = self._setup(tmp_path, ['init'])
@@ -159,6 +200,31 @@ class TestPerFrameRehook:
         assert kwargs1['is_v2'] is True    # 'ip-adapter_v2_1.bin'
         assert kwargs0['flip_uc'] is True
         assert kwargs0['combine_embeds'] == 'concat'
+
+    def test_one_instance_combines_multiple_images_once(
+            self, tmp_path, monkeypatch, capsys):
+        first = tmp_path / 'first.png'
+        second = tmp_path / 'second.png'
+        Image.new('RGB', (8, 8), 'red').save(first)
+        Image.new('RGB', (8, 8), 'blue').save(second)
+        ctx = self._setup(tmp_path, [[str(first), str(second)]])
+        ctx.batch_folder = str(tmp_path / 'run')
+        ctx.loaded_ipadapters['ipa0']['combine_embeds'] = 'average'
+
+        hook, clear, encode = self._run(ctx, 0, monkeypatch)
+
+        assert clear.call_count == 1
+        assert encode.call_count == 2
+        assert hook.call_count == 1
+        kwargs = hook.call_args.kwargs
+        assert kwargs['combine_embeds'] == 'average'
+        assert kwargs['clip_vision_output']['image_embeds'].shape == (1, 4)
+        message = capsys.readouterr().out
+        assert "Applied IP-Adapter ipa0: frame=0" in message
+        assert "sources=2, combine=average, weight=0.5" in message
+        debug = tmp_path / 'run' / 'debug'
+        assert (debug / 'ipa_ipa0_source_1_000000.png').is_file()
+        assert (debug / 'ipa_ipa0_source_2_000000.png').is_file()
 
 
 class TestSettingsIpadapterSplit:
@@ -190,8 +256,9 @@ class TestSettingsIpadapterSplit:
         ipa = cfg['ipadapter']
         assert ipa['enabled'] is True
         m = ipa['models']['ipadapter_sd15_plus']
+        assert m['model_key'] == 'ipadapter_sd15_plus'
         assert m['weight'] == 0.6
-        assert m['source_image'] == 'stylized'
+        assert m['source_image'] == {'source': 'warped', 'image_path': ''}
         assert m['weight_type'] == 'style transfer'
         assert m['combine_embeds'] == 'add'       # 'global' -> global fallback
         assert m['embeds_scaling'] == 'K+V'
@@ -205,3 +272,23 @@ class TestSettingsIpadapterSplit:
         assert cfg['ipadapter']['enabled'] is False
         assert cfg['ipadapter']['cache_size'] == 10
         assert cfg['ipadapter']['flip_uc'] is False
+
+    def test_discovers_warpfusion_clip_vision_directory(self, tmp_path):
+        from vibewarp.settings import load_warpfusion_settings
+
+        models = tmp_path / 'models'
+        clip_dir = models / 'controlnet' / 'clip_vision'
+        clip_dir.mkdir(parents=True)
+        (clip_dir / 'clip_vision_vit_h.safetensors').write_bytes(b'placeholder')
+        settings = tmp_path / 's.txt'
+        settings.write_text(json.dumps({
+            'controlnet_multimodel': {
+                'ipadapter_sd15_plus': {
+                    'weight': 1.0, 'source': 'raw_frame',
+                },
+            },
+        }))
+
+        cfg = load_warpfusion_settings(
+            str(settings), models_root=str(models))
+        assert cfg['ipadapter']['clip_vision_model_path'] == str(clip_dir)

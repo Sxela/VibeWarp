@@ -51,6 +51,19 @@ def test_schema_carries_tier_and_group():
         assert instruction['tier'] == 'render'
         assert instruction['group'] == 'Prompts'
     assert [t['id'] for t in schema['tiers']] == list(TIERS)
+    relative = schema['properties']['keyframes_relative_to_frame_range']
+    assert relative['tier'] == 'project'
+    assert relative['group'] == 'Input Video'
+    assert relative['label'] == 'Keyframes relative to frame range'
+
+
+def test_ipadapter_sits_directly_below_controlnet_on_render_tab():
+    schema = config_schema()
+    render = next(tier for tier in schema['tiers'] if tier['id'] == 'render')
+    controlnet_index = render['groups'].index('ControlNet')
+    assert render['groups'][controlnet_index + 1] == 'IP-Adapter'
+    ipadapter = schema['properties']['ipadapter']['properties']
+    assert ipadapter['models']['tier'] == 'render'
 
 
 def test_color_matching_is_split_into_two_ui_groups():

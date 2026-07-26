@@ -11,6 +11,7 @@ Key simplification vs notebook:
 
 import gc
 import os
+import re
 import time
 import warnings
 from dataclasses import dataclass, field
@@ -688,7 +689,8 @@ def warp_between_frames(
     frame_num: int,
     flow_blend: float = 0.5,
     consistency_params: Optional[dict] = None,
-) -> Image.Image:
+    return_warped: bool = False,
+) -> Image.Image | Tuple[Image.Image, Image.Image]:
     """Warp previous rendered frame toward current video frame using optical flow.
 
     This is the clean equivalent of the notebook's do_3d_step().
@@ -698,9 +700,11 @@ def warp_between_frames(
         prev_frame: previous rendered frame (PIL Image)
         frame_num: current frame number (0-indexed)
         flow_blend: blend ratio between warped previous and current video frame
+        return_warped: also return the previous frame after motion warping but
+            before current-frame blending and consistency compositing
 
     Returns:
-        Warped+blended PIL Image to use as init for the next SD render.
+        Warped+blended PIL image, optionally paired with the warped-only image.
     """
     config = ctx.config
 
@@ -715,7 +719,7 @@ def warp_between_frames(
 
     if not os.path.exists(frame1_path) or not os.path.exists(frame2_path):
         # Can't compute flow without video frames — return prev_frame as-is
-        return prev_frame
+        return (prev_frame, prev_frame.copy()) if return_warped else prev_frame
 
     # Flow and consistency map paths
     flow_folder = ctx.flow_folder or os.path.join(ctx.batch_folder, 'flow')
@@ -845,7 +849,7 @@ def warp_between_frames(
         ).save(os.path.join(
             debug_dir, f"consistency_mask_{frame_num + 1:06d}.png"))
 
-    warped = warp_frame(
+    warp_result = warp_frame(
         frame1=prev_frame,
         frame2=current_video_frame,
         flow=flow,
@@ -857,14 +861,23 @@ def warp_between_frames(
         warp_mul=config.warp.warp_strength,
         match_color_fn=match_color_fn,
         adjust_brightness_fn=adjust_brightness_fn,
+        return_warped=return_warped,
     )
+    if return_warped:
+        warped, warped_without_cc = warp_result
+    else:
+        warped = warp_result
 
     # Background mask AFTER warp (notebook default: apply_mask_after_warp).
     if config.mask.use_background_mask and config.mask.apply_mask_after_warp:
         warped = _apply_render_bg_mask(
             warped, frame_num + 1, config, ctx.video_frames_folder)
+        if return_warped:
+            warped_without_cc = _apply_render_bg_mask(
+                warped_without_cc, frame_num + 1, config,
+                ctx.video_frames_folder)
 
-    return warped
+    return (warped, warped_without_cc) if return_warped else warped
 
 
 def _uses_colormatch(config: RunConfig, phase: str) -> bool:
@@ -933,28 +946,58 @@ def _resolve_ipadapter_source(
 ) -> Optional[str]:
     """Resolve an IP-Adapter source_image for this frame.
 
-    Notebook semantics (ipadapters share the CN source machinery):
-    - 'init' / 'raw_frame' → current raw video frame
-    - 'stylized' → warped previous render (frame 0: falls back to raw frame)
-    - directory → {frame_num:06d}.png|jpg inside it
-    - dict → frame schedule {frame: path}
-    - anything else → static path (returned as-is)
+    Current selector semantics:
+    - 'previous' → previous stylized output, unwarped
+    - 'warped' / legacy 'stylized' → previous output after warp + consistency
+    - 'upload' / 'fixed' → a fixed image path
+    - 'none' → no adapter image
+    Legacy 'init'/'raw_frame', directories, and frame schedules remain readable,
+    though raw input is rejected by current config validation.
     Returns None when nothing usable exists for this frame.
     """
+    # New UI shape, shared with the edit-model reference selectors. Keep the
+    # legacy string and frame-schedule forms below for imported settings.
+    if isinstance(source, dict) and 'source' in source:
+        mode = source.get('source', 'none')
+        if mode in ('none', 'off', ''):
+            return None
+        if mode in ('upload', 'fixed'):
+            path = source.get('image_path', '')
+            return path if path and os.path.isfile(path) else None
+        source = 'stylized' if mode == 'warped' else mode
+
     if isinstance(source, dict):
-        resolved = _get_prompt_for_frame(frame_num, source)
+        schedule = {
+            int(key): value for key, value in source.items()
+            if str(key).lstrip('-').isdigit()
+        }
+        resolved = _get_prompt_for_frame(
+            _schedule_frame_number(frame_num, ctx.config), schedule)
         return resolved if resolved and os.path.exists(resolved) else None
 
     if source in ('init', 'raw_frame'):
         p = os.path.join(ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg")
         return p if os.path.exists(p) else None
 
-    if source == 'stylized':
+    if source in ('previous', 'stylized'):
+        # Temporal references are intentionally off at the first frame of the
+        # selected render range, even when resuming files happen to exist.
+        if frame_num == getattr(ctx, '_sequence_start_frame', None):
+            return None
+        # The reference prunes stylized-source adapters on the first frame of
+        # each scene. Substituting the raw frame here changes the result.
+        if state.prev_frame is None:
+            return None
+        if source == 'previous':
+            fmt = ctx.config.video.save_img_format
+            path = os.path.join(
+                ctx.batch_folder,
+                f"{ctx.config.batch_name}(0)_{frame_num - 1:06d}.{fmt}",
+            )
+            return path if os.path.isfile(path) else None
         if state.init_image and os.path.exists(state.init_image):
             return state.init_image
-        # frame 0: no previous render yet — notebook falls back to raw frame
-        p = os.path.join(ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg")
-        return p if os.path.exists(p) else None
+        return None
 
     if os.path.isdir(source):
         for ext in ('png', 'jpg', 'jpeg'):
@@ -966,9 +1009,6 @@ def _resolve_ipadapter_source(
     return source if source and os.path.exists(source) else None
 
 
-_PER_FRAME_IPA_SOURCES = ('init', 'raw_frame', 'stylized')
-
-
 def _update_ipadapter_for_frame(ctx: RenderContext, state: FrameState) -> None:
     """Re-hook IP-Adapters whose source image changes per frame.
 
@@ -978,9 +1018,9 @@ def _update_ipadapter_for_frame(ctx: RenderContext, state: FrameState) -> None:
     hash + adapter key (paths repeat for 'stylized' sources while contents
     change — hashing handles that), size-limited FIFO.
 
-    Static-path sources produce identical embeds every frame, so when no
-    adapter has a per-frame source this is a no-op (the pipeline's initial
-    hooks stay — equivalent to the notebook's re-hook with cached embeds).
+    Static sources are re-hooked from cached embeddings too. Hook installation
+    is delayed until this point so reconstruction and preprocessing run without
+    adapter influence, matching ``delayed_adapter_apply=True``.
     """
     if not ctx.loaded_ipadapters or ctx.sd_model is None:
         return
@@ -990,23 +1030,21 @@ def _update_ipadapter_for_frame(ctx: RenderContext, state: FrameState) -> None:
     frame_num = state.frame_num
     config = ctx.config
 
-    # Resolve every adapter's source for this frame; determine whether any
-    # of them is per-frame (needs a re-hook at all).
+    # Resolve every adapter's source for this frame.
     resolved = {}
-    any_per_frame = False
     for ipa_key, ipa_data in ctx.loaded_ipadapters.items():
-        source = ipa_data.get('source_image', '')
-        resolved[ipa_key] = _resolve_ipadapter_source(source, frame_num, ctx, state)
-        if isinstance(source, dict) or (isinstance(source, str) and (
-                source in _PER_FRAME_IPA_SOURCES or os.path.isdir(source))):
-            any_per_frame = True
-
-    if not any_per_frame:
-        return  # all static — initial hooks from pipeline.run() are current
+        sources = ipa_data.get('source_images') or [
+            ipa_data.get('source_image', '')]
+        resolved[ipa_key] = [
+            path for source in sources
+            if (path := _resolve_ipadapter_source(
+                source, frame_num, ctx, state)) is not None
+        ]
 
     from vibewarp.core.ipadapter import (
         load_image_for_clip,
         encode_clip_vision,
+        combine_clip_vision_outputs,
         hook_ipadapter,
         IPAdapterEmbeddingCache,
     )
@@ -1030,18 +1068,64 @@ def _update_ipadapter_for_frame(ctx: RenderContext, state: FrameState) -> None:
         ctx.sd_model._ipadapter_hooks.clear()
 
     for ipa_key, ipa_data in ctx.loaded_ipadapters.items():
-        source_path = resolved[ipa_key]
-        if source_path is None:
-            print(f"  IP-Adapter {ipa_key}: no source for frame {frame_num}, skipping")
+        source_paths = resolved[ipa_key]
+        if not source_paths:
+            print(
+                f"  IP-Adapter {ipa_key}: no sources for frame "
+                f"{frame_num}, skipping")
             continue
 
-        cache_key = f"{generate_file_hash(source_path)}_{ipa_key}" if cache is not None else None
-        clip_output = cache.get(cache_key) if cache is not None else None
-        if clip_output is None:
-            image_tensor = load_image_for_clip(source_path, device='cuda')
-            clip_output = encode_clip_vision(ctx.clip_vision_model, image_tensor)
-            if cache is not None:
-                cache.put(cache_key, clip_output)
+        # History shows the exact ordered inputs that reached this adapter.
+        # Missing temporal inputs are absent rather than represented by a
+        # placeholder, so the available frames also document actual usage.
+        if ctx.batch_folder:
+            debug_dir = os.path.join(ctx.batch_folder, 'debug')
+            os.makedirs(debug_dir, exist_ok=True)
+            safe_key = re.sub(
+                r'[^A-Za-z0-9._-]+', '_', str(ipa_key)).strip('._-')
+            safe_key = safe_key or 'adapter'
+            for source_index, source_path in enumerate(source_paths, start=1):
+                with Image.open(source_path) as source_image:
+                    source_image.convert('RGB').save(os.path.join(
+                        debug_dir,
+                        f"ipa_{safe_key}_source_{source_index}_"
+                        f"{frame_num:06d}.png"))
+
+        clip_models = ctx.clip_vision_model
+        variant = ipa_data.get('clip_variant', 'vit_h')
+        clip_model = (clip_models.get(variant) if isinstance(clip_models, dict)
+                      else clip_models)
+        if clip_model is None:
+            raise ValueError(
+                f"IP-Adapter {ipa_key} needs a {variant} CLIP vision encoder")
+
+        # CLIP output depends on image content and encoder variant, not on the
+        # adapter instance. Encode cache misses together while the encoder is
+        # resident on the GPU, then combine the ordered outputs.
+        clip_outputs = []
+        encoder_on_gpu = False
+        try:
+            for source_path in source_paths:
+                cache_key = (f"{generate_file_hash(source_path)}_{variant}"
+                             if cache is not None else None)
+                clip_output = cache.get(cache_key) if cache is not None else None
+                if clip_output is None:
+                    if not encoder_on_gpu:
+                        clip_model.cuda()
+                        encoder_on_gpu = True
+                    image_tensor = load_image_for_clip(
+                        source_path, device='cuda').half()
+                    clip_output = encode_clip_vision(clip_model, image_tensor)
+                    if cache is not None:
+                        cache.put(cache_key, clip_output)
+                clip_outputs.append(clip_output)
+        finally:
+            if encoder_on_gpu:
+                clip_model.cpu()
+
+        combine_method = ipa_data.get('combine_embeds', 'concat')
+        clip_output = combine_clip_vision_outputs(
+            clip_outputs, method=combine_method)
 
         adapter_path = ipa_data.get('path', '') or ''
         hook_ipadapter(
@@ -1054,9 +1138,14 @@ def _update_ipadapter_for_frame(ctx: RenderContext, state: FrameState) -> None:
             weight_type=ipa_data.get('weight_type', 'linear'),
             embeds_scaling=ipa_data.get('embeds_scaling', 'V only'),
             is_v2='v2' in os.path.basename(adapter_path).lower(),
-            combine_embeds=ipa_data.get('combine_embeds', 'concat'),
+            combine_embeds=combine_method,
             flip_uc=config.ipadapter.flip_uc,
         )
+        print(
+            f"  Applied IP-Adapter {ipa_key}: frame={frame_num}, "
+            f"sources={len(source_paths)}, combine={combine_method}, "
+            f"weight={ipa_data['weight']}, "
+            f"steps={ipa_data['start']}-{ipa_data['end']}")
 
 
 # ---- Per-frame reconstruction noise ----
@@ -1079,7 +1168,8 @@ def _compute_per_frame_rec_noise(
     Matches notebook: rec_steps = int(steps * rec_steps_pct)
     """
     from vibewarp.core.reconstruction import find_noise_for_image
-    rec_config = ctx.config.reconstruction_noise
+    config = ctx.config
+    rec_config = config.reconstruction_noise
 
     if rec_frame_path is None or not os.path.exists(rec_frame_path):
         return None
@@ -1093,7 +1183,9 @@ def _compute_per_frame_rec_noise(
     # Notebook: rec_prompts_series overrides text_prompt for DDIM inversion,
     # and gets its own {caption} substitution (text_prompt arrives substituted)
     if rec_config.prompts:
-        rec_prompt = _get_prompt_for_frame(state.frame_num, rec_config.prompts)
+        rec_prompt = _get_prompt_for_frame(
+            _schedule_frame_number(state.frame_num, config),
+            rec_config.prompts)
         from vibewarp.core.captioning import get_caption, apply_caption
         _cap_folder = (ctx.video_frames_folder + 'Captions'
                        if ctx.video_frames_folder else '')
@@ -1101,7 +1193,9 @@ def _compute_per_frame_rec_noise(
     else:
         rec_prompt = text_prompt
     if rec_config.neg_prompts:
-        rec_neg = _get_prompt_for_frame(state.frame_num, rec_config.neg_prompts)
+        rec_neg = _get_prompt_for_frame(
+            _schedule_frame_number(state.frame_num, config),
+            rec_config.neg_prompts)
     else:
         rec_neg = neg_prompt
 
@@ -1182,9 +1276,10 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
 
     clean_prompts = getattr(ctx, '_clean_prompts', config.text_prompts)
     lora_schedule = getattr(ctx, '_lora_schedule', {})
+    schedule_frame = _schedule_frame_number(frame_num, config)
 
-    text_prompt = _get_prompt_for_frame(frame_num, clean_prompts)
-    neg_prompt = _get_prompt_for_frame(frame_num, config.negative_prompts)
+    text_prompt = _get_prompt_for_frame(schedule_frame, clean_prompts)
+    neg_prompt = _get_prompt_for_frame(schedule_frame, config.negative_prompts)
 
     # {caption} placeholder substitution (notebook cell 30 keyframe captions;
     # the notebook substitutes in text and rec prompts, not neg prompts)
@@ -1200,7 +1295,9 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
         from vibewarp.utils.scheduling import get_scheduled_arg
         lora_names = list(lora_schedule.keys())
         lora_weights = [
-            float(get_scheduled_arg(frame_num, lora_schedule[n], blend_json_schedules=False) or 0.0)
+            float(get_scheduled_arg(
+                schedule_frame, lora_schedule[n],
+                blend_json_schedules=False) or 0.0)
             for n in lora_names
         ]
         load_loras_for_frame(ctx.sd_model, lora_names, lora_weights, config.lora_dir,
@@ -1492,8 +1589,10 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
 
     # Prompts (with {caption} substitution, matching the SD path). LORA tags are
     # meaningless for Flux, so we do not strip/apply them here.
-    text_prompt = _get_prompt_for_frame(frame_num, config.text_prompts)
-    neg_prompt = _get_prompt_for_frame(frame_num, config.negative_prompts)
+    schedule_frame = _schedule_frame_number(frame_num, config)
+    text_prompt = _get_prompt_for_frame(schedule_frame, config.text_prompts)
+    neg_prompt = _get_prompt_for_frame(
+        schedule_frame, config.negative_prompts)
     from vibewarp.core.captioning import get_caption, apply_caption
     _captions_folder = (ctx.video_frames_folder + 'Captions'
                         if ctx.video_frames_folder else '')
@@ -1565,6 +1664,16 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
 def render_frame_flux(ctx: RenderContext, state: FrameState) -> Image.Image:
     """Backward-compatible alias for the generalized edit renderer."""
     return render_frame_edit(ctx, state)
+
+
+def _schedule_frame_number(frame_num: int, config: RunConfig) -> int:
+    """Return the absolute or selected-range-relative schedule coordinate."""
+    frame_num = int(frame_num)
+    if not config.keyframes_relative_to_frame_range:
+        return frame_num
+    selected = config.frame_range or [0, 0]
+    start = int(selected[0]) if selected else 0
+    return max(0, frame_num - start)
 
 
 def _get_prompt_for_frame(frame_num: int, prompts: Dict[int, str]) -> str:
@@ -1660,18 +1769,36 @@ def _render_single_frame(
                 from vibewarp.core.timing import log_time as _wlog
                 _t_warp = _wtime.time()
                 with _phase(ctx, 'warp'):
-                    warped = warp_between_frames(
+                    warped, warped_without_cc = warp_between_frames(
                         ctx, state.prev_frame, frame_num - 1,
                         flow_blend=sched_for_warp['flow_blend'],
                         consistency_params=sched_for_warp,
+                        return_warped=True,
                     )
                 _wlog(f"warp (frame {frame_num})", _wtime.time() - _t_warp)
                 warped_path = os.path.join(
                     batch_folder, f"_warped_{frame_num:06d}.{fmt}"
                 )
                 warped.save(warped_path)
+                warped_without_cc_path = os.path.join(
+                    batch_folder, f"_warped_no_cc_{frame_num:06d}.{fmt}"
+                )
+                warped_without_cc.save(warped_without_cc_path)
                 print(f"  Warped frame {frame_num}: {warped.size} (target: {config.video.width}x{config.video.height})")
-                state.init_image = warped_path
+                from vibewarp.core.model_loader import is_edit_model
+                guidance_mode = config.diffusion.guidance_mode
+                if is_edit_model(config.model_version):
+                    # Edit backends keep their established warp+CC target.
+                    state.init_image = warped_path
+                elif guidance_mode == 'prev stylized':
+                    state.init_image = prev_frame_path
+                elif guidance_mode == 'prev warped':
+                    state.init_image = warped_without_cc_path
+                else:
+                    state.init_image = warped_path
+                print(
+                    f"  SD temporal guidance frame {frame_num}: "
+                    f"{guidance_mode} -> {state.init_image}")
             else:
                 state.init_image = prev_frame_path
     elif ctx.video_frames_folder:
@@ -1744,8 +1871,10 @@ def _precache_conditioning(ctx: RenderContext, start_frame: int, end_frame: int)
     # Collect all unique sub-prompts across the frame range
     prompts = set()
     for frame_num in range(start_frame, end_frame):
-        raw_pos = _get_prompt_for_frame(frame_num, clean_text)
-        raw_neg = _get_prompt_for_frame(frame_num, config.negative_prompts)
+        schedule_frame = _schedule_frame_number(frame_num, config)
+        raw_pos = _get_prompt_for_frame(schedule_frame, clean_text)
+        raw_neg = _get_prompt_for_frame(
+            schedule_frame, config.negative_prompts)
         for raw in (raw_pos, raw_neg):
             sub_prompts, _ = split_weighted_prompts(raw)
             prompts.update(sub_prompts)
@@ -1787,6 +1916,7 @@ def run_frames(
         return run_frames_animatediff(ctx, frame_range=frame_range, resume_from=resume_from)
 
     sequence_start, end_frame = _resolve_frame_range(ctx, frame_range, 0)
+    ctx._sequence_start_frame = sequence_start
     start_frame = max(sequence_start, resume_from)
     fmt = config.video.save_img_format
 
@@ -1892,8 +2022,10 @@ def _adiff_prepare_conditioning(ctx, frames: List[int]):
 
     conds, unconds = [], []
     for frame_num in frames:
-        raw_pos = _get_prompt_for_frame(frame_num, text)
-        raw_neg = _get_prompt_for_frame(frame_num, config.negative_prompts)
+        schedule_frame = _schedule_frame_number(frame_num, config)
+        raw_pos = _get_prompt_for_frame(schedule_frame, text)
+        raw_neg = _get_prompt_for_frame(
+            schedule_frame, config.negative_prompts)
         pos, pos_w = split_weighted_prompts(raw_pos)
         neg, neg_w = split_weighted_prompts(raw_neg)
         conds.append(_encode_prompt_weighted(ctx.sd_model, pos, pos_w, ctx._cond_cache))
@@ -2349,13 +2481,15 @@ def _apply_reconstruction_noise_for_batch(
     rand_noise = torch.randn(len(overlap_frame_paths), C, H // f, W // f)
 
     # Get text prompt for reconstruction — use rec-specific prompt if available
+    schedule_frame = _schedule_frame_number(batch_frames[0], config)
     if rec_config.prompts:
-        prompt = _get_prompt_for_frame(batch_frames[0], rec_config.prompts)
+        prompt = _get_prompt_for_frame(schedule_frame, rec_config.prompts)
     else:
-        prompt = _get_prompt_for_frame(batch_frames[0], config.text_prompts)
+        prompt = _get_prompt_for_frame(schedule_frame, config.text_prompts)
     neg_prompt = ''
     if rec_config.neg_prompts:
-        neg_prompt = _get_prompt_for_frame(batch_frames[0], rec_config.neg_prompts)
+        neg_prompt = _get_prompt_for_frame(
+            schedule_frame, rec_config.neg_prompts)
     sched = get_frame_schedule(batch_frames[0], config)
     diffusion_steps = sched.get('steps', 25)
 
@@ -2421,12 +2555,14 @@ def get_frame_schedule(frame_num: int, config: RunConfig) -> dict:
     """
     d = config.diffusion
     w = config.warp
+    schedule_frame = _schedule_frame_number(frame_num, config)
 
     def _resolve(schedule, default):
         """Resolve a schedule to its value for this frame."""
         if schedule is None:
             return default
-        val = get_scheduled_arg(frame_num, schedule, blend_json_schedules=True)
+        val = get_scheduled_arg(
+            schedule_frame, schedule, blend_json_schedules=True)
         # Handle nested lists (e.g., [[3,7,3]] from WarpFusion cfg_scale_schedule)
         while isinstance(val, list):
             val = val[0] if val else default
@@ -2436,7 +2572,8 @@ def get_frame_schedule(frame_num: int, config: RunConfig) -> dict:
         """Resolve cfg_scale schedule — may return a per-step list."""
         if schedule is None:
             return float(default)
-        val = get_scheduled_arg(frame_num, schedule, blend_json_schedules=True)
+        val = get_scheduled_arg(
+            schedule_frame, schedule, blend_json_schedules=True)
         if isinstance(val, list):
             # Per-step CFG ramp (e.g., [3, 7, 3]) — interpolate across steps
             return interpolate_array(val, steps)

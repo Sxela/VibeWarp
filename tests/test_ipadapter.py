@@ -6,10 +6,13 @@ import pytest
 from PIL import Image
 
 from vibewarp.core.ipadapter import (
+    _actionable_clip_key_mismatches,
     clip_preprocess,
+    encode_clip_vision,
     load_image_for_clip,
     detect_ipadapter_type,
     IPAdapterEmbeddingCache,
+    combine_clip_vision_outputs,
     hook_ipadapter,
     unhook_ipadapter,
     CLIP_MEAN,
@@ -60,6 +63,90 @@ class TestLoadImageForClip:
         img.save(path)
         result = load_image_for_clip(path, device='cpu')
         assert result.shape[-1] == 3
+
+
+class TestEncodeClipVision:
+    def test_preserves_hidden_states_key_expected_by_plus_adapters(self):
+        class Output:
+            image_embeds = torch.ones(1, 1024)
+            hidden_states = (
+                torch.zeros(1, 257, 1280),
+                torch.ones(1, 257, 1280),
+            )
+
+        class Model:
+            def __call__(self, **kwargs):
+                assert kwargs['output_hidden_states'] is True
+                return Output()
+
+        result = encode_clip_vision(Model(), torch.rand(1, 32, 32, 3))
+        assert 'hidden_states' in result
+        assert len(result['hidden_states']) == 2
+        assert torch.equal(result['hidden_states'][-2], Output.hidden_states[-2])
+        assert torch.equal(
+            result['penultimate_hidden_states'], Output.hidden_states[-2])
+
+
+class TestClipCheckpointCompatibility:
+    def test_ignores_nonpersistent_position_ids_buffer(self):
+        missing, unexpected = _actionable_clip_key_mismatches(
+            [], ['vision_model.embeddings.position_ids'])
+        assert missing == []
+        assert unexpected == []
+
+    def test_keeps_real_weight_mismatches_actionable(self):
+        missing, unexpected = _actionable_clip_key_mismatches(
+            ['visual_projection.weight'],
+            ['vision_model.encoder.layers.99.weight'])
+        assert missing == ['visual_projection.weight']
+        assert unexpected == ['vision_model.encoder.layers.99.weight']
+
+
+class TestCombineClipVisionOutputs:
+    @staticmethod
+    def output(value):
+        return {
+            'image_embeds': torch.full((1, 2), float(value)),
+            'hidden_states': (
+                torch.full((1, 3, 2), float(value)),
+                torch.full((1, 3, 2), float(value + 1)),
+            ),
+        }
+
+    @pytest.mark.parametrize(
+        ('method', 'expected'),
+        [('add', 4.0), ('subtract', -2.0), ('average', 2.0)])
+    def test_reduction_formulas(self, method, expected):
+        result = combine_clip_vision_outputs(
+            [self.output(1), self.output(3)], method)
+        assert result['image_embeds'].shape == (1, 2)
+        assert torch.allclose(
+            result['image_embeds'], torch.full((1, 2), expected))
+        assert result['penultimate_hidden_states'].shape == (1, 3, 2)
+
+    def test_concat_preserves_ordered_image_batch(self):
+        result = combine_clip_vision_outputs(
+            [self.output(1), self.output(3)], 'concat')
+        assert result['image_embeds'].shape == (2, 2)
+        assert torch.equal(result['image_embeds'][0], torch.ones(2))
+        assert torch.equal(result['image_embeds'][1], torch.full((2,), 3.0))
+
+    def test_norm_average_is_finite_for_zero_embeddings(self):
+        result = combine_clip_vision_outputs([
+            self.output(0), self.output(0)], 'norm average')
+        assert torch.isfinite(result['image_embeds']).all()
+
+    def test_projected_concat_flattens_images_into_ordered_tokens(self):
+        from vibewarp.vendor.controlmodel_ipadapter import (
+            concat_projected_embeddings,
+        )
+        cond = torch.arange(2 * 3 * 2).reshape(2, 3, 2)
+        uncond = torch.zeros(1, 3, 2)
+        combined, combined_uncond = concat_projected_embeddings(cond, uncond)
+        assert combined.shape == (1, 6, 2)
+        assert torch.equal(combined[0, :3], cond[0])
+        assert torch.equal(combined[0, 3:], cond[1])
+        assert combined_uncond.shape == (1, 6, 2)
 
 
 class TestDetectIpadapterType:
@@ -254,11 +341,25 @@ class TestIPAdapterConfig:
 
     def test_entry_defaults(self):
         entry = IPAdapterEntry()
+        assert entry.model_key == ''
+        assert entry.source_images == []
         assert entry.weight == 1.0
         assert entry.start == 0.0
         assert entry.end == 1.0
         assert entry.weight_type == 'linear'
         assert entry.embeds_scaling == 'V only'
+
+    def test_entry_accepts_scheduled_source(self):
+        from vibewarp.config_io import config_from_dict
+        cfg = config_from_dict({
+            'ipadapter': {
+                'models': {
+                    'ipa': {'source_image': {'0': 'a.png', '10': 'b.png'}},
+                },
+            },
+        })
+        assert cfg.ipadapter.models['ipa'].source_image == {
+            '0': 'a.png', '10': 'b.png'}
 
     def test_runconfig_has_ipadapter(self):
         cfg = RunConfig()

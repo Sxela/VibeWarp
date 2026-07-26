@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from vibewarp.ipadapter_catalog import ipadapter_urls
 
 
 # ---- Model download URLs ----
@@ -36,11 +37,7 @@ CONTROLNET_ANNOTATOR_URLS = {
     ],
 }
 
-IPADAPTER_URLS = {
-    "ipadapter_sd15": "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter_sd15.safetensors",
-    "ipadapter_sd15_plus": "https://huggingface.co/h94/IP-Adapter/resolve/main/models/ip-adapter-plus_sd15.safetensors",
-    "ipadapter_sdxl": "https://huggingface.co/h94/IP-Adapter/resolve/main/sdxl_models/ip-adapter_sdxl.safetensors",
-}
+IPADAPTER_URLS = ipadapter_urls()
 
 
 # ---- Run configuration ----
@@ -137,6 +134,9 @@ class DiffusionConfig:
     # 0 = never stretch: split as soon as the dimension exceeds the tile.
     sampler_tile_split_threshold: float = 20.0
     style_strength: float = 0.65
+    # Temporal img2img target used by the SD/SDXL renderer after the first
+    # frame. The first rendered frame still initializes from the raw video.
+    guidance_mode: str = 'prev warped + cc'
     init_scale: float = 0.0
     init_latent_scale: float = 0.0
     dynamic_thresh: float = 30.0  # static thresholding clamp value (notebook: dynamic_thresh)
@@ -441,15 +441,21 @@ class ReconstructionNoiseConfig:
 @dataclass
 class IPAdapterEntry:
     """Per-IP-Adapter model configuration."""
+    # Catalog model identity. The containing dict key is an instance ID, allowing
+    # the same checkpoint to be applied repeatedly with independent references.
+    # Empty keeps legacy configs compatible (their dict key was the model key).
+    model_key: str = ''
     path: str = ''
     weight: float = 1.0
     start: float = 0.0
     end: float = 1.0
-    # Reference image source. Per-frame keywords resolved each frame:
-    # 'init'/'raw_frame' → current video frame; 'stylized' → warped previous
-    # render; a directory → {frame:06d}.png|jpg inside it; a dict → frame
-    # schedule; anything else → static image path.
-    source_image: str = ''
+    # Unified reference selector: none, previous, warped, or upload/fixed.
+    # Legacy WarpFusion strings/directories/frame schedules remain loadable.
+    source_image: Any = field(
+        default_factory=lambda: {'source': 'none', 'image_path': ''})
+    # Ordered sources combined inside this adapter instance. Empty means use
+    # source_image for backward compatibility.
+    source_images: List[Any] = field(default_factory=list)
     weight_type: str = 'linear'  # linear, ease in, ease out, etc. (ip_weight_type)
     combine_embeds: str = 'concat'  # concat, add, ... (ip_combine_embeds)
     embeds_scaling: str = 'V only'  # V only, K+V, K+V w/ C penalty (ip_embeds_scaling)
@@ -712,6 +718,9 @@ class RunConfig:
 
     # Frames
     frame_range: List[int] = field(default_factory=lambda: [0, 0])
+    # Interpret frame-keyed schedules relative to frame_range[0]. For example,
+    # key 0 targets source frame 60 when the selected range starts at 60.
+    keyframes_relative_to_frame_range: bool = False
     animation_mode: str = 'Video Input'
 
     # Sub-configs

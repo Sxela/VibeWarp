@@ -94,7 +94,7 @@ def load_image_for_clip(
 def encode_clip_vision(
     clip_model: Any,
     image: torch.Tensor,
-) -> Dict[str, torch.Tensor]:
+) -> Dict[str, Any]:
     """Encode an image through CLIP vision model.
 
     Args:
@@ -102,7 +102,8 @@ def encode_clip_vision(
         image: (B, H, W, 3) float tensor in [0, 1]
 
     Returns:
-        Dict with 'image_embeds' and 'penultimate_hidden_states' tensors.
+        Dict with the ComfyUI/WarpFusion ``image_embeds`` and complete
+        ``hidden_states`` outputs.
     """
     pixel_values = clip_preprocess(image)
 
@@ -126,13 +127,114 @@ def encode_clip_vision(
         result['image_embeds'] = outputs['image_embeds'].cpu()
 
     if hasattr(outputs, 'hidden_states'):
-        hs = outputs.hidden_states
-        result['penultimate_hidden_states'] = hs[-2].cpu()
+        result['hidden_states'] = tuple(x.cpu() for x in outputs.hidden_states)
+        result['penultimate_hidden_states'] = result['hidden_states'][-2]
     elif isinstance(outputs, dict) and 'hidden_states' in outputs:
-        hs = outputs['hidden_states']
-        result['penultimate_hidden_states'] = hs[-2].cpu()
+        result['hidden_states'] = tuple(x.cpu() for x in outputs['hidden_states'])
+        result['penultimate_hidden_states'] = result['hidden_states'][-2]
 
     return result
+
+
+def combine_clip_vision_outputs(
+    outputs: List[Dict[str, torch.Tensor]],
+    method: str = 'concat',
+) -> Dict[str, Any]:
+    """Combine ordered CLIP outputs before IP-Adapter image projection.
+
+    The formulas match ComfyUI_IPAdapter_plus. ``concat`` preserves every
+    image as a batch item; the hook later flattens their projected tokens into
+    one attention context. Other methods reduce the image batch to one item.
+    """
+    if not outputs:
+        raise ValueError("At least one CLIP vision output is required")
+    allowed = {'concat', 'add', 'subtract', 'average', 'norm average'}
+    if method not in allowed:
+        raise ValueError(f"Unknown IP-Adapter embed combination: {method}")
+
+    def combine(tensors):
+        batch = torch.cat(tensors, dim=0)
+        if method == 'concat' or batch.shape[0] == 1:
+            return batch
+        if method == 'add':
+            return batch.sum(dim=0, keepdim=True)
+        if method == 'subtract':
+            return (batch[0] - batch[1:].mean(dim=0)).unsqueeze(0)
+        if method == 'average':
+            return batch.mean(dim=0, keepdim=True)
+        epsilon = (torch.finfo(batch.dtype).eps
+                   if batch.dtype.is_floating_point else 1e-12)
+        norms = torch.linalg.vector_norm(
+            batch, dim=0, keepdim=True).clamp_min(epsilon)
+        return (batch / norms).mean(dim=0, keepdim=True)
+
+    result = {}
+    if all('image_embeds' in output for output in outputs):
+        result['image_embeds'] = combine(
+            [output['image_embeds'] for output in outputs])
+    if all('hidden_states' in output for output in outputs):
+        count = min(len(output['hidden_states']) for output in outputs)
+        result['hidden_states'] = tuple(
+            combine([output['hidden_states'][index] for output in outputs])
+            for index in range(count))
+        result['penultimate_hidden_states'] = result['hidden_states'][-2]
+    if not result:
+        raise ValueError("CLIP outputs contain no compatible embeddings")
+    return result
+
+
+def _actionable_clip_key_mismatches(missing, unexpected):
+    """Ignore buffers saved by older CLIP exporters but not current Transformers."""
+    harmless_unexpected = {
+        'vision_model.embeddings.position_ids',
+    }
+    return (
+        list(missing),
+        [key for key in unexpected if key not in harmless_unexpected],
+    )
+
+
+def load_clip_vision_model(
+    model_path: str,
+    variant: str = 'vit_h',
+    device: str = 'cpu',
+) -> Any:
+    """Load an h94 IP-Adapter encoder directory or standalone weight file."""
+    from transformers import CLIPVisionConfig, CLIPVisionModelWithProjection
+
+    if os.path.isdir(model_path):
+        model = CLIPVisionModelWithProjection.from_pretrained(
+            model_path, local_files_only=True)
+    elif os.path.isfile(model_path):
+        if variant == 'vit_g':
+            config = CLIPVisionConfig(
+                hidden_size=1664, intermediate_size=8192,
+                num_hidden_layers=48, num_attention_heads=16,
+                image_size=224, patch_size=14, projection_dim=1280)
+        else:
+            config = CLIPVisionConfig(
+                hidden_size=1280, intermediate_size=5120,
+                num_hidden_layers=32, num_attention_heads=16,
+                image_size=224, patch_size=14, projection_dim=1024)
+        model = CLIPVisionModelWithProjection(config)
+        if model_path.lower().endswith('.safetensors'):
+            from safetensors.torch import load_file
+            state_dict = load_file(model_path, device='cpu')
+        else:
+            state_dict = torch.load(model_path, map_location='cpu', weights_only=True)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        missing, unexpected = _actionable_clip_key_mismatches(
+            missing, unexpected)
+        if missing or unexpected:
+            details = ', '.join((missing + unexpected)[:4])
+            raise ValueError(
+                f"CLIP vision checkpoint does not match {variant}: "
+                f"{len(missing)} missing, {len(unexpected)} unexpected keys"
+                + (f" ({details})" if details else ""))
+    else:
+        raise FileNotFoundError(f"CLIP vision model not found: {model_path}")
+
+    return model.half().to(device=device).eval()
 
 
 # ---- IP-Adapter model loading ----

@@ -12,7 +12,7 @@ from vibewarp.flow.flow_utils import warp_flow
 def warp_frame(frame1, frame2, flow, blend=0.5, weights=None, forward_clip=0.,
                pad_pct=0.1, padding_mode='reflect', warp_mul=1.,
                match_color_fn=None, adjust_brightness_fn=None,
-               video_mode=False):
+               video_mode=False, return_warped=False):
     """Warp frame1 toward frame2 using optical flow, then blend.
 
     Args:
@@ -28,9 +28,11 @@ def warp_frame(frame1, frame2, flow, blend=0.5, weights=None, forward_clip=0.,
         match_color_fn: optional callable(stylized, raw, opacity) for color matching
         adjust_brightness_fn: optional callable(image) for brightness correction
         video_mode: if True, skip color matching and brightness adjustment
+        return_warped: also return the motion-warped frame before raw-frame
+            blending and consistency compositing
 
     Returns:
-        Blended PIL Image.
+        Blended PIL image, or ``(blended, warped_only)`` when requested.
     """
     flow21 = flow
     pad = int(max(flow21.shape) * pad_pct)
@@ -60,11 +62,14 @@ def warp_frame(frame1, frame2, flow, blend=0.5, weights=None, forward_clip=0.,
         blended = frame2pil * (1 - blend) + frame1_warped * blend
 
     result = Image.fromarray(blended.round().astype('uint8'))
+    warped_result = Image.fromarray(
+        np.clip(frame1_warped, 0, 255).round().astype('uint8'))
 
     if not video_mode and adjust_brightness_fn is not None:
         result = adjust_brightness_fn(result)
+        warped_result = adjust_brightness_fn(warped_result)
 
-    return result
+    return (result, warped_result) if return_warped else result
 
 
 def blended_roll(img, shift, axis):

@@ -110,6 +110,7 @@ _VIBEWARP_TOP_LEVEL = {
     'output_dir', 'text_prompts', 'negative_prompts',
     'reference_label_opacity',
     'lora_dir', 'lora_merge_precision', 'frame_range',
+    'keyframes_relative_to_frame_range',
 }
 # Keys present in saved settings that have no RunConfig equivalent
 _VIBEWARP_SKIP = {'root_dir', 'animation_mode', 'settings_filename'}
@@ -142,6 +143,15 @@ def load_vibewarp_settings(settings_path: str) -> Dict[str, Any]:
     sections: Dict[str, Dict] = {s: {} for s in _VIBEWARP_SECTIONS}
     controlnet: Dict[str, Any] = {'enabled': True, 'models': {}}
     result: Dict[str, Any] = {}
+    legacy_ipadapter_models: Dict[str, Dict[str, Any]] = {}
+    ipadapter_entry_fields = (
+        'combine_embeds', 'embeds_scaling', 'source_images', 'source_image',
+        'weight_type', 'model_key', 'path', 'weight', 'start', 'end',
+    )
+    ipadapter_config_fields = {
+        'enabled', 'clip_vision_model_path', 'models',
+        'cache_embeddings', 'cache_size', 'flip_uc',
+    }
 
     for key, value in raw.items():
         if key in _VIBEWARP_SKIP:
@@ -156,7 +166,22 @@ def load_vibewarp_settings(settings_path: str) -> Dict[str, Any]:
         for section in _VIBEWARP_SECTIONS:
             if key.startswith(section + '_'):
                 subkey = key[len(section) + 1:]
-                sections[section][subkey] = value
+                if section == 'ipadapter' and subkey not in ipadapter_config_fields:
+                    # A short-lived writer bug flattened ipadapter.models one
+                    # level too far (for example ipadapter_sd15_weight).
+                    migrated_entry_field = False
+                    for field_name in ipadapter_entry_fields:
+                        suffix = '_' + field_name
+                        if subkey.endswith(suffix):
+                            instance = subkey[:-len(suffix)]
+                            legacy_ipadapter_models.setdefault(
+                                instance, {})[field_name] = value
+                            migrated_entry_field = True
+                            break
+                    if not migrated_entry_field:
+                        sections[section][subkey] = value
+                else:
+                    sections[section][subkey] = value
                 matched = True
                 break
 
@@ -189,6 +214,19 @@ def load_vibewarp_settings(settings_path: str) -> Dict[str, Any]:
         # else: unknown key, skip
 
     result['controlnet'] = controlnet
+    if legacy_ipadapter_models:
+        migrated: Dict[str, Dict[str, Any]] = {}
+        for instance, entry in legacy_ipadapter_models.items():
+            model_key = entry.get('model_key') or f'ipadapter_{instance}'
+            instance_key = model_key
+            suffix = 2
+            while instance_key in migrated:
+                instance_key = f'{model_key}__{suffix}'
+                suffix += 1
+            migrated[instance_key] = entry
+        # A correctly nested map, if present, is authoritative.
+        migrated.update(sections['ipadapter'].get('models', {}))
+        sections['ipadapter']['models'] = migrated
     for section, data in sections.items():
         if data:
             result[section] = data
@@ -439,6 +477,16 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
                 return raw.get(raw_key, default)
             return v
 
+        def _ipadapter_reference(source):
+            """Translate WarpFusion's string source into the unified UI shape."""
+            if source in ('stylized', 'warped'):
+                return {'source': 'warped', 'image_path': ''}
+            if source in ('previous', 'prev_frame'):
+                return {'source': 'previous', 'image_path': ''}
+            if source in ('', 'none', 'off', 'raw_frame', 'init'):
+                return {'source': 'none', 'image_path': ''}
+            return {'source': 'upload', 'image_path': str(source)}
+
         for cn_name, cn_cfg in cn_multimodel.items():
             if 'ipadapter' in cn_name:
                 ipa_filename = _ipa_filenames.get(cn_name, f'{cn_name}.bin')
@@ -446,11 +494,14 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
                     ipa_filename, model_roots,
                     ('ControlNet', 'controlnet', 'ipadapter', '')) or ipa_filename
                 ipadapter_models[cn_name] = {
+                    'model_key': cn_name,
                     'path': ipa_path,
                     'weight': cn_cfg.get('weight', 1.0),
                     'start': cn_cfg.get('start', 0.0),
                     'end': cn_cfg.get('end', 1.0),
-                    'source_image': cn_cfg.get('source', '') if cn_cfg.get('source', '') not in _GLOBAL_KEYS else '',
+                    'source_image': _ipadapter_reference(
+                        cn_cfg.get('source', '')
+                        if cn_cfg.get('source', '') not in _GLOBAL_KEYS else ''),
                     'weight_type': _ipa_global(cn_cfg, 'ip_weight_type', 'ip_weight_type', 'linear'),
                     'combine_embeds': _ipa_global(cn_cfg, 'ip_combine_embeds', 'ip_combine_embeds', 'concat'),
                     'embeds_scaling': _ipa_global(cn_cfg, 'ip_embeds_scaling', 'ip_embeds_scaling', 'V only'),
@@ -490,6 +541,22 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
                 'zero_uncond': zero_uncond,
             }
 
+    clip_vision_path = raw.get('ipadapter_clip_vision_model_path', '')
+    if not clip_vision_path and ipadapter_models:
+        # WarpFusion keeps both encoders in controlnet/clip_vision using these
+        # stable filenames. Point at the directory so runtime can select H/G.
+        found_clip = _find_in_roots(
+            'clip_vision_vit_h.safetensors', model_roots,
+            (os.path.join('controlnet', 'clip_vision'),
+             os.path.join('ControlNet', 'clip_vision'), 'clip_vision'))
+        if not found_clip:
+            found_clip = _find_in_roots(
+                'clip_vision_vit_bigg.safetensors', model_roots,
+                (os.path.join('controlnet', 'clip_vision'),
+                 os.path.join('ControlNet', 'clip_vision'), 'clip_vision'))
+        if found_clip:
+            clip_vision_path = os.path.dirname(found_clip)
+
     # Derive scalar fallback for steps from schedule (first frame or dict first value)
     _steps_default = 25
     if steps_schedule:
@@ -514,6 +581,8 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
         'text_prompts': text_prompts,
         'negative_prompts': negative_prompts,
         'frame_range': raw.get('frame_range', [0, 0]),
+        'keyframes_relative_to_frame_range': raw.get(
+            'keyframes_relative_to_frame_range', False),
         'lora_dir': raw.get('lora_dir', ''),
         # vibewarp extension (not a notebook key): 'fp16' = notebook-exact
         # merge arithmetic, 'fp32' = higher-precision deltas
@@ -535,6 +604,7 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
             'sampler_tile_overlap': raw.get('sampler_tile_overlap', 35.0),
             'sampler_tile_split_threshold': raw.get('sampler_tile_split_threshold', 20.0),
             'style_strength': _extract_scalar(raw.get('style_strength_schedule'), 0.65),
+            'guidance_mode': raw.get('guidance_mode', 'prev warped + cc'),
             'dynamic_thresh': raw.get('dynamic_thresh', 30.0),
             'code_randomness': raw.get('code_randomness', 0.0),
             'noise_mode': raw.get('noise_mode', 'default'),
@@ -645,6 +715,7 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
         },
         'ipadapter': {
             'enabled': bool(ipadapter_models),
+            'clip_vision_model_path': clip_vision_path,
             'models': ipadapter_models,
             'cache_embeddings': raw.get('cache_ipadapter', True),
             'cache_size': int(raw.get('ipadapter_embeds_cache_size', 10)),
@@ -775,12 +846,12 @@ def settings_to_dict(config) -> Dict[str, Any]:
 
     raw = asdict(config)
 
-    def _flatten(d, prefix=''):
+    def _flatten(d, prefix='', depth=0):
         for k, v in d.items():
             key = k if not prefix else f"{prefix}_{k}"
-            if isinstance(v, dict) and (k in nested_dc_fields or prefix):
+            if isinstance(v, dict) and depth == 0 and k in nested_dc_fields:
                 # Nested dataclass — flatten its fields
-                _flatten(v, k)
+                _flatten(v, key, depth + 1)
             elif isinstance(v, dict):
                 # User-supplied dict (e.g. text_prompts) — keep as-is
                 result[key] = v

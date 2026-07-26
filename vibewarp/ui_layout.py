@@ -87,7 +87,10 @@ FIELD_MODEL_FAMILIES = {
 # which reads fine INSIDE its own section but is meaningless once a field is hoisted next
 # to strangers: `animatediff.enabled` on the Model card would just say "Enabled".
 LABELS: Dict[str, str] = {
+    'diffusion.guidance_mode': 'Temporal guidance source',
     'animatediff.enabled': 'AnimateDiff (motion module)',
+    'main.keyframes_relative_to_frame_range':
+        'Keyframes relative to frame range',
     'color.before_enabled': 'Enabled',
     'color.before_strength': 'Strength',
     'color.before_method': 'Method',
@@ -118,7 +121,8 @@ def _assign(tier: str, group: str, *keys: str) -> None:
 # the UI clamps it against what the probe reports.
 _assign('project', 'Input Video',
         'video.video_init_path', 'video.extract_nth_frame',
-        'video.width', 'video.height', 'video.max_size', 'main.frame_range')
+        'video.width', 'video.height', 'video.max_size', 'main.frame_range',
+        'main.keyframes_relative_to_frame_range')
 _assign('project', 'Output',
         'main.batch_name', 'main.output_dir')
 # The model is picked once when a project starts and then left alone, so it belongs with
@@ -138,11 +142,13 @@ _assign('render', 'Prompts',
 _assign('render', 'Diffusion',
         'diffusion.steps_schedule', 'diffusion.cfg_scale_schedule',
         'diffusion.style_strength_schedule', 'diffusion.sampler',
-        'diffusion.clip_skip')
+        'diffusion.clip_skip', 'diffusion.guidance_mode')
 _assign('render', 'Seed', 'diffusion.seed')
 _assign('render', 'ControlNet',
         'controlnet.enabled', 'controlnet.models', 'controlnet.mode',
         'controlnet.cond_image_src', 'controlnet.normalize_weights')
+_assign('render', 'IP-Adapter',
+        'ipadapter.enabled', 'ipadapter.models', 'ipadapter.flip_uc')
 # Flux 2 Klein Edit (diffusers). Only active when model_version='flux2_klein_edit';
 # the fields live on the Render tab so the edit knobs sit next to the prompts they
 # drive. model_repo is a machine path and goes to System > Paths (below).
@@ -294,8 +300,6 @@ _assign('advanced', 'AnimateDiff',
         'animatediff.lerp_reinject_stylized_frames', 'animatediff.frame_keyed_noise',
         'animatediff.pingpong_noise', 'animatediff.batched_adiff_rec_noise',
         'animatediff.rec_sliding_ctx', 'animatediff.looped_noise')
-_assign('advanced', 'IP-Adapter',
-        'ipadapter.enabled', 'ipadapter.models', 'ipadapter.flip_uc')
 _assign('advanced', 'FreeU',
         'freeu.do_freeunet', 'freeu.apply_freeu_after_control',
         'freeu.b1', 'freeu.b2', 'freeu.s1', 'freeu.s2')

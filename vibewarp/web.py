@@ -8,6 +8,7 @@ from PIL import Image
 from vibewarp.config import RunConfig, flux_model_files, qwen_model_files
 from vibewarp.config_io import ConfigError, apply_path_defaults, config_from_dict, config_from_settings, config_schema, strip_path_quotes, validate_config
 from vibewarp.controlnet_catalog import CONTROLNET_MODES, MODE_PRESETS, specs_for_version
+from vibewarp.ipadapter_catalog import specs_for_version as ipadapter_specs_for_version
 from vibewarp import system_settings
 from vibewarp.preview import (describe_run, image_path, list_runs, resume_status,
                               run_dir, runs_root, set_run_label, settings_file,
@@ -64,6 +65,16 @@ def _controlnet_files(model_dir: str) -> list:
         if name.lower().endswith(CHECKPOINT_SUFFIXES)
         and os.path.isfile(os.path.join(model_dir, name))
     )
+
+
+def _ipadapter_files(model_dir: str) -> list:
+    """IP-Adapter checkpoints present in the shared ControlNet model directory."""
+    return [
+        path for path in _controlnet_files(model_dir)
+        if "ip-adapter" in os.path.basename(path).lower()
+        or "ip_adapter" in os.path.basename(path).lower()
+    ]
+
 
 def create_app(job_manager: JobManager | None = None, initial_config: RunConfig | None = None):
     try:
@@ -268,6 +279,22 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         return {"nets": nets, "files": found, "modes": list(CONTROLNET_MODES),
                 "mode_presets": {name: {"layer_weights": weights, "zero_uncond": zero}
                                  for name, (weights, zero) in MODE_PRESETS.items()}}
+
+    @app.get("/api/ipadapter/catalog")
+    def ipadapter_catalog(model_version: str = "", model_dir: str = ""):
+        """Selectable adapters for the active SD family and checkpoints on disk."""
+        found = _ipadapter_files(model_dir)
+        by_name = {os.path.basename(path): path for path in found}
+        adapters = [{
+            "key": spec.key,
+            "label": spec.label,
+            "model_version": spec.model_version,
+            "clip_variant": spec.clip_variant,
+            "filename": spec.filename,
+            "downloadable": bool(spec.url),
+            "resolved_path": by_name.get(spec.filename),
+        } for spec in ipadapter_specs_for_version(model_version)]
+        return {"adapters": adapters, "files": found}
 
     @app.get("/api/preview/runs")
     def preview_runs(output_dir: str = "images_out", batch_name: str = "warpfusion"):

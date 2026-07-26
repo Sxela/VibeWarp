@@ -339,6 +339,21 @@ def _debug_label(stem: str) -> tuple:
     if stem.startswith('mage_reference_'):
         return stem.replace('_', ' ').replace(
             'mage', 'Mage-Flow', 1), 'Edit inputs'
+    match = re.match(
+        r'^ipa_(?P<instance>.+)_source_(?P<index>\d+)$', stem)
+    if match:
+        instance = match.group('instance')
+        base_key = re.sub(r'__\d+$', '', instance)
+        from vibewarp.ipadapter_catalog import IPADAPTER_CATALOG
+        spec = IPADAPTER_CATALOG.get(base_key)
+        label = spec.label if spec else instance
+        suffix = re.search(r'__(\d+)$', instance)
+        if suffix:
+            label = f"{label} instance {suffix.group(1)}"
+        return (
+            f"IP-Adapter {label} — source {match.group('index')}",
+            'IP-Adapter',
+        )
     for suffix, kind in (('_detected', 'detected map'), ('_source', 'source')):
         if stem.endswith(suffix):
             net = stem[: -len(suffix)]

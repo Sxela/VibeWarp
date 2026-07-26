@@ -70,6 +70,13 @@ The `preprocess` field maps to annotator type: `'PIDI'` → `softedge`, `'dw_pos
 - `{frame: value}` — keyframe dict (with linear interpolation when `blend=True`)
 - `[[v0, v1, v2]]` — WarpFusion ramp format: interpolate across diffusion steps (CFG only)
 
+Enable `keyframes_relative_to_frame_range` to interpret frame-keyed prompts and
+schedules from the selected range's start instead of from the video's frame 0.
+For example, with `frame_range=[60, 70]`, `{0: 1.0, 1: 0.7}` is evaluated as
+`{60: 1.0, 61: 0.7}`. The saved keys remain relative, so changing the range
+start moves the schedule without rewriting it. Per-frame lists follow the same
+coordinate system while this switch is enabled.
+
 ## ControlNet modes and layer weights
 
 Each ControlNet entry has a `mode`. It is the user-facing knob; `layer_weights`
@@ -110,6 +117,61 @@ notebook. The format is detected from the checkpoint itself, so an SDXL net work
 whether you point at it explicitly or let `model_dir` resolve it. A ControlNet from
 the wrong base model (an SD1.5 net on an SDXL checkpoint) is rejected up front
 rather than failing with a shape mismatch mid-render.
+
+## IP-Adapter
+
+IP-Adapter is available on the SD1.5/SDXL render path. Set
+`ipadapter.clip_vision_model_path` to an h94 image-encoder directory, one
+standalone encoder checkpoint, or the WarpFusion `clip_vision` directory:
+
+```text
+models/controlnet/clip_vision/
+├── clip_vision_vit_h.safetensors
+└── clip_vision_vit_bigg.safetensors
+```
+
+VibeWarp selects ViT-H or ViT-bigG from the adapter name/weights. A WarpFusion
+settings import discovers that directory automatically. Encoder weights stay on
+CPU and move to the GPU only while an image is encoded.
+
+The **IP-Adapter** panel sits directly below **ControlNet** on the Render tab.
+Its model dropdown is filtered to the active SD1.5 or SDXL family and scans the
+ControlNet model directory for matching checkpoints; a custom checkpoint path
+remains available for models stored elsewhere.
+
+Each adapter has its own image selector: Off, previous stylized frame,
+previous stylized + warp + consistency, or an uploaded/fixed image. Raw-frame
+input is intentionally not offered. Temporal sources are not sent on the first
+configured render-range frame because there is no result from that range to
+feed back yet; fixed references remain active. Legacy static paths and
+`{frame: image}` schedules are still accepted when loading settings. Hooks are
+installed after reconstruction-noise and ControlNet preprocessing, matching the
+notebook's default delayed application.
+
+There are two ways to condition on several images:
+
+- Add images inside one adapter instance. They share one weight and step range.
+  `concat` preserves their order as one longer token context; `add` sums the
+  embeddings; `subtract` uses Image 1 minus the average of Images 2..N;
+  `average` takes their mean; and `norm average` normalizes each embedding
+  before averaging it.
+- Add the same adapter repeatedly. Each instance has its own image list, weight,
+  schedule, and combine method. The instances install independent attention
+  hooks, so their weighted attention outputs are added to the UNet result.
+
+Identical image/encoder pairs may share the cached CLIP computation without
+changing either behavior. `average` is the lightest multi-image choice;
+`concat` retains the most separate image information but creates a longer
+attention context.
+
+FaceID variants and the IP-Adapter + AnimateDiff batch combination are not yet
+parity-complete. Regular and Plus adapters on the non-AnimateDiff path are
+covered by the parity tests.
+
+Run `download-ipadapter-models.sh` on Linux/macOS or
+`download-ipadapter-models.bat` on Windows to download all regular/Plus
+checkpoints and both CLIP encoders into this layout. Both scripts skip completed
+files and resume interrupted `.part` downloads.
 
 ## Consistency mask
 
@@ -254,6 +316,21 @@ Background types:
 - `'init_video'` — raw video frame for the same index
 
 `mask_clip_low` / `mask_clip_high` threshold the mask before compositing.
+
+## SD/SDXL temporal guidance
+
+`diffusion.guidance_mode` selects the img2img target used after the first
+rendered frame:
+
+- `prev stylized` uses the previous output without motion compensation.
+- `prev warped` uses the previous output after optical-flow warping, before
+  consistency-mask compositing.
+- `prev warped + cc` (default) uses the warped output composited with the
+  current raw frame through the consistency mask.
+
+The first frame in the selected range has no previous output, so it keeps the
+existing raw-frame initialization. This setting applies only to SD 1.5 and
+SDXL; edit-model backends continue to use their reference-image pipeline.
 
 ## Tiled sampler
 

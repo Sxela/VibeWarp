@@ -2,6 +2,7 @@
   import { tick } from 'svelte';
   import Field from './Field.svelte';
   import ControlNetEditor from './ControlNetEditor.svelte';
+  import IPAdapterEditor from './IPAdapterEditor.svelte';
   import ReferenceImagesEditor from './ReferenceImagesEditor.svelte';
   import VideoEditor from './VideoEditor.svelte';
   import Preview from './Preview.svelte';
@@ -127,12 +128,12 @@
     node.querySelector('input,textarea,select')?.focus({preventScroll:true});
   }
   // These sections have purpose-built editors; the generic Field grid can't express them.
-  const custom={'Input Video':'video','ControlNet':'controlnet',
+  const custom={'Input Video':'video','ControlNet':'controlnet','IP-Adapter':'ipadapter',
                 'Reference Images':'references'};
   // Groups that span both columns: the custom editors, plus anything whose fields are
   // long-form (prompt textareas, keyframe chip rows) and would be cramped at half width.
   const wide=new Set(['Prompts','Scene Scheduling','Flow & Consistency',
-                      'Reference Images']);
+                      'Reference Images','IP-Adapter']);
   // A group can point at the tab holding the rest of its settings. AnimateDiff's toggle is
   // a MODEL choice (in the notebook it IS the model version), so it sits on the Model card
   // — but its tuning lives in Advanced, and you should not have to go hunting for it.
@@ -320,6 +321,14 @@
               <ControlNetEditor value={config.controlnet} schema={schema.properties.controlnet}
                                 modelVersion={config.model_version}
                                 onchange={(v)=>setField('controlnet',v)}/>
+            {:else if only==='ipadapter'}
+              <IPAdapterEditor value={config.ipadapter} schema={schema.properties.ipadapter}
+                onchange={(v)=>setField('ipadapter',v)}
+                modelVersion={config.model_version}
+                modelDir={config.controlnet.model_dir}
+                videoPath={config.video.video_init_path}
+                frameRange={config.frame_range}
+                extractNth={config.video.extract_nth_frame}/>
             {:else if only==='references'}
               {@const refItem=group.items.find(item=>item.name==='references')}
               {@const refSection=refItem?.section}

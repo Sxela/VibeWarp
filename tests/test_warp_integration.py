@@ -70,6 +70,16 @@ class TestWarpBetweenFrames:
         result = warp_between_frames(ctx_with_raft, prev_frame, frame_num=0)
         assert isinstance(result, Image.Image)
 
+    def test_can_return_warp_without_consistency_composite(self, ctx_with_raft):
+        prev_frame = Image.fromarray(
+            np.random.randint(0, 255, (64, 80, 3), dtype=np.uint8)
+        )
+        composite, warped = warp_between_frames(
+            ctx_with_raft, prev_frame, frame_num=0, return_warped=True)
+        assert isinstance(composite, Image.Image)
+        assert isinstance(warped, Image.Image)
+        assert composite.size == warped.size
+
     def test_output_dimensions(self, ctx_with_raft):
         prev_frame = Image.fromarray(
             np.random.randint(0, 255, (64, 80, 3), dtype=np.uint8)

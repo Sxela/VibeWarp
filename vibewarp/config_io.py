@@ -21,6 +21,10 @@ from vibewarp.controlnet_catalog import (
     CONTROLNET_MODES,
     normalize_model_version,
 )
+from vibewarp.ipadapter_catalog import (
+    IPADAPTER_CATALOG,
+    resolve_ipadapter_path,
+)
 
 FIELD_CHOICES = {
     # The two control_multi_* versions cover everything the UI needs: with no
@@ -57,6 +61,8 @@ FIELD_CHOICES = {
     "DiffusionConfig.sampler": ["sample_euler_ancestral", "sample_euler", "sample_dpm_2", "sample_dpm_2_ancestral", "sample_heun", "sample_lms", "sample_dpmpp_2m", "sample_dpmpp_2s_ancestral", "sample_dpmpp_sde", "sample_lcm"],
     "DiffusionConfig.sampler_tile_size": [256, 512, 768, 1024],
     "DiffusionConfig.noise_mode": ["default", "fixed", "reconstructed"],
+    "DiffusionConfig.guidance_mode": [
+        "prev stylized", "prev warped", "prev warped + cc"],
     "VideoConfig.save_img_format": ["png", "jpg"],
     "ColorConfig.before_method": ["PDF", "LAB", "mean"],
     "ColorConfig.after_method": ["PDF", "LAB", "mean"],
@@ -83,7 +89,8 @@ FIELD_CHOICES = {
     "BackgroundMaskConfig.background": ["color", "image", "init_video"],
     "ReconstructionNoiseConfig.source": ["init", "stylized"],
     "IPAdapterEntry.weight_type": ["linear", "ease in", "ease out", "ease in-out", "reverse in-out", "weak input", "weak middle", "weak output", "strong middle", "style transfer", "composition", "strong style transfer", "style and composition", "strong style and composition", "style transfer precise"],
-    "IPAdapterEntry.combine_embeds": ["concat", "add"],
+    "IPAdapterEntry.combine_embeds": [
+        "concat", "add", "subtract", "average", "norm average"],
     "IPAdapterEntry.embeds_scaling": ["V only", "K+V", "K+V w/ C penalty", "K+mean(V) w/ C penalty"],
 }
 
@@ -353,6 +360,76 @@ def validate_config(
                           f"{key} is a {spec.model_version} ControlNet, but the model "
                           f"is {family} — remove it or switch the model version")
 
+    if uses_sd_stack and config.ipadapter.enabled:
+        if not config.ipadapter.models:
+            error(
+                "ipadapter.models",
+                "IP-Adapter is enabled but no adapter models are configured")
+        allowed_ip_sources = {'none', 'off', 'previous', 'warped', 'upload', 'fixed'}
+        for key, entry in config.ipadapter.models.items():
+            model_key = getattr(entry, 'model_key', '') or key
+            spec = IPADAPTER_CATALOG.get(model_key)
+            family = normalize_model_version(config.model_version)
+            if spec and family and spec.model_version != family:
+                error(
+                    f"ipadapter.models.{key}",
+                    f"{model_key} is a {spec.model_version} IP-Adapter, but the model "
+                    f"is {family} — remove it or switch the model version")
+            if check_paths and entry.weight != 0:
+                checkpoint = resolve_ipadapter_path(
+                    model_key, entry.path, config.controlnet.model_dir)
+                if not checkpoint:
+                    error(
+                        f"ipadapter.models.{key}.path",
+                        f"{key}: no IP-Adapter checkpoint is configured")
+                elif not os.path.isfile(checkpoint):
+                    error(
+                        f"ipadapter.models.{key}.path",
+                        f"{key}: IP-Adapter checkpoint does not exist: "
+                        f"{checkpoint}")
+            references = list(getattr(entry, 'source_images', None) or
+                              [entry.source_image])
+            for ref_index, reference in enumerate(references):
+                item_path = f"ipadapter.models.{key}.source_images.{ref_index}"
+                if isinstance(reference, dict) and 'source' not in reference:
+                    # Legacy frame-keyed path schedule.
+                    if check_paths:
+                        for image_path in reference.values():
+                            if image_path and not os.path.isfile(image_path):
+                                error(
+                                    item_path,
+                                    f"scheduled reference image does not "
+                                    f"exist: {image_path}")
+                    continue
+                if isinstance(reference, dict) and 'source' in reference:
+                    source = reference.get('source', 'none')
+                    image_path = reference.get('image_path', '')
+                else:
+                    source = reference
+                    image_path = (reference if isinstance(reference, str)
+                                  and reference not in (
+                                      '', 'none', 'off', 'previous', 'prev_frame',
+                                      'stylized', 'warped', 'raw_frame', 'init')
+                                  else '')
+                    source = {
+                        '': 'none', 'off': 'none', 'prev_frame': 'previous',
+                        'stylized': 'warped',
+                    }.get(source, source)
+                if source in ('raw_frame', 'init'):
+                    error(
+                        item_path,
+                        f"{key}: raw-frame input is not supported; choose Off, a "
+                        "previous stylized source, or a fixed image")
+                elif source not in allowed_ip_sources and not image_path:
+                    error(item_path, f"{key}: unknown image source {source!r}")
+                if source in ('upload', 'fixed'):
+                    if not image_path:
+                        error(item_path, f"{key}: choose a fixed reference image")
+                    elif check_paths and not os.path.isfile(image_path):
+                        error(
+                            item_path,
+                            f"{key}: fixed reference image does not exist: {image_path}")
+
     # Without a motion module, `enabled` still switches the render into AnimateDiff
     # batch mode but no temporal attention is injected — you pay the batching cost
     # and the output looks unchanged. Fail instead of quietly doing nothing.
@@ -378,6 +455,8 @@ def validate_config(
             error("diffusion.steps", "Diffusion steps must be at least 1")
         if not 0 <= config.diffusion.style_strength <= 1:
             error("diffusion.style_strength", "Style strength must be between 0 and 1")
+        if config.diffusion.guidance_mode not in FIELD_CHOICES["DiffusionConfig.guidance_mode"]:
+            error("diffusion.guidance_mode", "Unknown SD/SDXL guidance mode")
         if (config.diffusion.sampler_tile_size < 8
                 or config.diffusion.sampler_tile_size % 8):
             error("diffusion.sampler_tile_size",

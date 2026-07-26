@@ -461,6 +461,20 @@ def clear_all_ip_adapter():
     return
 
 
+def concat_projected_embeddings(cond, uncond):
+    """Flatten an image batch into one ordered token sequence for attention."""
+    if cond.shape[0] <= 1:
+        return cond, uncond
+    image_count = cond.shape[0]
+    if uncond.shape[0] == 1:
+        uncond = uncond.repeat(
+            image_count, *([1] * (uncond.ndim - 1)))
+    return (
+        cond.flatten(0, 1).unsqueeze(0),
+        uncond.flatten(0, 1).unsqueeze(0),
+    )
+
+
 class PlugableIPAdapter(torch.nn.Module):
     def __init__(self, state_dict, is_v2: bool = False):
         """
@@ -547,6 +561,13 @@ class PlugableIPAdapter(torch.nn.Module):
             self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds_faceid_plus(*clip_vision_output, is_v2=self.is_v2)
         else:
             self.image_emb, self.uncond_image_emb = self.ipadapter.get_image_embeds(clip_vision_output)
+
+        # Multiple references in concat mode become one longer token context.
+        # The legacy hook expects one conditioning batch item, so leaving the
+        # image count in dim 0 would collide with the CFG batch dimension.
+        if combine_embeds == "concat" and self.image_emb.shape[0] > 1:
+            self.image_emb, self.uncond_image_emb = concat_projected_embeddings(
+                self.image_emb, self.uncond_image_emb)
 
         self.image_emb = self.image_emb.to(device, dtype=self.dtype)
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=self.dtype)

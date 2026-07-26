@@ -203,8 +203,7 @@ class TestRunFramesAnimatediff:
 
 
 class TestPipelineIPAdapterWiring:
-    def test_apply_ipadapter_hooks_called(self):
-        """pipeline.run() should call _apply_ipadapter_hooks when ipadapters loaded."""
+    def test_apply_ipadapter_hooks_loads_encoder_for_deferred_hooking(self):
         from unittest.mock import patch
         from vibewarp.pipeline import _apply_ipadapter_hooks
 
@@ -226,20 +225,18 @@ class TestPipelineIPAdapterWiring:
             }
         }
         config = RunConfig()
+        config.ipadapter.clip_vision_model_path = '/models/clip.safetensors'
 
-        # Mock hook_ipadapter to avoid needing a real UNet
-        def fake_hook(sd_model, adapter_weights, clip_vision_output, **kwargs):
-            if not hasattr(sd_model, '_ipadapter_hooks'):
-                sd_model._ipadapter_hooks = []
-            sd_model._ipadapter_hooks.append(kwargs)
+        encoder = object()
+        with patch('vibewarp.core.ipadapter.load_clip_vision_model',
+                   return_value=encoder) as load:
+            models = _apply_ipadapter_hooks(sd_model, ipadapters, config)
+        load.assert_called_once_with('/models/clip.safetensors', variant='vit_h')
+        assert models == {'vit_h': encoder}
+        assert ipadapters['test_adapter']['clip_variant'] == 'vit_h'
+        assert not hasattr(sd_model, '_ipadapter_hooks')
 
-        with patch('vibewarp.core.ipadapter.hook_ipadapter', side_effect=fake_hook):
-            _apply_ipadapter_hooks(sd_model, ipadapters, config)
-        assert hasattr(sd_model, '_ipadapter_hooks')
-        assert len(sd_model._ipadapter_hooks) == 1
-
-    def test_apply_ipadapter_hooks_weight(self):
-        """Hook should preserve the weight from config."""
+    def test_apply_ipadapter_hooks_requires_encoder_path(self):
         from unittest.mock import patch
         from vibewarp.pipeline import _apply_ipadapter_hooks
 
@@ -262,19 +259,8 @@ class TestPipelineIPAdapterWiring:
         }
         config = RunConfig()
 
-        def fake_hook(sd_model, adapter_weights, clip_vision_output, **kwargs):
-            if not hasattr(sd_model, '_ipadapter_hooks'):
-                sd_model._ipadapter_hooks = []
-            sd_model._ipadapter_hooks.append(kwargs)
-
-        with patch('vibewarp.core.ipadapter.hook_ipadapter', side_effect=fake_hook):
+        with pytest.raises(ValueError, match='clip_vision_model_path'):
             _apply_ipadapter_hooks(sd_model, ipadapters, config)
-        hook = sd_model._ipadapter_hooks[0]
-        assert hook['weight'] == 0.42
-        assert hook['start'] == 0.1
-        assert hook['end'] == 0.9
-        assert hook['weight_type'] == 'ease in'
-        assert hook['embeds_scaling'] == 'K+V'
 
 
 class TestAnimateDiffNoise:

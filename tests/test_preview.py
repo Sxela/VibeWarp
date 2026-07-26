@@ -24,10 +24,14 @@ def build_run(tmp_path, run_id="0", batch="warpfusion", frames=3):
         (run / "debug" / f"hidream_reference_1_{n:06d}.png").write_bytes(b"ref1")
         (run / "debug" / f"flux_reference_1_{n:06d}.png").write_bytes(b"flux1")
         (run / "debug" / f"mage_reference_1_{n:06d}.png").write_bytes(b"mage1")
+        (run / "debug" / f"ipa_ipadapter_sd15_source_1_{n:06d}.png").write_bytes(
+            b"ipa1")
         if n > 0:
             (run / "debug" / f"hidream_reference_2_{n:06d}.png").write_bytes(b"ref2")
             (run / "debug" / f"flux_reference_2_{n:06d}.png").write_bytes(b"flux2")
             (run / "debug" / f"mage_reference_2_{n:06d}.png").write_bytes(b"mage2")
+            (run / "debug" / f"ipa_ipadapter_sd15_source_2_{n:06d}.png").write_bytes(
+                b"ipa2")
         if n > 0:  # frame 0 has no previous frame to warp
             (run / f"_warped_{n:06d}.png").write_bytes(b"warp")
             (run / "debug" / f"consistency_mask_{n:06d}.png").write_bytes(b"mask")
@@ -147,6 +151,8 @@ class TestLayers:
             "debug:flux_reference_2",
             "debug:mage_reference_1",
             "debug:mage_reference_2",
+            "debug:ipa_ipadapter_sd15_source_1",
+            "debug:ipa_ipadapter_sd15_source_2",
         }
 
     def test_controlnet_layers_get_catalog_labels(self, tmp_path):
@@ -170,6 +176,11 @@ class TestLayers:
         assert layers["debug:mage_reference_2"]["label"] == \
             "Mage-Flow reference 2"
         assert layers["debug:mage_reference_2"]["group"] == "Edit inputs"
+        assert layers["debug:ipa_ipadapter_sd15_source_1"]["label"] == \
+            "IP-Adapter Base — source 1"
+        assert layers["debug:ipa_ipadapter_sd15_source_1"]["group"] == \
+            "IP-Adapter"
+        assert layers["debug:ipa_ipadapter_sd15_source_2"]["frames"] == [1, 2]
 
     def test_warped_layer_has_no_frame_zero(self, tmp_path):
         root = build_run(tmp_path)

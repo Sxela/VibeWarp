@@ -1,5 +1,9 @@
 <script>
   import { diffSettings, formatSettingValue } from './settingsDiff.js';
+  import {
+    filterRunsByMinimumFrames,
+    normalizeMinimumFrames,
+  } from './historyFilters.js';
   // Frame-by-frame comparison of a run's layers: init frame, warped init, each
   // ControlNet's source + detected map, the diffusion input, and the output.
   //
@@ -9,6 +13,7 @@
   let { config, job, onload, onjob } = $props();
 
   const STORAGE_KEY = 'vibewarp.preview.layers.v1';
+  const MIN_FRAMES_STORAGE_KEY = 'vibewarp.preview.minimumFrames.v1';
   const DEFAULT_LAYERS = ['init', 'output'];
 
   let runs = $state([]);
@@ -31,6 +36,7 @@
   let diffLoading = $state(false);
   let diffError = $state('');
   let showDiff = $state(false);
+  let minimumFrames = $state(loadMinimumFrames());
 
   // Pull an old run's settings back into the form. The point of keeping history is being
   // able to iterate on a run you liked, not just look at it.
@@ -146,6 +152,39 @@
     catch { return DEFAULT_LAYERS; }
   }
   $effect(() => { localStorage.setItem(STORAGE_KEY, JSON.stringify(selected)); });
+  function loadMinimumFrames(){
+    try {
+      return normalizeMinimumFrames(
+        localStorage.getItem(MIN_FRAMES_STORAGE_KEY) ?? 0);
+    } catch {
+      return 0;
+    }
+  }
+  let visibleRuns = $derived(
+    filterRunsByMinimumFrames(runs, minimumFrames));
+  function setMinimumFrames(value){
+    minimumFrames = normalizeMinimumFrames(value);
+    try {
+      localStorage.setItem(MIN_FRAMES_STORAGE_KEY, String(minimumFrames));
+    } catch {}
+    let available = filterRunsByMinimumFrames(runs, minimumFrames);
+    let availableIds = new Set(available.map(run => run.id));
+    compareIds = compareIds.filter(id => availableIds.has(id));
+    if (compareIds.length < 2) showDiff = false;
+    if (!available.length) {
+      runId = '';
+      detail = null;
+      error = minimumFrames
+        ? `No runs rendered at least ${minimumFrames} frame${minimumFrames===1?'':'s'}`
+        : '';
+      return;
+    }
+    error = '';
+    if (!available.some(run => run.id === runId)) {
+      runId = available[0].id;
+      loadRun();
+    }
+  }
 
   let params = $derived(new URLSearchParams({
     output_dir: config?.output_dir || 'images_out',
@@ -159,7 +198,13 @@
       let d = await r.json();
       runs = d.runs ?? [];
       if (!runs.length) { detail = null; error = `No runs under ${d.root}`; return; }
-      if (!keep || !runs.some(run => run.id === runId)) runId = runs[0].id;
+      let available = filterRunsByMinimumFrames(runs, minimumFrames);
+      if (!available.length) {
+        runId = ''; detail = null;
+        error = `No runs rendered at least ${minimumFrames} frame${minimumFrames===1?'':'s'}`;
+        return;
+      }
+      if (!keep || !available.some(run => run.id === runId)) runId = available[0].id;
       await loadRun();
     } catch { error = 'Could not list runs'; }
     finally { loading = false; }
@@ -240,8 +285,15 @@
         {loading ? 'Loading…' : 'Refresh'}
       </button>
     </div>
+    <label class="frame-filter">
+      <span>Minimum rendered frames</span>
+      <input type="number" min="0" step="1" value={minimumFrames}
+        onchange={(event)=>setMinimumFrames(event.currentTarget.value)}
+        aria-label="Minimum rendered frames"/>
+      <small>{visibleRuns.length} of {runs.length} runs</small>
+    </label>
     <div class="run-list">
-      {#each runs as run (run.id)}
+      {#each visibleRuns as run (run.id)}
         <button class="run-card" class:on={run.id === runId}
                 class:compared={compareIds.includes(run.id)}
                 onclick={(event)=>pick(run.id,event)} title={run.prompt}>
@@ -261,7 +313,9 @@
           </div>
         </button>
       {:else}
-        <p class="none">No runs under {config?.output_dir || 'images_out'}/{config?.batch_name || 'warpfusion'}</p>
+        <p class="none">{runs.length
+          ? `No runs rendered at least ${minimumFrames} frame${minimumFrames===1?'':'s'}.`
+          : `No runs under ${config?.output_dir || 'images_out'}/${config?.batch_name || 'warpfusion'}`}</p>
       {/each}
     </div>
   </aside>
@@ -411,6 +465,12 @@
   .runs-head span{display:block;margin-top:3px;color:#515966;font-size:9px}
   .link{border:0;background:none;color:#8ea834;font-size:11px;cursor:pointer;padding:4px}
   .link:disabled{color:#4b525b;cursor:default}
+  .frame-filter{display:grid;grid-template-columns:minmax(0,1fr) 68px;align-items:center;gap:5px 8px;
+        margin:0 12px 10px;padding:9px 10px;border:1px solid #292e36;border-radius:8px;
+        color:#8b929c;font-size:10px;background:#111419}
+  .frame-filter input{width:100%;min-width:0;border:1px solid #353b44;border-radius:6px;
+        background:#0b0e12;color:#e7eaee;padding:6px 7px;font:11px Consolas,monospace}
+  .frame-filter small{grid-column:1/-1;color:#59616c;font-size:9px}
   .run-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:0 12px 16px}
   .none{color:#656d78;font-size:11px;line-height:1.5;padding:8px 2px}
   .run-card{flex:0 0 auto;display:flex;align-items:stretch;gap:9px;padding:0;
