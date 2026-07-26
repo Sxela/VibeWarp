@@ -251,9 +251,23 @@ def is_hidream_model(model_version: str) -> bool:
     return 'hidream' in model_version.lower()
 
 
+def is_qwen_edit_model(model_version: str) -> bool:
+    """Check if a model version selects the Qwen Image Edit backend."""
+    lowered = model_version.lower()
+    return 'qwen' in lowered and 'edit' in lowered
+
+
+def is_mage_flow_edit_model(model_version: str) -> bool:
+    """Check if a model version selects the Mage-Flow-Edit backend."""
+    lowered = model_version.lower()
+    return 'mage' in lowered and 'flow' in lowered and 'edit' in lowered
+
+
 def is_edit_model(model_version: str) -> bool:
     """Whether rendering is delegated to an external image-edit backend."""
-    return is_flux_model(model_version) or is_hidream_model(model_version)
+    return (is_flux_model(model_version) or is_hidream_model(model_version)
+            or is_qwen_edit_model(model_version)
+            or is_mage_flow_edit_model(model_version))
 
 
 def configure_sdxl_clip_layer_norm(sd_model: Any, apply_final_layer_norm: bool) -> None:

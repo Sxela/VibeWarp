@@ -13,6 +13,10 @@
   // were rendering as a raw JSON blob.
   const PROMPTS = new Set(['text_prompts', 'negative_prompts', 'prompts', 'neg_prompts']);
   let isPrompts = $derived(PROMPTS.has(name));
+  // Model reference instructions are plain text, not frame-keyed prompt schedules.
+  // They still need the same roomy editor as prompts instead of a one-line input.
+  const PLAIN_TEXT = new Set(['multi_reference_instruction']);
+  let isPlainText = $derived(PLAIN_TEXT.has(name));
   // The backend can override the display name (ui_layout.LABELS). A field hoisted out of
   // its section needs one: `animatediff.enabled` on the Model card would just say "Enabled".
   let title = $derived(schema.label || name.replaceAll('_',' ').replace(/\b\w/g, c=>c.toUpperCase()));
@@ -61,8 +65,8 @@
   <label class:errored={!!error} id={anchor}><span>{title}</span><input class:invalid={!!error} type="number" value={value} step={schema.type==='integer'?1:'any'} onchange={numberValue}/>
     {#if error}<small class="err">{error}</small>{:else if hint}<small class="hint">{hint}</small>{/if}</label>
 {:else if schema.type === 'string'}
-  <label class:wide={name.includes('prompt') || isPathField(name)} class:errored={!!error} id={anchor}><span>{title}</span>
-    {#if name.includes('prompt')}<textarea class:invalid={!!error} value={value} rows="3" onchange={(e)=>onchange(e.target.value)}></textarea>
+  <label class:wide={name.includes('prompt') || isPlainText || isPathField(name)} class:errored={!!error} id={anchor}><span>{title}</span>
+    {#if name.includes('prompt') || isPlainText}<textarea class:invalid={!!error} value={value} rows="3" aria-label={title} onchange={(e)=>onchange(e.target.value)}></textarea>
     {:else if isPathField(name)}<input class:missing class:invalid={!!error} value={value} onchange={checkPath} onblur={checkPath}/>
       {#if missing}<small class="missing-note">Not found on disk</small>{/if}
     {:else}<input class:invalid={!!error} value={value} onchange={(e)=>onchange(e.target.value)}/>{/if}

@@ -102,11 +102,13 @@ _VIBEWARP_SECTIONS = [
     # Longer prefixes must come before shorter ones that share a stem
     'reconstruction_noise', 'video_assembly', 'animatediff', 'ipadapter',
     'diffusion', 'brightness', 'captions', 'scene', 'freeu',
-    'color', 'warp', 'flow', 'video', 'mask', 'vae', 'hidream', 'flux',
+    'color', 'warp', 'flow', 'video', 'mask', 'vae', 'hidream', 'flux', 'qwen',
+    'mage',
 ]
 _VIBEWARP_TOP_LEVEL = {
     'sd_checkpoint_path', 'model_path', 'model_version', 'batch_name',
     'output_dir', 'text_prompts', 'negative_prompts',
+    'reference_label_opacity',
     'lora_dir', 'lora_merge_precision', 'frame_range',
 }
 # Keys present in saved settings that have no RunConfig equivalent
@@ -494,6 +496,16 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
         first_key = min(steps_schedule.keys())
         _steps_default = steps_schedule[first_key]
 
+    legacy_color_strength = raw.get('match_color_strength', 0.0)
+    legacy_color_method = raw.get('colormatch_method', 'PDF')
+    legacy_color_regrain = raw.get('colormatch_regrain') or False
+    legacy_color_mode = raw.get(
+        'colormatch_mode',
+        'after' if raw.get('colormatch_after', True) else 'before')
+    legacy_color_enabled = legacy_color_strength > 0
+    migrated_color_strength = (
+        legacy_color_strength if legacy_color_enabled else 0.5)
+
     # Build VibeWarp config dict
     config = {
         'sd_checkpoint_path': model_path,
@@ -587,14 +599,22 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
             'min_brightness_threshold': raw.get('min_brightness_threshold', 1),
         },
         'color': {
-            'match_color_strength': raw.get('match_color_strength', 0.0),
-            'colormatch_method': raw.get('colormatch_method', 'PDF'),
-            'colormatch_regrain': raw.get('colormatch_regrain') or False,
-            # WarpFusion exposed an exclusive before/after boolean. Preserve
-            # that meaning on import; VibeWarp additionally offers "both".
-            'colormatch_mode': raw.get(
-                'colormatch_mode',
-                'after' if raw.get('colormatch_after', True) else 'before'),
+            'before_enabled': (
+                legacy_color_enabled
+                and legacy_color_mode in ('before', 'both')),
+            'before_strength': migrated_color_strength,
+            'before_method': legacy_color_method,
+            'before_regrain': legacy_color_regrain,
+            'after_enabled': (
+                legacy_color_enabled
+                and legacy_color_mode in ('after', 'both')),
+            'after_strength': migrated_color_strength,
+            'after_method': legacy_color_method,
+            'after_regrain': legacy_color_regrain,
+            'match_color_strength': legacy_color_strength,
+            'colormatch_method': legacy_color_method,
+            'colormatch_regrain': legacy_color_regrain,
+            'colormatch_mode': legacy_color_mode,
             'colormatch_after': raw.get('colormatch_after', True),
             'colormatch_turbo': raw.get('colormatch_turbo', False),
         },

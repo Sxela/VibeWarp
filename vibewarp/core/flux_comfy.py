@@ -17,6 +17,7 @@ from PIL import Image
 from vibewarp.cancellation import is_cancel_requested
 from vibewarp.core.comfy_progress import ComfyProgressMonitor
 from vibewarp.core.edit_references import save_debug_reference
+from vibewarp.config import flux_model_files
 from vibewarp.core.flux import prepare_flux_references
 
 
@@ -29,11 +30,12 @@ class ComfyFluxClient:
 
     def __init__(self, config: Any):
         fx = config.flux
+        files = flux_model_files(config)
         self.base_url = fx.comfy_server_url.rstrip('/')
         self.timeout = float(fx.comfy_timeout)
-        self.unet_name = fx.comfy_unet_name
-        self.clip_name = fx.comfy_clip_name
-        self.vae_name = fx.comfy_vae_name
+        self.unet_name = files['comfy_unet_name']
+        self.clip_name = files['comfy_clip_name']
+        self.vae_name = files['comfy_vae_name']
         self.session = requests.Session()
         self.client_id = f"vibewarp-{uuid.uuid4()}"
         self.upload_subfolder = f"vibewarp/{self.client_id}"
@@ -212,21 +214,12 @@ class ComfyFluxClient:
         seed: int,
         width: int,
         height: int,
-        context_image: Image.Image | None = None,
-        prev_context_image: Image.Image | None = None,
-        mask_context_image: Image.Image | None = None,
+        reference_images: list[Image.Image] | None = None,
         debug_dir: str | None = None,
         frame_num: int | None = None,
     ) -> Image.Image:
         references, prompt = prepare_flux_references(
-            config, edit_image, context_image, prompt,
-            raw_edit=frame_num == 0)
-        if (mask_context_image is not None
-                and config.flux.feed_consistency_mask_as_context):
-            references.append(mask_context_image)
-        if (prev_context_image is not None
-                and config.flux.feed_prev_frame_as_context):
-            references.append(prev_context_image)
+            config, edit_image, prompt, reference_images=reference_images)
         for index, reference in enumerate(references, start=1):
             save_debug_reference(reference, debug_dir, 'flux', index, frame_num)
         uploaded = [self._upload_image(image, i) for i, image in enumerate(references)]

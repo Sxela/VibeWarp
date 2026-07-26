@@ -152,6 +152,23 @@ def first_visible_frame(video_path: str, max_scan: int = 120, threshold: float =
         capture.release()
 
 
+def frame_at(video_path: str, frame_index: int):
+    """Return one exact zero-based video frame as an RGB ndarray."""
+    import cv2
+
+    index = max(0, int(frame_index))
+    capture = cv2.VideoCapture(video_path)
+    try:
+        capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+        ok, frame = capture.read()
+        if not ok:
+            raise ValueError(
+                f"Could not read frame {index} from: {video_path}")
+        return index, cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    finally:
+        capture.release()
+
+
 def _find_ffmpeg():
     """Locate ffmpeg binary, checking PATH and common locations."""
     import shutil

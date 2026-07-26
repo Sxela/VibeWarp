@@ -58,7 +58,9 @@ def test_validation_reports_inputs_and_resolution():
     assert {"sd_checkpoint_path", "video.video_init_path", "video.width"} <= paths
 
 
-@pytest.mark.parametrize('model_version', ['flux2_klein_edit', 'hidream_o1_edit'])
+@pytest.mark.parametrize(
+    'model_version',
+    ['flux2_klein_edit', 'flux2_klein_9b_edit', 'hidream_o1_edit'])
 def test_edit_models_ignore_hidden_sd_validation(model_version, tmp_path):
     config = RunConfig(model_version=model_version)
     config.video.video_init_path = str(tmp_path / 'video.mp4')
@@ -88,6 +90,25 @@ def test_validation_reports_invalid_tiled_sampler_geometry():
     paths = {error["path"] for error in validate_config(config, require_inputs=False)}
     assert "diffusion.sampler_tile_size" in paths
     assert "diffusion.sampler_tile_overlap" in paths
+
+
+def test_validation_rejects_reference_label_opacity_outside_fraction():
+    config = RunConfig(model_version='flux2_klein_edit')
+    config.reference_label_opacity = 1.1
+    paths = {error["path"] for error in validate_config(
+        config, require_inputs=False)}
+    assert "reference_label_opacity" in paths
+
+
+def test_validation_rejects_color_match_strengths_outside_fraction():
+    config = RunConfig()
+    config.color.before_strength = -0.1
+    config.color.after_strength = 1.1
+
+    paths = {error["path"] for error in validate_config(
+        config, require_inputs=False)}
+
+    assert {'color.before_strength', 'color.after_strength'} <= paths
 
 
 def test_validation_can_check_local_input_paths(tmp_path):

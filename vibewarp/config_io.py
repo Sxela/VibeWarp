@@ -9,7 +9,13 @@ from dataclasses import MISSING, asdict, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Union, get_args, get_origin, get_type_hints
 
-from vibewarp.config import FluxConfig, HiDreamConfig, RunConfig
+from vibewarp.config import (
+    FLUX_MODEL_DEFAULTS, MAGE_MODEL_DEFAULTS, QWEN_MODEL_DEFAULTS, ColorConfig,
+    EditReferenceConfig, FluxConfig, HiDreamConfig, MageFlowEditConfig,
+    QwenEditConfig, RunConfig,
+    flux_model_files,
+    mage_model_defaults,
+    qwen_model_files)
 from vibewarp.controlnet_catalog import (
     CONTROLNET_CATALOG,
     CONTROLNET_MODES,
@@ -28,17 +34,21 @@ FIELD_CHOICES = {
     # stack while retaining VibeWarp's flow, consistency and colour pipeline.
     "RunConfig.model_version": [
         "control_multi_v15", "control_multi_sdxl",
-        "flux2_klein_edit", "hidream_o1_edit",
+        "flux2_klein_edit", "flux2_klein_9b_edit", "hidream_o1_edit",
+        "qwen_image_edit_2511", "qwen_image_edit_2511_gguf",
+        "mage_flow_edit", "mage_flow_edit_turbo",
     ],
     "FluxConfig.backend": ["comfy", "diffusers"],
-    "FluxConfig.reference_mode": ["raw + warped", "raw only", "warped only"],
     "HiDreamConfig.sampler": [
         "dpmpp_2m_sde_gpu", "dpmpp_2m_sde", "dpmpp_2m", "euler", "heun",
     ],
     "HiDreamConfig.scheduler": ["simple", "normal", "sgm_uniform"],
-    "HiDreamConfig.reference_mode": ["raw + warped", "raw only", "warped only"],
     "HiDreamConfig.patch_seam_passes": ["2", "4", "ramp_2_4", "ramp_2_4_8"],
     "HiDreamConfig.patch_seam_blend": ["median", "average", "window"],
+    "QwenEditConfig.sampler": ["euler", "dpmpp_2m", "dpmpp_2m_sde"],
+    "QwenEditConfig.scheduler": ["simple", "normal", "sgm_uniform"],
+    "MageFlowEditConfig.sampler": ["euler", "dpmpp_2m", "dpmpp_2m_sde"],
+    "MageFlowEditConfig.scheduler": ["simple", "normal", "sgm_uniform"],
     "RunConfig.lora_merge_precision": ["fp16", "fp32"],
     "RunConfig.animation_mode": ["Video Input"],
     "WarpConfig.warp_mode": ["use_image"],
@@ -48,6 +58,8 @@ FIELD_CHOICES = {
     "DiffusionConfig.sampler_tile_size": [256, 512, 768, 1024],
     "DiffusionConfig.noise_mode": ["default", "fixed", "reconstructed"],
     "VideoConfig.save_img_format": ["png", "jpg"],
+    "ColorConfig.before_method": ["PDF", "LAB", "mean"],
+    "ColorConfig.after_method": ["PDF", "LAB", "mean"],
     "ColorConfig.colormatch_method": ["PDF", "LAB", "mean"],
     "ColorConfig.colormatch_mode": ["before", "after", "both"],
     # 'custom' keeps hand-authored layer_weights/zero_uncond instead of deriving
@@ -119,15 +131,38 @@ def config_from_dict(data: Any, cls: type = RunConfig, path: str = "config") -> 
     """Construct a dataclass recursively, rejecting unknown fields."""
     if not isinstance(data, dict):
         raise ConfigError(f"{path} must be an object")
+    if cls is ColorConfig:
+        data = dict(data)
+        has_new_surface = any(key in data for key in (
+            'before_enabled', 'before_strength', 'before_method',
+            'before_regrain', 'after_enabled', 'after_strength',
+            'after_method', 'after_regrain',
+        ))
+        if not has_new_surface:
+            strength = data.get('match_color_strength', 0.0)
+            method = data.get('colormatch_method', 'PDF')
+            regrain = bool(data.get('colormatch_regrain', False))
+            mode = data.get('colormatch_mode')
+            if mode not in ('before', 'after', 'both'):
+                mode = 'after' if data.get('colormatch_after', True) else 'before'
+            enabled = isinstance(strength, (int, float)) and strength > 0
+            migrated_strength = strength if enabled else 0.5
+            data.update({
+                'before_enabled': enabled and mode in ('before', 'both'),
+                'before_strength': migrated_strength,
+                'before_method': method,
+                'before_regrain': regrain,
+                'after_enabled': enabled and mode in ('after', 'both'),
+                'after_strength': migrated_strength,
+                'after_method': method,
+                'after_regrain': regrain,
+            })
     if cls is FluxConfig and 'feed_init_as_context' in data:
-        # Migrate the original multi-reference boolean. Explicit new selectors
-        # take precedence when a settings file happens to contain both.
         data = dict(data)
         feed_raw = data.pop('feed_init_as_context')
         if not isinstance(feed_raw, bool):
             raise ConfigError(f"{path}.feed_init_as_context must be bool")
-        data.setdefault(
-            'reference_mode', 'raw + warped' if feed_raw else 'warped only')
+        data.setdefault('reference_mode', 'raw + warped' if feed_raw else 'warped only')
     if cls is HiDreamConfig and 'feed_raw_frame_as_reference' in data:
         # Migrate the short-lived boolean surface from the first multi-reference
         # implementation. Explicit new selectors take precedence.
@@ -136,8 +171,32 @@ def config_from_dict(data: Any, cls: type = RunConfig, path: str = "config") -> 
         if not isinstance(feed_raw, bool):
             raise ConfigError(
                 f"{path}.feed_raw_frame_as_reference must be bool")
-        data.setdefault(
-            'reference_mode', 'raw + warped' if feed_raw else 'warped only')
+        data.setdefault('reference_mode', 'raw + warped' if feed_raw else 'warped only')
+    if cls in (FluxConfig, HiDreamConfig, QwenEditConfig, MageFlowEditConfig):
+        # Migrate the two previous experimental reference surfaces into the
+        # unified ordered list. New ``references`` always wins when both exist.
+        data = dict(data)
+        mode = data.pop('reference_mode', 'raw + warped')
+        unwarped = data.pop('use_unwarped_style_reference', False)
+        label_raw = data.pop('label_raw_reference', False)
+        label_style = data.pop('label_style_reference', False)
+        feed_prev = data.pop('feed_prev_frame_as_context', False)
+        data.pop('feed_consistency_mask_as_context', None)
+        if 'references' not in data:
+            if mode == 'raw only':
+                refs = [{'source': 'raw', 'label': label_raw}]
+            elif mode == 'warped only':
+                refs = [{'source': 'warped', 'label': label_style}]
+            else:
+                refs = [
+                    {'source': 'raw', 'label': label_raw},
+                    {'source': 'previous' if unwarped else 'warped',
+                     'label': label_style},
+                ]
+            if cls is FluxConfig and feed_prev and not unwarped:
+                refs.append({'source': 'previous', 'label': False})
+            refs.append({'source': 'none', 'label': False})
+            data['references'] = refs
     known = {field.name: field for field in fields(cls)}
     unknown = sorted(set(data) - set(known))
     if unknown:
@@ -148,9 +207,19 @@ def config_from_dict(data: Any, cls: type = RunConfig, path: str = "config") -> 
         for key, value in data.items()
     }
     try:
-        return cls(**kwargs)
+        result = cls(**kwargs)
     except TypeError as exc:
         raise ConfigError(f"Invalid {path}: {exc}") from exc
+    if cls is RunConfig and result.model_version in FLUX_MODEL_DEFAULTS:
+        for key, value in flux_model_files(result).items():
+            setattr(result.flux, key, value)
+    if cls is RunConfig and result.model_version in QWEN_MODEL_DEFAULTS:
+        for key, value in qwen_model_files(result).items():
+            setattr(result.qwen, key, value)
+    if cls is RunConfig and result.model_version in MAGE_MODEL_DEFAULTS:
+        for key, value in mage_model_defaults(result).items():
+            setattr(result.mage, key, value)
+    return result
 
 
 def config_from_json(path: str | Path) -> RunConfig:
@@ -320,6 +389,50 @@ def validate_config(
         error("video.extract_nth_frame", "Frame extraction interval must be at least 1")
     if config.video.max_size < 0:
         error("video.max_size", "Max size cannot be negative")
+    for phase in ('before', 'after'):
+        strength = getattr(config.color, f'{phase}_strength')
+        if not 0 <= strength <= 1:
+            error(
+                f"color.{phase}_strength",
+                f"{phase.title()} color-match strength must be between 0 and 1",
+            )
+    family = model_family_for_version(config.model_version)
+    if family in ('flux', 'hidream', 'qwen'):
+        if not 0 <= config.reference_label_opacity <= 1:
+            error("reference_label_opacity",
+                  "Reference label opacity must be between 0 and 1")
+        refs = getattr(config, family).references
+        path = f'{family}.references'
+        allowed = {'raw', 'previous', 'warped', 'upload', 'none'}
+        if not refs:
+            error(path, "At least one reference image is required")
+        elif refs[0].source in ('none', 'upload'):
+            error(path, "Reference image 1 must use a video-frame source")
+        from vibewarp.core.edit_references import MAX_EDIT_REFERENCES
+        max_references = MAX_EDIT_REFERENCES[family]
+        if len(refs) > max_references:
+            error(path, f"This model supports at most {max_references} reference images")
+        saw_none = False
+        for index, ref in enumerate(refs):
+            item_path = f'{path}[{index}]'
+            if ref.source not in allowed:
+                error(item_path, f"Unknown reference source: {ref.source}")
+            if index > 0 and ref.source == 'none':
+                saw_none = True
+            elif saw_none and ref.source != 'none':
+                error(item_path, "References after the first 'none' slot are not sent")
+            if ref.source == 'upload':
+                if not ref.image_path:
+                    error(item_path, "Choose an uploaded reference image")
+                elif check_paths and not os.path.isfile(ref.image_path):
+                    error(item_path, f"Uploaded image does not exist: {ref.image_path}")
+        if family == 'qwen':
+            if config.qwen.steps < 1:
+                error("qwen.steps", "Qwen steps must be at least 1")
+            if config.qwen.guidance_scale < 0:
+                error("qwen.guidance_scale", "Qwen guidance cannot be negative")
+            if config.qwen.lora_strength < 0:
+                error("qwen.lora_strength", "Qwen LoRA strength cannot be negative")
     return errors
 
 
@@ -394,4 +507,20 @@ def config_schema() -> dict:
                         "groups": list(GROUP_ORDER.get(tier, []))} for tier in TIERS]
     schema["model_family_by_version"] = dict(MODEL_FAMILY_BY_VERSION)
     schema["default_model_family"] = "sd"
+    from vibewarp.core.edit_references import (
+        MAX_EDIT_REFERENCES, REFERENCE_SOURCE_LABELS)
+    schema["max_edit_references"] = dict(MAX_EDIT_REFERENCES)
+    schema["edit_reference_sources"] = dict(REFERENCE_SOURCE_LABELS)
+    schema["flux_model_defaults"] = {
+        version: dict(defaults)
+        for version, defaults in FLUX_MODEL_DEFAULTS.items()
+    }
+    schema["qwen_model_defaults"] = {
+        version: dict(defaults)
+        for version, defaults in QWEN_MODEL_DEFAULTS.items()
+    }
+    schema["mage_model_defaults"] = {
+        version: dict(defaults)
+        for version, defaults in MAGE_MODEL_DEFAULTS.items()
+    }
     return schema

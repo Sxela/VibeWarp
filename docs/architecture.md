@@ -45,21 +45,23 @@ math while keeping one production path and allowing FreeU consistently.
 
 ## External image-edit models (separate render path)
 
-`model_version="flux2_klein_edit"` and `model_version="hidream_o1_edit"`
+`model_version="flux2_klein_edit"`, `model_version="flux2_klein_9b_edit"`,
+and `model_version="hidream_o1_edit"`
 bypass the CompVis/k-diffusion stack. The model-agnostic frame loop is reused:
 optical-flow warping, consistency blending, pre/post color matching, frame
 feedback, prompts, and output handling remain VibeWarp-owned. `core/edit.py`
 dispatches the prepared RGB edit target to the selected backend.
 
-Flux2 and HiDream-O1 use one reference on the first frame, then can use two
-ordered references: raw current content followed by the warped,
-consistency-composited style/continuity target. The prompt names those roles
-explicitly. Independent optional `raw input` and `style reference` footers can
-visually label the roles supplied to the model. Raw-only and warped-only modes
-remain available. A shared toggle can replace the second reference with the
-untouched previous stylized output, keeping optical-flow artifacts and raw-frame
-consistency fallback out of the model's style example. Both Comfy graphs begin from an empty output latent, so the
-images are edit conditioning rather than a noised img2img latent.
+Flux2 and HiDream-O1 share one ordered reference-image pipeline. The required
+first slot and optional later slots can select the raw current frame, previous
+stylized frame, or its optical-flow-warped consistency composite. Later slots
+can also use a fixed uploaded style image; `none` terminates the list. Activating
+a slot reveals another until the model's limit is reached. Optional `@ImageN`
+tokens are alpha-blended into the exact images sent to the model using one global
+opacity setting (70% by default), and the results are recorded in History.
+Temporal choices fall back to raw when no prior render exists. Both Comfy graphs
+begin from an empty output latent, so the images are edit conditioning rather
+than a noised img2img latent.
 See [Flux settings](settings.md#flux-2-klein-edit) and [HiDream
 settings](settings.md#hidream-o1-edit).
 

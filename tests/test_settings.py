@@ -345,6 +345,9 @@ class TestColorMapping:
     def test_match_color_strength(self, tmp_path):
         cfg = _load(tmp_path, {'match_color_strength': 0.5})
         assert cfg['color']['match_color_strength'] == 0.5
+        assert cfg['color']['after_enabled'] is True
+        assert cfg['color']['after_strength'] == 0.5
+        assert cfg['color']['before_enabled'] is False
 
     def test_colormatch_method(self, tmp_path):
         cfg = _load(tmp_path, {'colormatch_method': 'LAB'})
@@ -355,20 +358,33 @@ class TestColorMapping:
         assert cfg['color']['colormatch_regrain'] is False
 
     def test_colormatch_after(self, tmp_path):
-        cfg = _load(tmp_path, {'colormatch_after': False})
+        cfg = _load(tmp_path, {
+            'colormatch_after': False,
+            'match_color_strength': 0.5,
+        })
         assert cfg['color']['colormatch_after'] is False
         assert cfg['color']['colormatch_mode'] == 'before'
+        assert cfg['color']['before_enabled'] is True
+        assert cfg['color']['after_enabled'] is False
 
     def test_legacy_colormatch_after_true_maps_to_after_mode(self, tmp_path):
-        cfg = _load(tmp_path, {'colormatch_after': True})
+        cfg = _load(tmp_path, {
+            'colormatch_after': True,
+            'match_color_strength': 0.5,
+        })
         assert cfg['color']['colormatch_mode'] == 'after'
+        assert cfg['color']['before_enabled'] is False
+        assert cfg['color']['after_enabled'] is True
 
     def test_explicit_colormatch_mode_supports_both(self, tmp_path):
         cfg = _load(tmp_path, {
             'colormatch_after': False,
             'colormatch_mode': 'both',
+            'match_color_strength': 0.5,
         })
         assert cfg['color']['colormatch_mode'] == 'both'
+        assert cfg['color']['before_enabled'] is True
+        assert cfg['color']['after_enabled'] is True
 
     def test_colormatch_turbo(self, tmp_path):
         cfg = _load(tmp_path, {'colormatch_turbo': True})

@@ -34,10 +34,8 @@ from typing import Any, Optional
 
 from PIL import Image
 
-from vibewarp.config import RunConfig
-from vibewarp.core.edit_references import (add_reference_label,
-                                           add_style_reference_label,
-                                           save_debug_reference)
+from vibewarp.config import RunConfig, flux_model_files
+from vibewarp.core.edit_references import save_debug_reference
 
 
 def _require_diffusers():
@@ -77,7 +75,7 @@ def load_flux_pipeline(config: RunConfig, device: str = 'cuda') -> Any:
 
     from diffusers import DiffusionPipeline
 
-    repo = config.flux.model_repo
+    repo = flux_model_files(config)['model_repo']
     if not repo:
         raise ValueError(
             "flux.model_repo is empty — set it to the Flux 2 Klein Edit repo id "
@@ -124,29 +122,16 @@ def _supported_call_kwargs(pipe: Any, candidate: dict) -> dict:
 def prepare_flux_references(
     config: RunConfig,
     edit_image: Image.Image,
-    context_image: Optional[Image.Image],
     prompt: str,
-    raw_edit: bool = False,
+    reference_images: Optional[list[Image.Image]] = None,
 ) -> tuple[list[Image.Image], str]:
-    """Resolve ordered raw-content/warped-style roles for one FLUX.2 frame."""
+    """Normalize references and add the multi-reference role instruction."""
     fx = config.flux
-    edit_image = edit_image.convert('RGB')
-    if raw_edit and fx.label_raw_reference:
-        edit_image = add_reference_label(edit_image, 'raw input')
-    content_image = context_image.convert('RGB') if context_image is not None else None
-    if content_image is not None and fx.label_raw_reference:
-        content_image = add_reference_label(content_image, 'raw input')
-    if context_image is not None and fx.reference_mode == 'raw + warped':
-        style_image = (add_style_reference_label(edit_image)
-                       if fx.label_style_reference else edit_image)
-        references = [content_image, style_image]
-        instruction = fx.multi_reference_instruction.strip()
-        if instruction:
-            prompt = f"{instruction}\n\n{prompt}" if prompt else instruction
-        return references, prompt
-    if context_image is not None and fx.reference_mode == 'raw only':
-        return [content_image], prompt
-    return [edit_image], prompt
+    references = ([image.convert('RGB') for image in reference_images]
+                  if reference_images else [edit_image.convert('RGB')])
+    from vibewarp.core.edit_references import reference_prompt
+    return references, reference_prompt(
+        prompt, fx.multi_reference_instruction, len(references))
 
 
 def render_flux_frame(
@@ -158,9 +143,7 @@ def render_flux_frame(
     seed: int,
     width: int,
     height: int,
-    context_image: Optional[Image.Image] = None,
-    prev_context_image: Optional[Image.Image] = None,
-    mask_context_image: Optional[Image.Image] = None,
+    reference_images: Optional[list[Image.Image]] = None,
     debug_dir: Optional[str] = None,
     frame_num: Optional[int] = None,
 ) -> Image.Image:
@@ -169,18 +152,12 @@ def render_flux_frame(
     Args:
         pipe: pipeline from load_flux_pipeline.
         config: run configuration (reads config.flux.*).
-        edit_image: the image being restyled — raw frame on frame 0, otherwise the
-            warped previous render.
+        edit_image: first ordered reference image.
+        reference_images: all ordered references, including ``edit_image``.
         prompt: positive edit instruction / prompt for this frame.
         negative_prompt: negative prompt.
         seed: RNG seed for this frame.
         width, height: target render size.
-        context_image: raw current video frame, used according to
-            ``flux.reference_mode``.
-        prev_context_image: previous stylized frame before optical-flow warping,
-            supplied when flux.feed_prev_frame_as_context is set.
-        mask_context_image: processed flow-consistency mask, supplied when
-            flux.feed_consistency_mask_as_context is set.
 
     Returns:
         Rendered PIL.Image (RGB).
@@ -193,9 +170,7 @@ def render_flux_frame(
             seed=seed,
             width=width,
             height=height,
-            context_image=context_image,
-            prev_context_image=prev_context_image,
-            mask_context_image=mask_context_image,
+            reference_images=reference_images,
             debug_dir=debug_dir,
             frame_num=frame_num,
         )
@@ -207,8 +182,7 @@ def render_flux_frame(
     generator = torch.Generator(device='cpu').manual_seed(int(seed))
 
     references, prompt = prepare_flux_references(
-        config, edit_image, context_image, prompt,
-        raw_edit=frame_num == 0)
+        config, edit_image, prompt, reference_images=reference_images)
     edit_image = references[0]
 
     # Candidate arguments; _supported_call_kwargs prunes to what the pipeline
@@ -229,11 +203,6 @@ def render_flux_frame(
     }
 
     extra_references = list(references[1:])
-    if (mask_context_image is not None
-            and fx.feed_consistency_mask_as_context):
-        extra_references.append(mask_context_image.convert('RGB'))
-    if prev_context_image is not None and fx.feed_prev_frame_as_context:
-        extra_references.append(prev_context_image.convert('RGB'))
 
     all_references = [edit_image, *extra_references]
     for index, reference in enumerate(all_references, start=1):

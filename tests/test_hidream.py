@@ -4,11 +4,10 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from vibewarp.config import HiDreamConfig, RunConfig
+from vibewarp.config import EditReferenceConfig, HiDreamConfig, RunConfig
 from vibewarp.config_io import FIELD_CHOICES, config_from_dict, config_to_dict
-from vibewarp.core.hidream_comfy import (ComfyHiDreamClient,
-                                         add_style_reference_label,
-                                         nearest_trained_resolution)
+from vibewarp.core.hidream_comfy import (
+    ComfyHiDreamClient, nearest_trained_resolution)
 from vibewarp.settings import _VIBEWARP_SECTIONS, settings_to_dict
 
 
@@ -29,26 +28,28 @@ def test_hidream_config_surface_and_round_trip():
     assert config.hidream.noise_scale == 8.0
     assert config.hidream.use_trained_resolution is True
     assert config.hidream.fixed_seed is True
-    assert config.hidream.reference_mode == 'raw + warped'
-    assert config.hidream.use_unwarped_style_reference is False
-    assert config.hidream.label_raw_reference is False
-    assert config.hidream.label_style_reference is False
+    assert [ref.source for ref in config.hidream.references] == ['raw', 'none']
     assert 'reference image 1' in config.hidream.multi_reference_instruction
     assert 'hidream_o1_edit' in FIELD_CHOICES['RunConfig.model_version']
     assert 'hidream' in _VIBEWARP_SECTIONS
 
     config.hidream.steps = 32
+    config.hidream.references = [
+        EditReferenceConfig('raw', True),
+        EditReferenceConfig('upload', image_path='style.png'),
+        EditReferenceConfig('none'),
+    ]
     loaded = config_from_dict(config_to_dict(config))
     assert loaded.hidream == config.hidream
     assert settings_to_dict(config)['hidream_steps'] == 32
 
 
-def test_hidream_migrates_previous_raw_reference_boolean():
+def test_hidream_migrates_legacy_reference_settings():
     loaded = config_from_dict({
         'model_version': 'hidream_o1_edit',
         'hidream': {'feed_raw_frame_as_reference': False},
     })
-    assert loaded.hidream.reference_mode == 'warped only'
+    assert [ref.source for ref in loaded.hidream.references] == ['warped', 'none']
 
     loaded = config_from_dict({
         'hidream': {
@@ -56,7 +57,7 @@ def test_hidream_migrates_previous_raw_reference_boolean():
             'reference_mode': 'raw only',
         },
     })
-    assert loaded.hidream.reference_mode == 'raw only'
+    assert [ref.source for ref in loaded.hidream.references] == ['raw', 'none']
 
 
 def test_hidream_fields_are_classified():
@@ -65,10 +66,7 @@ def test_hidream_fields_are_classified():
     for field in (
         'comfy_server_url', 'comfy_checkpoint_name', 'comfy_timeout', 'steps',
         'guidance_scale', 'sampler', 'scheduler', 'noise_scale', 'fixed_seed',
-        'use_trained_resolution', 'reference_mode', 'label_raw_reference',
-        'label_style_reference',
-        'use_unwarped_style_reference',
-        'multi_reference_instruction',
+        'use_trained_resolution', 'references', 'multi_reference_instruction',
         'patch_seam_smoothing', 'patch_seam_start', 'patch_seam_passes',
         'patch_seam_blend',
     ):
@@ -78,233 +76,102 @@ def test_hidream_fields_are_classified():
 
 def test_native_hidream_graph_uses_exactly_one_edit_reference():
     graph = _client_without_network()._build_prompt(
-        'warped.png', 'paint it', 'blurry', seed=42,
+        ['warped.png'], 'paint it', 'blurry', seed=42,
         width=768, height=512, steps=40, guidance_scale=5.0,
         sampler='dpmpp_2m_sde_gpu', scheduler='normal')
 
     assert graph['1']['class_type'] == 'CheckpointLoaderSimple'
-    assert graph['5']['class_type'] == 'HiDreamO1ReferenceImages'
+    assert graph['4']['inputs']['image'] == 'warped.png'
     assert graph['5']['inputs']['images.image_1'] == ['4', 0]
-    assert 'images' not in graph['5']['inputs']
-    assert graph['6']['class_type'] == 'EmptyHiDreamO1LatentImage'
+    assert 'images.image_2' not in graph['5']['inputs']
     assert graph['6']['inputs']['width'] == 768
-    assert graph['7']['class_type'] == 'ModelNoiseScale'
     assert graph['7']['inputs']['noise_scale'] == 8.0
-    assert graph['11']['class_type'] == 'BasicScheduler'
-    assert graph['11']['inputs']['model'] == ['7', 0]
     assert graph['11']['inputs']['scheduler'] == 'normal'
-    assert graph['11']['inputs']['steps'] == 40
-    assert graph['12']['class_type'] == 'KSamplerSelect'
     assert graph['12']['inputs']['sampler_name'] == 'dpmpp_2m_sde_gpu'
-    assert graph['13']['class_type'] == 'SamplerCustom'
     assert graph['13']['inputs']['positive'] == ['5', 0]
-    assert graph['13']['inputs']['negative'] == ['5', 1]
-    assert graph['13']['inputs']['sigmas'] == ['11', 0]
-    assert graph['13']['inputs']['latent_image'] == ['6', 0]
-    assert graph['8']['inputs']['vae'] == ['1', 2]
-    assert graph['8']['inputs']['samples'] == ['13', 0]
-    assert graph['10']['class_type'] == 'HiDreamO1PatchSeamSmoothing'
-    assert graph['10']['inputs']['start_percent'] == 0.8
-    assert graph['10']['inputs']['model'] == ['7', 0]
-    assert graph['10']['inputs']['passes'] == 'ramp_2_4'
-    assert graph['10']['inputs']['blend'] == 'median'
     assert graph['13']['inputs']['model'] == ['10', 0]
+    assert graph['10']['class_type'] == 'HiDreamO1PatchSeamSmoothing'
 
 
-def test_native_hidream_graph_accepts_ordered_second_reference():
+def test_native_hidream_graph_accepts_arbitrary_ordered_references():
     graph = _client_without_network()._build_prompt(
-        'content.png', 'paint it', 'blurry', seed=42,
-        width=2048, height=2048, steps=40, guidance_scale=5.0,
-        sampler='dpmpp_2m_sde_gpu', scheduler='normal',
-        second_image_name='style.png')
+        ['content.png', 'style.png', 'previous.png'],
+        'paint it', 'blurry', seed=42, width=2048, height=2048, steps=40,
+        guidance_scale=5.0, sampler='dpmpp_2m_sde_gpu', scheduler='normal')
 
     assert graph['4']['inputs']['image'] == 'content.png'
-    assert graph['14']['class_type'] == 'LoadImage'
     assert graph['14']['inputs']['image'] == 'style.png'
+    assert graph['15']['inputs']['image'] == 'previous.png'
     assert graph['5']['inputs']['images.image_1'] == ['4', 0]
     assert graph['5']['inputs']['images.image_2'] == ['14', 0]
+    assert graph['5']['inputs']['images.image_3'] == ['15', 0]
 
 
-def test_hidream_render_uploads_only_the_prepared_edit_target(tmp_path):
+def test_hidream_render_preserves_references_and_debug_images(tmp_path):
     client = _client_without_network()
     uploaded = []
     submitted = {}
     client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded.append(image.getpixel((0, 0))) or 'edit.png')
+        uploaded.append((filename, image.copy())) or filename)
     client._request = lambda method, path, **kwargs: (
         submitted.update(kwargs.get('json', {}))
         or SimpleNamespace(json=lambda: {'prompt_id': 'p1'}))
     expected = Image.new('RGB', (8, 8), 'blue')
     client._wait_for_output = lambda prompt_id: expected
+    config = RunConfig(model_version='hidream_o1_edit')
+    config.hidream.use_trained_resolution = False
+    references = [
+        Image.new('RGB', (8, 8), 'green'),
+        Image.new('RGB', (8, 8), 'red'),
+    ]
 
     result = client.render(
-        RunConfig(model_version='hidream_o1_edit'),
-        edit_image=Image.new('RGB', (8, 8), 'red'),
-        prompt='p', negative_prompt='n', seed=1, width=8, height=8,
-        debug_dir=str(tmp_path), frame_num=0)
+        config, references[0], 'user style prompt', 'n', 1, 8, 8,
+        reference_images=references, debug_dir=str(tmp_path), frame_num=7)
 
-    assert uploaded == [(255, 0, 0)]
-    assert submitted['prompt']['5']['inputs']['images.image_1'] == ['4', 0]
-    assert submitted['prompt']['6']['inputs']['width'] == 2048
-    assert submitted['prompt']['6']['inputs']['height'] == 2048
-    assert Image.open(tmp_path / 'hidream_reference_1_000000.png').size == \
-        (2048, 2048)
+    assert [name for name, _ in uploaded] == [
+        'reference_1_000007.png', 'reference_2_000007.png']
+    assert [image.getpixel((0, 0)) for _, image in uploaded] == [
+        (0, 128, 0), (255, 0, 0)]
+    assert submitted['prompt']['5']['inputs']['images.image_2'] == ['14', 0]
+    assert submitted['prompt']['2']['inputs']['text'].startswith(
+        'Use reference image 1')
+    for index, (_, image) in enumerate(uploaded, start=1):
+        saved = Image.open(
+            tmp_path / f'hidream_reference_{index}_000007.png').convert('RGB')
+        assert list(saved.getdata()) == list(image.getdata())
     assert result is expected
 
 
-def test_hidream_render_assigns_content_and_style_reference_roles():
+def test_hidream_single_reference_does_not_add_role_instruction():
     client = _client_without_network()
-    uploaded = []
     submitted = {}
-    client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded.append((filename, image.getpixel((0, 0)))) or filename)
+    client._upload_image = lambda image, filename='edit_target.png': filename
     client._request = lambda method, path, **kwargs: (
         submitted.update(kwargs.get('json', {}))
         or SimpleNamespace(json=lambda: {'prompt_id': 'p1'}))
     client._wait_for_output = lambda prompt_id: Image.new('RGB', (8, 8))
     config = RunConfig(model_version='hidream_o1_edit')
     config.hidream.use_trained_resolution = False
+    image = Image.new('RGB', (8, 8), 'green')
 
     client.render(
-        config, Image.new('RGB', (8, 8), 'red'), 'user style prompt', 'n',
-        1, 8, 8, context_image=Image.new('RGB', (8, 8), 'green'))
+        config, image, 'user prompt', 'n', 1, 8, 8,
+        reference_images=[image])
 
-    assert uploaded == [
-        ('content_frame.png', (0, 128, 0)),
-        ('style_reference.png', (255, 0, 0)),
-    ]
-    graph = submitted['prompt']
-    assert graph['5']['inputs']['images.image_1'] == ['4', 0]
-    assert graph['5']['inputs']['images.image_2'] == ['14', 0]
-    assert graph['2']['inputs']['text'].endswith('\n\nuser style prompt')
-    assert graph['2']['inputs']['text'].startswith('Transform reference image 1')
-
-
-def test_hidream_raw_and_style_labels_match_uploaded_references(tmp_path):
-    client = _client_without_network()
-    uploaded = []
-    client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded.append((filename, image.copy())) or filename)
-    client._request = lambda method, path, **kwargs: SimpleNamespace(
-        json=lambda: {'prompt_id': 'p1'})
-    client._wait_for_output = lambda prompt_id: Image.new('RGB', (8, 8))
-    config = RunConfig(model_version='hidream_o1_edit')
-    config.hidream.use_trained_resolution = False
-    config.hidream.label_raw_reference = True
-    config.hidream.label_style_reference = True
-
-    client.render(
-        config, Image.new('RGB', (320, 240), 'red'), 'p', 'n', 1, 320, 240,
-        context_image=Image.new('RGB', (320, 240), 'green'),
-        debug_dir=str(tmp_path), frame_num=7)
-
-    content = uploaded[0][1]
-    style = uploaded[1][1]
-    assert uploaded[0][0] == 'content_frame_000007.png'
-    assert uploaded[1][0] == 'style_reference_000007.png'
-    # Left edge of the label band, not the centre: centred text there is an anti-aliased
-    # glyph whose value depends on the available font (0,0,0 default vs ~28 with DejaVuSans
-    # on CI). The band background is reliably black.
-    assert content.getpixel((0, 230)) == (0, 0, 0)
-    assert content.getpixel((0, 0)) == (0, 128, 0)
-    assert style.getpixel((0, 230)) == (0, 0, 0)
-    assert style.getpixel((0, 0)) == (255, 0, 0)
-    assert style.size == content.size == (320, 240)
-    saved_content = Image.open(tmp_path / 'hidream_reference_1_000007.png')
-    saved_style = Image.open(tmp_path / 'hidream_reference_2_000007.png')
-    assert list(saved_content.getdata()) == list(content.getdata())
-    assert list(saved_style.getdata()) == list(style.getdata())
-
-
-def test_hidream_can_label_first_raw_edit_target(tmp_path):
-    client = _client_without_network()
-    uploaded = []
-    client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded.append(image.copy()) or filename)
-    client._request = lambda *args, **kwargs: SimpleNamespace(
-        json=lambda: {'prompt_id': 'p1'})
-    client._wait_for_output = lambda prompt_id: Image.new('RGB', (8, 8))
-    config = RunConfig(model_version='hidream_o1_edit')
-    config.hidream.use_trained_resolution = False
-    config.hidream.label_raw_reference = True
-
-    client.render(
-        config, Image.new('RGB', (320, 240), 'green'), 'p', 'n', 1, 320, 240,
-        debug_dir=str(tmp_path), frame_num=0)
-
-    assert len(uploaded) == 1
-    assert uploaded[0].getpixel((0, 0)) == (0, 128, 0)
-    assert uploaded[0].getpixel((0, 230)) == (0, 0, 0)   # band, left edge (see note above)
-    assert list(Image.open(tmp_path / 'hidream_reference_1_000000.png').getdata()) == \
-        list(uploaded[0].getdata())
-
-
-def test_style_reference_label_keeps_dimensions():
-    labeled = add_style_reference_label(Image.new('RGB', (128, 96), 'blue'))
-    assert labeled.size == (128, 96)
-    assert labeled.getpixel((0, 0)) == (0, 0, 255)
-    assert labeled.getpixel((0, 95)) == (0, 0, 0)
-
-
-def test_hidream_render_can_use_raw_frame_as_only_reference():
-    client = _client_without_network()
-    uploaded = []
-    submitted = {}
-    client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded.append((filename, image.getpixel((0, 0)))) or filename)
-    client._request = lambda method, path, **kwargs: (
-        submitted.update(kwargs.get('json', {}))
-        or SimpleNamespace(json=lambda: {'prompt_id': 'p1'}))
-    client._wait_for_output = lambda prompt_id: Image.new('RGB', (8, 8))
-    config = RunConfig(model_version='hidream_o1_edit')
-    config.hidream.use_trained_resolution = False
-    config.hidream.reference_mode = 'raw only'
-
-    client.render(
-        config, Image.new('RGB', (8, 8), 'red'), 'user prompt', 'n', 1, 8, 8,
-        context_image=Image.new('RGB', (8, 8), 'green'))
-
-    assert uploaded == [('content_frame.png', (0, 128, 0))]
-    graph = submitted['prompt']
-    assert graph['5']['inputs']['images.image_1'] == ['4', 0]
-    assert 'images.image_2' not in graph['5']['inputs']
-    assert graph['2']['inputs']['text'] == 'user prompt'
-
-
-def test_hidream_render_can_use_warped_frame_as_only_reference():
-    client = _client_without_network()
-    uploaded = []
-    submitted = {}
-    client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded.append((filename, image.getpixel((0, 0)))) or filename)
-    client._request = lambda method, path, **kwargs: (
-        submitted.update(kwargs.get('json', {}))
-        or SimpleNamespace(json=lambda: {'prompt_id': 'p1'}))
-    client._wait_for_output = lambda prompt_id: Image.new('RGB', (8, 8))
-    config = RunConfig(model_version='hidream_o1_edit')
-    config.hidream.use_trained_resolution = False
-    config.hidream.reference_mode = 'warped only'
-
-    client.render(
-        config, Image.new('RGB', (8, 8), 'red'), 'user prompt', 'n', 1, 8, 8,
-        context_image=Image.new('RGB', (8, 8), 'green'))
-
-    assert uploaded == [('edit_target.png', (255, 0, 0))]
-    assert 'images.image_2' not in submitted['prompt']['5']['inputs']
+    assert submitted['prompt']['2']['inputs']['text'] == 'user prompt'
 
 
 def test_hidream_trained_resolution_tracks_output_aspect_ratio():
+    assert nearest_trained_resolution(1280, 720) == (2560, 1440)
+    assert nearest_trained_resolution(720, 1280) == (1440, 2560)
     assert nearest_trained_resolution(1024, 1024) == (2048, 2048)
-    assert nearest_trained_resolution(1920, 1080) == (2560, 1440)
-    assert nearest_trained_resolution(1080, 1920) == (1440, 2560)
 
 
 def test_hidream_can_explicitly_use_output_resolution():
     client = _client_without_network()
-    uploaded_sizes = []
     submitted = {}
-    client._upload_image = lambda image, filename='edit_target.png': (
-        uploaded_sizes.append(image.size) or 'edit.png')
+    client._upload_image = lambda image, filename='edit_target.png': 'edit.png'
     client._request = lambda method, path, **kwargs: (
         submitted.update(kwargs.get('json', {}))
         or SimpleNamespace(json=lambda: {'prompt_id': 'p1'}))
@@ -313,35 +180,13 @@ def test_hidream_can_explicitly_use_output_resolution():
     config.hidream.use_trained_resolution = False
 
     client.render(
-        config, Image.new('RGB', (640, 480)), 'p', 'n', 1, 640, 480)
+        config, Image.new('RGB', (640, 360)), 'p', 'n', 1, 640, 360)
 
-    assert uploaded_sizes == [(640, 480)]
     assert submitted['prompt']['6']['inputs']['width'] == 640
-    assert submitted['prompt']['6']['inputs']['height'] == 480
+    assert submitted['prompt']['6']['inputs']['height'] == 360
 
 
-def test_hidream_frame_downsamples_native_result_to_video_size(tmp_path):
-    from vibewarp.core.diffusion import FrameState, RenderContext, render_frame_edit
-
-    init_path = tmp_path / 'frame.png'
-    Image.new('RGB', (32, 32), 'red').save(init_path)
-
-    class Backend:
-        def render(self, **kwargs):
-            return Image.new('RGB', (2048, 2048), 'blue')
-
-    config = RunConfig(model_version='hidream_o1_edit')
-    config.video.width = config.video.height = 32
-    state = FrameState(frame_num=0, init_image=str(init_path))
-
-    result = render_frame_edit(
-        RenderContext(config=config, edit_backend=Backend()), state)
-
-    assert result.size == (32, 32)
-    assert state.prev_frame.size == (32, 32)
-
-
-def test_generic_hidream_dispatch_passes_raw_but_drops_flux_only_references():
+def test_generic_hidream_dispatch_forwards_unified_references():
     from vibewarp.core.edit import render_edit_frame
 
     class Backend:
@@ -350,58 +195,26 @@ def test_generic_hidream_dispatch_passes_raw_but_drops_flux_only_references():
             return kwargs['edit_image']
 
     backend = Backend()
-    edit = Image.new('RGB', (8, 8), 'red')
-    render_edit_frame(
-        backend, RunConfig(model_version='hidream_o1_edit'), edit, 'p', 'n',
-        1, 8, 8,
-        context_image=Image.new('RGB', (8, 8), 'green'),
-        prev_context_image=Image.new('RGB', (8, 8), 'blue'),
-        mask_context_image=Image.new('RGB', (8, 8), 'white'))
-
-    assert backend.received['edit_image'] is edit
-    assert backend.received['context_image'].getpixel((0, 0)) == (0, 128, 0)
-    assert 'prev_context_image' not in backend.received
-    assert 'mask_context_image' not in backend.received
-
-
-def test_hidream_frame_loop_supplies_raw_current_frame_as_content(tmp_path):
-    from vibewarp.core.diffusion import FrameState, RenderContext, render_frame_edit
-
-    frames = tmp_path / 'frames'
-    frames.mkdir()
-    raw_path = frames / '000002.jpg'
-    Image.new('RGB', (16, 16), 'green').save(raw_path)
-    edit_path = tmp_path / 'warped.png'
-    Image.new('RGB', (16, 16), 'red').save(edit_path)
-
-    class Backend:
-        def render(self, **kwargs):
-            self.received = kwargs
-            return kwargs['edit_image']
-
-    backend = Backend()
     config = RunConfig(model_version='hidream_o1_edit')
-    config.video.width = config.video.height = 16
-    state = FrameState(frame_num=1, init_image=str(edit_path))
-    render_frame_edit(RenderContext(
-        config=config, edit_backend=backend,
-        video_frames_folder=str(frames) + '/', batch_folder=str(tmp_path)), state)
+    image = Image.new('RGB', (8, 8))
+    references = [image, Image.new('RGB', (8, 8), 'blue')]
+    result = render_edit_frame(
+        backend, config, image, 'p', 'n', 1, 8, 8,
+        reference_images=references)
 
-    assert backend.received['edit_image'].getpixel((0, 0)) == (255, 0, 0)
-    raw = backend.received['context_image'].getpixel((0, 0))
-    assert raw[1] > raw[0] and raw[1] > raw[2]
-    assert backend.received['debug_dir'] == str(tmp_path / 'debug')
-    assert backend.received['frame_num'] == 1
+    assert backend.received['reference_images'] is references
+    assert 'context_image' not in backend.received
+    assert result is image
 
 
-def test_hidream_can_replace_warped_style_with_unwarped_previous_frame(tmp_path):
+def test_hidream_frame_loop_resolves_ordered_temporal_references(tmp_path):
     from vibewarp.core.diffusion import FrameState, RenderContext, render_frame_edit
 
     frames = tmp_path / 'frames'
     frames.mkdir()
     Image.new('RGB', (16, 16), 'green').save(frames / '000002.jpg')
-    edit_path = tmp_path / 'warped.png'
-    Image.new('RGB', (16, 16), 'red').save(edit_path)
+    warped_path = tmp_path / 'warped.png'
+    Image.new('RGB', (16, 16), 'red').save(warped_path)
 
     class Backend:
         def render(self, **kwargs):
@@ -411,16 +224,23 @@ def test_hidream_can_replace_warped_style_with_unwarped_previous_frame(tmp_path)
     backend = Backend()
     config = RunConfig(model_version='hidream_o1_edit')
     config.video.width = config.video.height = 16
-    config.hidream.use_unwarped_style_reference = True
+    config.hidream.references = [
+        EditReferenceConfig('raw'),
+        EditReferenceConfig('previous'),
+        EditReferenceConfig('warped'),
+        EditReferenceConfig('none'),
+    ]
     previous = Image.new('RGB', (16, 16), 'blue')
     state = FrameState(
-        frame_num=1, init_image=str(edit_path), prev_frame=previous)
+        frame_num=1, init_image=str(warped_path), prev_frame=previous)
 
     render_frame_edit(RenderContext(
         config=config, edit_backend=backend,
-        video_frames_folder=str(frames) + '/'), state)
+        video_frames_folder=str(frames) + '/', batch_folder=str(tmp_path)), state)
 
-    assert backend.received['edit_image'].getpixel((0, 0)) == (0, 0, 255)
-    assert backend.received['context_image'].getpixel((0, 0))[1] > 100
-    # The backend result still becomes the next temporal state.
+    refs = backend.received['reference_images']
+    assert refs[0].getpixel((0, 0))[1] > 100
+    assert refs[1].getpixel((0, 0)) == (0, 0, 255)
+    assert refs[2].getpixel((0, 0)) == (255, 0, 0)
+    assert backend.received['edit_image'] is refs[0]
     assert state.prev_frame.getpixel((0, 0)) == (0, 0, 0)

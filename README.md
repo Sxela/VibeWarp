@@ -103,15 +103,17 @@ Models land in a `models/` folder under the current directory by default;
 override with `--models-root`. See [docs/cli.md](docs/cli.md) for manual
 download links.
 
-The FLUX.2 and HiDream backends require a separate, current ComfyUI install.
+The FLUX.2, HiDream, Qwen Image Edit, and Mage-Flow Edit backends require a
+separate, current ComfyUI install.
 Get it from the [official ComfyUI download page](https://www.comfy.org/download)
-and update it before installing the models; both backends use native ComfyUI
+and update it before installing the models; these backends use native ComfyUI
 nodes. Portable and manual-install users can use the
 [official GitHub repository](https://github.com/Comfy-Org/ComfyUI).
 
 For the experimental FLUX.2 Klein Edit path, start ComfyUI separately with its
-Klein diffusion model, Qwen text encoder, and Flux2 VAE installed. Select
-`model_version="flux2_klein_edit"`; VibeWarp connects to
+Klein diffusion model, matching Qwen text encoder, and Flux2 VAE installed.
+Select `model_version="flux2_klein_edit"` for 4B or
+`model_version="flux2_klein_9b_edit"` for 9B; VibeWarp connects to
 `http://127.0.0.1:8188` by default. The server URL and Comfy-visible model
 filenames are configurable under **System → Paths**. See
 [Flux 2 Klein Edit setup and settings](docs/settings.md#flux-2-klein-edit) for
@@ -124,6 +126,27 @@ is required for direct prompts; ComfyUI's optional Gemma 4 model is a prompt
 enhancer, not the model's core conditioning encoder. See
 [HiDream-O1 setup and settings](docs/settings.md#hidream-o1-edit) for the exact
 Hugging Face download and destination folder.
+
+For Qwen Image Edit 2511, install the INT8 ConvRot diffusion model, Qwen 2.5 VL
+encoder, Qwen image VAE, and the default LightX2V 8-step Lightning LoRA in
+ComfyUI, then select
+`model_version="qwen_image_edit_2511"`. To compare the lower-VRAM Q5_K_M
+transformer with identical edit settings, install ComfyUI-GGUF, place
+`Qwen-Image-Edit-2511-Q5_K_M.gguf` in `models/unet`, and select
+`model_version="qwen_image_edit_2511_gguf"`. See
+[Qwen Image Edit 2511 setup and settings](docs/settings.md#qwen-image-edit-2511)
+for the exact Hugging Face folders and filenames.
+
+For Microsoft's 4B Mage-Flow Edit, install the Comfy-Org INT8 ConvRot
+transformer, Qwen3-VL 4B encoder, and Mage VAE. Select
+`model_version="mage_flow_edit"` for the 30-step RL-aligned model or
+`model_version="mage_flow_edit_turbo"` for the 4-step distilled model. See
+[Mage-Flow Edit setup and settings](docs/settings.md#mage-flow-edit).
+
+FLUX.2, HiDream, Qwen, and Mage share the same ordered **Reference Images**
+editor. The first image is always present; optional later images can use raw or
+temporal frames, or an uploaded style reference selected through the square
+drag-and-drop picker.
 
 ### 3. Render with your WarpFusion settings
 

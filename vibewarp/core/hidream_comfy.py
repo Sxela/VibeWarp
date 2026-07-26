@@ -13,9 +13,7 @@ from PIL import Image
 
 from vibewarp.cancellation import is_cancel_requested
 from vibewarp.core.comfy_progress import ComfyProgressMonitor
-from vibewarp.core.edit_references import (add_reference_label,
-                                           add_style_reference_label,
-                                           save_debug_reference)
+from vibewarp.core.edit_references import save_debug_reference
 
 
 class ComfyHiDreamError(RuntimeError):
@@ -124,7 +122,7 @@ class ComfyHiDreamClient:
 
     def _build_prompt(
         self,
-        image_name: str,
+        image_names: list[str],
         prompt: str,
         negative_prompt: str,
         seed: int,
@@ -139,7 +137,6 @@ class ComfyHiDreamClient:
         patch_seam_start: float = 0.8,
         patch_seam_passes: str = 'ramp_2_4',
         patch_seam_blend: str = 'median',
-        second_image_name: str | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Build an API-format graph using only native ComfyUI nodes."""
         graph = {
@@ -149,14 +146,9 @@ class ComfyHiDreamClient:
                 'text': prompt, 'clip': ['1', 1]}},
             '3': {'class_type': 'CLIPTextEncode', 'inputs': {
                 'text': negative_prompt, 'clip': ['1', 1]}},
-            '4': {'class_type': 'LoadImage', 'inputs': {'image': image_name}},
             '5': {'class_type': 'HiDreamO1ReferenceImages', 'inputs': {
                 'positive': ['2', 0],
                 'negative': ['3', 0],
-                # Comfy V3 dynamic inputs are flat, dot-qualified API keys; the
-                # executor reconstructs the nested ``images`` mapping before
-                # calling the node.
-                'images.image_1': ['4', 0],
             }},
             '6': {'class_type': 'EmptyHiDreamO1LatentImage', 'inputs': {
                 'width': int(width), 'height': int(height), 'batch_size': 1}},
@@ -189,10 +181,12 @@ class ComfyHiDreamClient:
                 'samples': ['13', 0], 'vae': ['1', 2]}},
             '9': {'class_type': 'PreviewImage', 'inputs': {'images': ['8', 0]}},
         }
-        if second_image_name is not None:
-            graph['14'] = {'class_type': 'LoadImage', 'inputs': {
-                'image': second_image_name}}
-            graph['5']['inputs']['images.image_2'] = ['14', 0]
+        for index, image_name in enumerate(image_names, start=1):
+            load_id = '4' if index == 1 else str(12 + index)
+            graph[load_id] = {
+                'class_type': 'LoadImage', 'inputs': {'image': image_name}}
+            # Comfy V3 dynamic inputs are flat, dot-qualified API keys.
+            graph['5']['inputs'][f'images.image_{index}'] = [load_id, 0]
         if patch_seam_smoothing:
             graph['10'] = {'class_type': 'HiDreamO1PatchSeamSmoothing', 'inputs': {
                 'model': ['7', 0],
@@ -255,7 +249,7 @@ class ComfyHiDreamClient:
         seed: int,
         width: int,
         height: int,
-        context_image: Image.Image | None = None,
+        reference_images: list[Image.Image] | None = None,
         debug_dir: str | None = None,
         frame_num: int | None = None,
     ) -> Image.Image:
@@ -269,46 +263,28 @@ class ComfyHiDreamClient:
                     f"{width}x{height}")
             edit_image = edit_image.resize(
                 (render_width, render_height), Image.Resampling.LANCZOS)
-            if context_image is not None:
-                context_image = context_image.resize(
-                    (render_width, render_height), Image.Resampling.LANCZOS)
             width, height = render_width, render_height
 
-        if context_image is not None and hd.label_raw_reference:
-            context_image = add_reference_label(context_image, 'raw input')
-        elif frame_num == 0 and hd.label_raw_reference:
-            # Frame zero's edit target is the raw frame and is intentionally not
-            # duplicated as context_image by the outer loop.
-            edit_image = add_reference_label(edit_image, 'raw input')
-
-        second_uploaded = None
-        if context_image is not None and hd.reference_mode == 'raw + warped':
-            # Image 1 is current-frame content; image 2 carries the warped style
-            # and temporal state. Ordered roles are stated in the text prompt.
-            uploaded = self._upload_image(
-                context_image, _upload_filename('content_frame', frame_num))
-            if hd.label_style_reference:
-                edit_image = add_style_reference_label(edit_image)
-            save_debug_reference(context_image, debug_dir, 'hidream', 1, frame_num)
-            save_debug_reference(edit_image, debug_dir, 'hidream', 2, frame_num)
-            second_uploaded = self._upload_image(
-                edit_image, _upload_filename('style_reference', frame_num))
-            instruction = hd.multi_reference_instruction.strip()
-            if instruction:
-                prompt = f"{instruction}\n\n{prompt}" if prompt else instruction
-        elif context_image is not None and hd.reference_mode == 'raw only':
-            save_debug_reference(context_image, debug_dir, 'hidream', 1, frame_num)
-            uploaded = self._upload_image(
-                context_image, _upload_filename('content_frame', frame_num))
-        else:
-            save_debug_reference(edit_image, debug_dir, 'hidream', 1, frame_num)
-            uploaded = self._upload_image(
-                edit_image, _upload_filename('edit_target', frame_num))
+        references = ([image.convert('RGB') for image in reference_images]
+                      if reference_images else [edit_image.convert('RGB')])
+        references = [
+            image.resize((width, height), Image.Resampling.LANCZOS)
+            if image.size != (width, height) else image
+            for image in references
+        ]
+        from vibewarp.core.edit_references import reference_prompt
+        prompt = reference_prompt(
+            prompt, hd.multi_reference_instruction, len(references))
+        uploaded = []
+        for index, image in enumerate(references, start=1):
+            save_debug_reference(image, debug_dir, 'hidream', index, frame_num)
+            uploaded.append(self._upload_image(
+                image, _upload_filename(f'reference_{index}', frame_num)))
         graph = self._build_prompt(
             uploaded, prompt, negative_prompt, seed, width, height,
             hd.steps, hd.guidance_scale, hd.sampler, hd.scheduler,
             hd.noise_scale, hd.patch_seam_smoothing, hd.patch_seam_start,
-            hd.patch_seam_passes, hd.patch_seam_blend, second_uploaded)
+            hd.patch_seam_passes, hd.patch_seam_blend)
         progress = ComfyProgressMonitor(
             getattr(self, 'base_url', ''), self.client_id, graph)
         progress.start()

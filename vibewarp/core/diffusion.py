@@ -780,12 +780,12 @@ def warp_between_frames(
             dilate=cc_dilate,
         )
 
-    # Set up input color matching callback. "after" is handled once the model
-    # returns in _render_single_frame; "both" enables both locations.
+    # Before-diffusion matching colorizes raw/current pixels toward the warped
+    # previous render before the consistency mask blends them together.
     match_color_fn = None
     if _uses_colormatch(config, 'before'):
         match_color_fn = lambda stylized, raw: _match_color_array(
-            stylized, raw, config).astype(np.float64)
+            stylized, raw, config, 'before').astype(np.float64)
 
     # Set up brightness callback
     adjust_brightness_fn = None
@@ -869,52 +869,60 @@ def warp_between_frames(
 
 def _uses_colormatch(config: RunConfig, phase: str) -> bool:
     """Whether color matching is enabled for the before/after render phase."""
-    if config.color.match_color_strength <= 0:
-        return False
-    mode = config.color.colormatch_mode
-    return mode == phase or mode == 'both'
+    return (
+        bool(getattr(config.color, f'{phase}_enabled'))
+        and getattr(config.color, f'{phase}_strength') > 0
+    )
 
 
-def _match_color_array(reference, target, config: RunConfig) -> np.ndarray:
-    """Match target colors to reference using the configured transfer method."""
+def _match_color_array(
+    reference, target, config: RunConfig, phase: str
+) -> np.ndarray:
+    """Match target colors with the independent settings for one phase."""
     from vibewarp.color.matching import match_color_var
 
     transfer_fn = None
     regrain_fn = None
-    method = config.color.colormatch_method.lower()
-    if method in ('lab', 'mean') or config.color.colormatch_regrain:
+    method = getattr(config.color, f'{phase}_method').lower()
+    regrain = getattr(config.color, f'{phase}_regrain')
+    if method in ('lab', 'mean') or regrain:
         from vibewarp.vendor.python_color_transfer.color_transfer import ColorTransfer
         transfer = ColorTransfer()
         if method == 'lab':
             transfer_fn = transfer.lab_transfer
         elif method == 'mean':
             transfer_fn = transfer.mean_std_transfer
-        if config.color.colormatch_regrain:
+        if regrain:
             regrain_fn = transfer.RG.regrain
 
     return match_color_var(
         reference,
         target,
-        opacity=config.color.match_color_strength,
+        opacity=getattr(config.color, f'{phase}_strength'),
         transfer_fn=transfer_fn,
         regrain_fn=regrain_fn,
-        regrain=config.color.colormatch_regrain,
+        regrain=regrain,
     )
 
 
 def _apply_post_colormatch(
     image: Image.Image,
-    reference_path: Optional[str],
+    reference: Image.Image | str | None,
     config: RunConfig,
 ) -> Image.Image:
-    """Match a rendered frame to its warped input palette when requested."""
+    """Match a rendered frame to the previous rendered frame's palette."""
     if not _uses_colormatch(config, 'after'):
         return image
-    if not reference_path or not os.path.exists(reference_path):
+    if isinstance(reference, Image.Image):
+        previous = reference.convert('RGB')
+    elif reference and os.path.exists(reference):
+        previous = Image.open(reference).convert('RGB')
+    else:
         return image
-    reference = Image.open(reference_path).convert('RGB').resize(
+    previous = previous.resize(
         image.size, Image.LANCZOS)
-    matched = _match_color_array(reference, image.convert('RGB'), config)
+    matched = _match_color_array(
+        previous, image.convert('RGB'), config, 'after')
     return Image.fromarray(matched)
 
 
@@ -1455,13 +1463,24 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
     frame, the flow-warped consistency-weighted previous render thereafter. This
     function edits that image with the frame's prompt.
 
-    Both edit backends can use raw current content as reference 1 and the
-    prepared warp as style/temporal reference 2, or either image on its own.
+    Both edit backends receive the same ordered reference list resolved from
+    raw, previous-stylized, warped/consistency-composited, or uploaded images.
     """
     config = ctx.config
-    from vibewarp.core.model_loader import is_flux_model
+    from vibewarp.core.model_loader import (
+        is_flux_model, is_hidream_model, is_mage_flow_edit_model,
+        is_qwen_edit_model)
     flux_backend = is_flux_model(config.model_version)
-    edit_config = config.flux if flux_backend else config.hidream
+    if flux_backend:
+        family, edit_config = 'flux', config.flux
+    elif is_hidream_model(config.model_version):
+        family, edit_config = 'hidream', config.hidream
+    elif is_qwen_edit_model(config.model_version):
+        family, edit_config = 'qwen', config.qwen
+    elif is_mage_flow_edit_model(config.model_version):
+        family, edit_config = 'mage', config.mage
+    else:
+        raise ValueError(f"Unsupported edit model: {config.model_version!r}")
     frame_num = state.frame_num
     W = config.video.width
     H = config.video.height
@@ -1489,74 +1508,46 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
     if not edit_path or not os.path.exists(edit_path):
         raise FileNotFoundError(
             f"Edit frame {frame_num}: no edit image (init_image={state.init_image!r})")
-    using_unwarped_style = bool(
-        frame_num > 0
-        and edit_config.reference_mode != 'raw only'
-        and edit_config.use_unwarped_style_reference
-        and state.prev_frame is not None)
-    if using_unwarped_style:
-        edit_image = state.prev_frame.convert('RGB')
-        if edit_image.size != (W, H):
-            edit_image = edit_image.resize((W, H), Image.LANCZOS)
-        print(
-            f"  Edit frame {frame_num}: using unwarped frame {frame_num - 1} "
-            "as the style reference")
+    warped_image = Image.open(edit_path).convert('RGB').resize(
+        (W, H), Image.Resampling.LANCZOS)
+    raw_path = (os.path.join(
+        ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg")
+        if ctx.video_frames_folder else None)
+    if raw_path and os.path.exists(raw_path):
+        raw_image = Image.open(raw_path).convert('RGB').resize(
+            (W, H), Image.Resampling.LANCZOS)
     else:
-        edit_image = Image.open(edit_path).convert('RGB').resize((W, H), Image.LANCZOS)
+        # Frame zero and direct unit-level renders may only have init_image.
+        raw_image = warped_image
+    previous_image = state.prev_frame.convert('RGB') if state.prev_frame else None
+    # On the first rendered frame init_image is the raw frame, not a temporal
+    # warp. Mark it unavailable for optional warped-reference slots so the raw
+    # image is not sent to the model twice. Required Image 1 still falls back
+    # to raw in resolve_reference_images.
+    warped_reference = warped_image if previous_image is not None else None
 
-    # warp_between_frames has already persisted the exact processed mask used
-    # for this render frame. Feed the grayscale keep/fallback map as RGB because
-    # Flux reference latents use the same image path as ordinary references.
-    mask_context_image = None
-    if (flux_backend and frame_num > 0
-            and config.flux.feed_consistency_mask_as_context
-            and ctx.batch_folder):
-        mask_path = os.path.join(
-            ctx.batch_folder, 'debug', f"consistency_mask_{frame_num:06d}.png")
-        if os.path.exists(mask_path):
-            mask_context_image = Image.open(mask_path).convert('RGB').resize(
-                (W, H), Image.NEAREST)
-
-    # The final frame N-1 image is still in state.prev_frame here; the frame loop
-    # only replaces it after this render. Supplying it separately lets Klein see
-    # background content that the optical-flow warp moved outside the edit target.
-    prev_context_image = None
-    if (flux_backend and frame_num > 0 and config.flow.flow_warp
-            and config.flux.feed_prev_frame_as_context
-            and not using_unwarped_style
-            and state.prev_frame is not None):
-        prev_context_image = state.prev_frame.convert('RGB')
-        if prev_context_image.size != (W, H):
-            prev_context_image = prev_context_image.resize((W, H), Image.LANCZOS)
-
-    # Structural context: the raw current video frame. Edit backends resolve its
-    # ordered role from their reference-mode setting.
-    context_image = None
-    feed_raw_reference = (
-        config.flux.reference_mode in ('raw only', 'raw + warped') if flux_backend
-        else config.hidream.reference_mode in ('raw only', 'raw + warped')
+    from vibewarp.core.edit_references import (
+        MAX_EDIT_REFERENCES, resolve_reference_images)
+    references = resolve_reference_images(
+        edit_config.references,
+        raw_image=raw_image,
+        previous_image=previous_image,
+        warped_image=warped_reference,
+        size=(W, H),
+        max_references=MAX_EDIT_REFERENCES[family],
+        label_opacity=config.reference_label_opacity,
     )
-    if feed_raw_reference and ctx.video_frames_folder:
-        raw_path = os.path.join(ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg")
-        # Frame zero already uses the raw frame as its primary reference. Avoid
-        # conditioning twice on the same image.
-        if (os.path.exists(raw_path)
-                and os.path.abspath(raw_path) != os.path.abspath(edit_path)):
-            context_image = Image.open(raw_path).convert('RGB').resize((W, H), Image.LANCZOS)
-
     from vibewarp.core.edit import render_edit_frame as run_edit_backend
     with _phase(ctx, 'run_sd_total'):
         image = run_edit_backend(
             ctx.edit_backend if ctx.edit_backend is not None else ctx.flux_pipe,
             config,
-            edit_image=edit_image,
+            edit_image=references[0],
+            reference_images=references,
             prompt=text_prompt,
             negative_prompt=neg_prompt,
             seed=seed,
             width=W, height=H,
-            context_image=context_image,
-            prev_context_image=prev_context_image,
-            mask_context_image=mask_context_image,
             debug_dir=(os.path.join(ctx.batch_folder, 'debug')
                        if ctx.batch_folder else None),
             frame_num=frame_num,
@@ -1703,6 +1694,12 @@ def _render_single_frame(
         masked.save(masked_path)
         state.init_image = masked_path
 
+    # Preserve the actual previous output as the after-diffusion palette
+    # reference. render_frame updates state.prev_frame to the new output.
+    previous_palette = (
+        state.prev_frame.convert('RGB').copy()
+        if state.prev_frame is not None else None)
+
     # Render
     import time as _rtime
     from vibewarp.core.timing import log_time as _rlog
@@ -1711,12 +1708,12 @@ def _render_single_frame(
     _rlog(f"diffusion render (frame {frame_num})", _rtime.time() - _t_render)
 
     # Let the first rendered frame establish the stylized palette. From the
-    # second frame onward, "after" matches each new output back to the warped
-    # input that carried the previous stylized frame's colors. This applies to
-    # both the SD and Flux render paths and updates the feedback image too.
+    # second frame onward, "after" matches each new output back to the actual
+    # previous stylized frame's colors. This applies to both the SD and edit
+    # render paths and updates the feedback image too.
     if frame_num > start_frame:
         with _phase(ctx, 'colormatch_after'):
-            image = _apply_post_colormatch(image, state.init_image, config)
+            image = _apply_post_colormatch(image, previous_palette, config)
         state.prev_frame = image
 
     # Save

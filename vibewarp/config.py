@@ -186,14 +186,24 @@ class BrightnessConfig:
 
 @dataclass
 class ColorConfig:
-    """Color matching settings."""
+    """Independent color matching before and after diffusion."""
+    # Before diffusion: colorize raw/current pixels toward the warped previous
+    # render before consistency-mask blending exposes them to the model.
+    before_enabled: bool = False
+    before_strength: float = 0.5
+    before_method: str = 'PDF'
+    before_regrain: bool = False
+    # After diffusion: pull the new model output back toward the previous
+    # frame's warped palette before saving it and feeding it forward.
+    after_enabled: bool = False
+    after_strength: float = 0.5
+    after_method: str = 'PDF'
+    after_regrain: bool = False
+    # Legacy shared/dropdown surface retained for settings compatibility only.
     match_color_strength: float = 0.0
     colormatch_method: str = 'PDF'
     colormatch_regrain: bool = False
-    # before: stabilize the warped diffusion input; after: stabilize the newly
-    # rendered frame against that input; both: apply both stages.
     colormatch_mode: str = 'before'
-    # Legacy WarpFusion import field. New code uses colormatch_mode.
     colormatch_after: bool = True
     colormatch_turbo: bool = False
 
@@ -457,13 +467,57 @@ class IPAdapterConfig:
 
 
 @dataclass
+class EditReferenceConfig:
+    """One ordered visual reference supplied to an image-edit model."""
+    source: str = 'none'
+    label: bool = False
+    image_path: str = ''
+
+
+def _default_edit_references() -> List[EditReferenceConfig]:
+    # Slot 1 is mandatory. Slot 2 is the visible no-op that lets the UI grow
+    # the ordered list one card at a time.
+    return [
+        EditReferenceConfig(source='raw'),
+        EditReferenceConfig(source='none'),
+    ]
+
+
+FLUX_MODEL_DEFAULTS = {
+    'flux2_klein_edit': {
+        'comfy_unet_name': 'flux-2-klein-4b-fp8.safetensors',
+        'comfy_clip_name': 'qwen_3_4b.safetensors',
+        'comfy_vae_name': 'flux2-vae.safetensors',
+        'model_repo': 'black-forest-labs/FLUX.2-klein-4B',
+    },
+    'flux2_klein_9b_edit': {
+        'comfy_unet_name': 'flux-2-klein-9b-fp8.safetensors',
+        'comfy_clip_name': 'qwen_3_8b_fp8mixed.safetensors',
+        'comfy_vae_name': 'flux2-vae.safetensors',
+        'model_repo': 'black-forest-labs/FLUX.2-klein-9B',
+    },
+}
+
+
+def flux_model_files(config: 'RunConfig') -> Dict[str, str]:
+    """Resolve model-specific defaults while preserving explicit custom files."""
+    baseline = FLUX_MODEL_DEFAULTS['flux2_klein_edit']
+    selected = FLUX_MODEL_DEFAULTS.get(config.model_version, baseline)
+    resolved = {}
+    for key in baseline:
+        current = getattr(config.flux, key)
+        known_defaults = {
+            defaults[key] for defaults in FLUX_MODEL_DEFAULTS.values()}
+        resolved[key] = selected[key] if current in known_defaults else current
+    return resolved
+
+
+@dataclass
 class FluxConfig:
     """FLUX.2 Klein Edit through ComfyUI or the optional Diffusers backend.
 
-    The first frame uses the raw video frame as its reference. Later frames can
-    use raw current content, VibeWarp's flow-warped consistency-weighted previous
-    render, or both as ordered content/style references. The unwarped previous
-    stylized frame and consistency mask remain optional additional references.
+    References use the same ordered source list as HiDream. Dynamic temporal
+    sources fall back to the raw current frame when no previous render exists.
     """
     # Comfy is the exploratory/default backend because it directly supports the
     # split FP8/GGUF ecosystem checkpoints. Diffusers remains available for a
@@ -483,30 +537,13 @@ class FluxConfig:
     # Reference editing starts every frame from noise. Reusing that noise is
     # important for temporal stability; opt out only for deliberate variation.
     fixed_seed: bool = True
-    # Choose raw-only instruction editing, warped-only temporal feedback, or
-    # ordered raw-content + warped-style multi-reference conditioning.
-    reference_mode: str = 'raw + warped'
-    # Replace the warped/consistency-composited style reference with frame
-    # N-1's untouched final render. The raw current frame can still carry the
-    # new frame's structure in ``raw + warped`` mode.
-    use_unwarped_style_reference: bool = False
-    # Burn a visible ``raw input`` footer into the current-frame content
-    # reference. The saved debug image contains the same labeled pixels.
-    label_raw_reference: bool = False
-    # Overlay a visible footer on the warped style reference. Raw content is
-    # never labeled.
-    label_style_reference: bool = False
+    references: List[EditReferenceConfig] = field(
+        default_factory=_default_edit_references)
     multi_reference_instruction: str = (
-        'Transform reference image 1 into the visual style shown in reference '
-        'image 2. Preserve the composition, geometry, objects, and motion of '
-        'image 1; use image 2 as the style and temporal continuity reference.'
+        'Use reference image 1 for content, composition, geometry, objects, and '
+        'motion. Use the remaining reference images for visual style and '
+        'temporal continuity.'
     )
-    # Pass the processed optical-flow consistency mask as an additional visual
-    # reference. White marks trusted warp pixels; black marks raw-frame fallback.
-    feed_consistency_mask_as_context: bool = False
-    # Also pass frame N-1's final stylized image, before optical-flow warping,
-    # so the edit model can see background content displaced by the warp.
-    feed_prev_frame_as_context: bool = False
     # Prompt token budget used only by the Diffusers backend.
     max_sequence_length: int = 512
 
@@ -515,11 +552,9 @@ class FluxConfig:
 class HiDreamConfig:
     """HiDream-O1 pixel-space instruction editing through ComfyUI.
 
-    Frame zero uses the raw image as a single instruction-edit reference. Later
-    frames can use the raw current frame as content and the consistency-composited,
-    flow-warped previous render as a second style/continuity reference. The model
-    starts from fixed pixel-space noise; ``fixed_seed`` controls whether that
-    noise is reused across the video.
+    Ordered references share the same source controls as Flux. The model starts
+    from fixed pixel-space noise; ``fixed_seed`` controls whether that noise is
+    reused across the video.
     """
     comfy_server_url: str = 'http://127.0.0.1:8188'
     comfy_checkpoint_name: str = 'hidream_o1_image_fp8_scaled.safetensors'
@@ -535,23 +570,12 @@ class HiDreamConfig:
     # Render at the nearest ~4MP training preset, then downsample to video size.
     use_trained_resolution: bool = True
     fixed_seed: bool = True
-    # Choose raw-only instruction editing, warped-only temporal feedback, or
-    # ordered raw-content + warped-style multi-reference conditioning.
-    reference_mode: str = 'raw + warped'
-    # Replace the warped/consistency-composited style reference with frame
-    # N-1's untouched final render. This avoids baking flow seams and raw-frame
-    # consistency fallback into the model's visual style reference.
-    use_unwarped_style_reference: bool = False
-    # Burn a visible ``raw input`` footer into the current-frame content
-    # reference. This is independent from the style-reference label.
-    label_raw_reference: bool = False
-    # Overlay a visible footer on reference 2 so the model can recognize its
-    # role. The raw content reference is never labeled.
-    label_style_reference: bool = False
+    references: List[EditReferenceConfig] = field(
+        default_factory=_default_edit_references)
     multi_reference_instruction: str = (
-        'Transform reference image 1 into the visual style shown in reference '
-        'image 2. Preserve the composition, geometry, objects, and motion of '
-        'image 1; use image 2 as the style and temporal continuity reference.'
+        'Use reference image 1 for content, composition, geometry, objects, and '
+        'motion. Use the remaining reference images for visual style and '
+        'temporal continuity.'
     )
     # Full's official workflow smooths 32-pixel patch-grid seams during the
     # final sampling phase. This costs extra model evaluations only near the end.
@@ -559,6 +583,104 @@ class HiDreamConfig:
     patch_seam_start: float = 0.8
     patch_seam_passes: str = 'ramp_2_4'
     patch_seam_blend: str = 'median'
+
+
+QWEN_MODEL_DEFAULTS = {
+    'qwen_image_edit_2511': {
+        'comfy_unet_name': 'qwen_image_edit_2511_int8_convrot.safetensors',
+    },
+    'qwen_image_edit_2511_gguf': {
+        'comfy_unet_name': 'Qwen-Image-Edit-2511-Q5_K_M.gguf',
+    },
+}
+
+
+def qwen_model_files(config: 'RunConfig') -> Dict[str, str]:
+    """Resolve the Qwen transformer preset without replacing a custom file."""
+    baseline = QWEN_MODEL_DEFAULTS['qwen_image_edit_2511']
+    selected = QWEN_MODEL_DEFAULTS.get(config.model_version, baseline)
+    resolved = {}
+    for key in baseline:
+        current = getattr(config.qwen, key)
+        known_defaults = {
+            defaults[key] for defaults in QWEN_MODEL_DEFAULTS.values()}
+        resolved[key] = selected[key] if current in known_defaults else current
+    return resolved
+
+
+@dataclass
+class QwenEditConfig:
+    """Qwen-Image-Edit-2511 through ComfyUI's native edit nodes."""
+    comfy_server_url: str = 'http://127.0.0.1:8188'
+    comfy_unet_name: str = 'qwen_image_edit_2511_int8_convrot.safetensors'
+    comfy_clip_name: str = 'qwen_2.5_vl_7b_fp8_scaled.safetensors'
+    comfy_vae_name: str = 'qwen_image_vae.safetensors'
+    comfy_lora_name: str = (
+        'Qwen-Image-Edit-2511-Lightning-8steps-V1.0-bf16.safetensors')
+    comfy_timeout: float = 1200.0
+    use_lightning_lora: bool = True
+    lora_strength: float = 1.0
+    steps: int = 8
+    guidance_scale: float = 1.0
+    sampler: str = 'euler'
+    scheduler: str = 'simple'
+    sampling_shift: float = 3.1
+    fixed_seed: bool = True
+    references: List[EditReferenceConfig] = field(
+        default_factory=_default_edit_references)
+    multi_reference_instruction: str = (
+        'Preserve the content, composition, geometry, identity, and pose from '
+        '@Image1. Apply only the visual style from the remaining reference images.'
+    )
+
+
+MAGE_MODEL_DEFAULTS = {
+    'mage_flow_edit': {
+        'comfy_unet_name': 'mage_flow_edit_int8_convrot.safetensors',
+        'steps': 30,
+        'guidance_scale': 5.0,
+    },
+    'mage_flow_edit_turbo': {
+        'comfy_unet_name': 'mage_flow_edit_turbo_int8_convrot.safetensors',
+        'steps': 4,
+        'guidance_scale': 1.0,
+    },
+}
+
+
+def mage_model_defaults(config: 'RunConfig') -> Dict[str, object]:
+    """Resolve the Mage checkpoint/sampling preset without replacing custom values."""
+    baseline = MAGE_MODEL_DEFAULTS['mage_flow_edit']
+    selected = MAGE_MODEL_DEFAULTS.get(config.model_version, baseline)
+    resolved = {}
+    for key in baseline:
+        current = getattr(config.mage, key)
+        known_defaults = {
+            defaults[key] for defaults in MAGE_MODEL_DEFAULTS.values()}
+        resolved[key] = selected[key] if current in known_defaults else current
+    return resolved
+
+
+@dataclass
+class MageFlowEditConfig:
+    """Mage-Flow-Edit through ComfyUI's native multi-image edit node."""
+    comfy_server_url: str = 'http://127.0.0.1:8188'
+    comfy_unet_name: str = 'mage_flow_edit_int8_convrot.safetensors'
+    comfy_clip_name: str = 'qwen3vl_4b_bf16.safetensors'
+    comfy_vae_name: str = 'mage_flow_vae_bf16.safetensors'
+    comfy_timeout: float = 1200.0
+    steps: int = 30
+    guidance_scale: float = 5.0
+    sampler: str = 'euler'
+    scheduler: str = 'simple'
+    fixed_seed: bool = True
+    references: List[EditReferenceConfig] = field(
+        default_factory=_default_edit_references)
+    multi_reference_instruction: str = (
+        'Use @Image1 as the primary source for content, composition, geometry, '
+        'identity, and pose. Use the remaining reference images only for the '
+        'requested appearance or visual style.'
+    )
 
 
 @dataclass
@@ -577,6 +699,8 @@ class RunConfig:
     # Prompts
     text_prompts: Dict[int, str] = field(default_factory=lambda: {0: "a beautiful painting"})
     negative_prompts: Dict[int, str] = field(default_factory=lambda: {0: ""})
+    # Shared alpha for every optional @ImageN reference label.
+    reference_label_opacity: float = 0.7
 
     # LORA directory (for per-frame LORA scheduling via <lora:name:weight> in prompts)
     lora_dir: str = ''
@@ -609,3 +733,5 @@ class RunConfig:
     reconstruction_noise: ReconstructionNoiseConfig = field(default_factory=ReconstructionNoiseConfig)
     flux: FluxConfig = field(default_factory=FluxConfig)
     hidream: HiDreamConfig = field(default_factory=HiDreamConfig)
+    qwen: QwenEditConfig = field(default_factory=QwenEditConfig)
+    mage: MageFlowEditConfig = field(default_factory=MageFlowEditConfig)

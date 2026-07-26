@@ -102,7 +102,8 @@ class TestWarpBetweenFrames:
 
     def test_with_color_matching(self, ctx_with_raft):
         """Test that color matching can be enabled without errors."""
-        ctx_with_raft.config.color.match_color_strength = 0.5
+        ctx_with_raft.config.color.before_enabled = True
+        ctx_with_raft.config.color.before_strength = 0.5
         prev_frame = Image.fromarray(
             np.random.randint(100, 200, (64, 80, 3), dtype=np.uint8)
         )
@@ -141,7 +142,8 @@ class TestWarpBetweenFrames:
         # Consistency map should be saved
         cc_path = os.path.join(str(tmp_path / "flow"), "000000.jpg_12-21_cc.jpg")
         assert os.path.exists(cc_path)
-        # The processed mask used for flow 0 -> 1 is aligned to render frame 1.
+        # The processed/effective keep mask is a render-frame-aligned debug
+        # layer (frame 1 is produced by flow 0 -> 1).
         mask_path = os.path.join(batch_folder, "debug", "consistency_mask_000001.png")
         assert os.path.exists(mask_path)
         mask = Image.open(mask_path)

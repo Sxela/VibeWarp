@@ -45,7 +45,30 @@ def test_schema_carries_tier_and_group():
     assert diffusion['steps_schedule']['group'] == 'Diffusion'
     # the scalar superseded by that schedule is hidden, not deleted
     assert diffusion['steps']['tier'] == 'hidden'
+    for family in ('flux', 'hidream', 'qwen', 'mage'):
+        instruction = schema['properties'][family]['properties'][
+            'multi_reference_instruction']
+        assert instruction['tier'] == 'render'
+        assert instruction['group'] == 'Prompts'
     assert [t['id'] for t in schema['tiers']] == list(TIERS)
+
+
+def test_color_matching_is_split_into_two_ui_groups():
+    color = config_schema()['properties']['color']['properties']
+
+    for field in (
+        'before_enabled', 'before_strength', 'before_method', 'before_regrain',
+    ):
+        assert color[field]['tier'] == 'advanced'
+        assert color[field]['group'] == 'Color Match — Before Diffusion'
+    for field in (
+        'after_enabled', 'after_strength', 'after_method', 'after_regrain',
+    ):
+        assert color[field]['tier'] == 'advanced'
+        assert color[field]['group'] == 'Color Match — After Diffusion'
+    assert color['before_method']['choices'] == ['PDF', 'LAB', 'mean']
+    assert color['after_method']['choices'] == ['PDF', 'LAB', 'mean']
+    assert color['colormatch_mode']['tier'] == 'hidden'
 
 
 def test_unused_warp_variants_remain_compatible_but_are_hidden():
@@ -62,14 +85,34 @@ def test_schema_carries_model_family_compatibility():
     props = schema['properties']
 
     assert schema['model_family_by_version']['flux2_klein_edit'] == 'flux'
+    assert schema['model_family_by_version']['flux2_klein_9b_edit'] == 'flux'
     assert schema['model_family_by_version']['hidream_o1_edit'] == 'hidream'
+    assert schema['model_family_by_version']['qwen_image_edit_2511'] == 'qwen'
+    assert schema['model_family_by_version'][
+        'qwen_image_edit_2511_gguf'] == 'qwen'
+    assert schema['model_family_by_version']['mage_flow_edit'] == 'mage'
+    assert schema['model_family_by_version']['mage_flow_edit_turbo'] == 'mage'
     assert props['sd_checkpoint_path']['model_families'] == ['sd']
     assert props['controlnet']['properties']['enabled']['model_families'] == ['sd']
     assert props['flux']['properties']['steps']['model_families'] == ['flux']
     assert props['hidream']['properties']['steps']['model_families'] == ['hidream']
+    assert props['mage']['properties']['steps']['model_families'] == ['mage']
+    assert props['reference_label_opacity']['model_families'] == [
+        'flux', 'hidream', 'qwen', 'mage']
+    assert props['negative_prompts']['model_families'] == [
+        'sd', 'hidream', 'qwen', 'mage']
     # Shared outer-loop settings and the edit renderers' base seed remain visible.
     assert 'model_families' not in props['warp']['properties']['flow_blend_schedule']
     assert 'model_families' not in props['diffusion']['properties']['seed']
+    assert schema['flux_model_defaults']['flux2_klein_9b_edit'][
+        'comfy_clip_name'] == 'qwen_3_8b_fp8mixed.safetensors'
+    assert schema['qwen_model_defaults']['qwen_image_edit_2511_gguf'][
+        'comfy_unet_name'] == 'Qwen-Image-Edit-2511-Q5_K_M.gguf'
+    assert schema['mage_model_defaults']['mage_flow_edit_turbo'] == {
+        'comfy_unet_name': 'mage_flow_edit_turbo_int8_convrot.safetensors',
+        'steps': 4,
+        'guidance_scale': 1.0,
+    }
 
 
 def test_sd_only_and_edit_only_sections_are_declared_consistently():
@@ -78,6 +121,7 @@ def test_sd_only_and_edit_only_sections_are_declared_consistently():
     assert model_families('vae', 'use_tiled_vae') == ('sd',)
     assert model_families('flux', 'steps') == ('flux',)
     assert model_families('hidream', 'steps') == ('hidream',)
+    assert model_families('mage', 'steps') == ('mage',)
     assert model_family_for_version('legacy_control_multi') == 'sd'
     assert model_family_for_version('future_hidream_edit') == 'hidream'
 
@@ -89,6 +133,7 @@ def test_every_ui_model_version_declares_its_family():
 @pytest.mark.parametrize('section,field,tier', [
     ('video', 'video_init_path', 'project'),
     ('main', 'text_prompts', 'render'),        # prompts are the thing you tweak every run
+    ('main', 'reference_label_opacity', 'render'),
     ('main', 'model_version', 'project'),       # ...the model is picked once and left alone
     ('main', 'animation_mode', 'hidden'),       # only one value the engine supports
     ('brightness', 'enable', 'hidden'),         # legacy knob

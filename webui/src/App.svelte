@@ -2,10 +2,11 @@
   import { tick } from 'svelte';
   import Field from './Field.svelte';
   import ControlNetEditor from './ControlNetEditor.svelte';
+  import ReferenceImagesEditor from './ReferenceImagesEditor.svelte';
   import VideoEditor from './VideoEditor.svelte';
   import Preview from './Preview.svelte';
   import Supporters from './Supporters.svelte';
-  import { comfyConnection, fieldSupportsModel, modelFamily } from './modelCompatibility.js';
+  import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint } from './modelCompatibility.js';
   const storageKey='vibewarp.config.v1';
   let config=$state(null), schema=$state(null), selected=$state('project'), job=$state(null), errors=$state([]), busy=$state(false), initialized=$state(false), logCollapsed=$state(false), logElement=$state(null), source;
   // Tabs come from the BACKEND (vibewarp/ui_layout.py stamps tier/group onto every field
@@ -126,28 +127,30 @@
     node.querySelector('input,textarea,select')?.focus({preventScroll:true});
   }
   // These sections have purpose-built editors; the generic Field grid can't express them.
-  const custom={'Input Video':'video','ControlNet':'controlnet'};
+  const custom={'Input Video':'video','ControlNet':'controlnet',
+                'Reference Images':'references'};
   // Groups that span both columns: the custom editors, plus anything whose fields are
   // long-form (prompt textareas, keyframe chip rows) and would be cramped at half width.
-  const wide=new Set(['Prompts','Scene Scheduling','Flow & Consistency']);
+  const wide=new Set(['Prompts','Scene Scheduling','Flow & Consistency',
+                      'Reference Images']);
   // A group can point at the tab holding the rest of its settings. AnimateDiff's toggle is
   // a MODEL choice (in the notebook it IS the model version), so it sits on the Model card
   // — but its tuning lives in Advanced, and you should not have to go hunting for it.
   const seeAlso={Model:{when:()=>config?.animatediff?.enabled,tier:'advanced',group:'AnimateDiff'}};
   function openGroup(tier,group){selected=tier;query='';openGroups.add(group);openGroups=new Set(openGroups)}
   let openGroups=$state(new Set());
-  function setField(name,v){config={...config,[name]:v}}
+  function setField(name,v){
+    config=name==='model_version'
+      ? applyModelDefaults(config,v,schema)
+      : {...config,[name]:v};
+  }
   function setIn(section,name,v){
     if(section==='main') return setField(name,v);
     config={...config,[section]:{...config[section],[name]:v}};
   }
   function fieldHint(item){
-    if((item.section==='flux'||item.section==='hidream')
-        && item.name==='use_unwarped_style_reference')
-      return 'Uses frame N-1 before flow warping or consistency fallback; the raw current frame still supplies structure.';
-    if((item.section==='flux'||item.section==='hidream')
-        && item.name==='label_raw_reference')
-      return 'Burns a “raw input” footer into the current-frame reference sent to the edit model and saved in History.';
+    let modelHint=modelFieldHint(config,item.section,item.name);
+    if(modelHint) return modelHint;
     if(item.section!=='diffusion'||item.name!=='sampler_tile_size') return '';
     let vanillaSdxl=(config?.model_version||'').toLowerCase().includes('sdxl')&&!config?.animatediff?.enabled;
     return vanillaSdxl
@@ -317,6 +320,18 @@
               <ControlNetEditor value={config.controlnet} schema={schema.properties.controlnet}
                                 modelVersion={config.model_version}
                                 onchange={(v)=>setField('controlnet',v)}/>
+            {:else if only==='references'}
+              {@const refItem=group.items.find(item=>item.name==='references')}
+              {@const refSection=refItem?.section}
+              <ReferenceImagesEditor value={config[refSection]?.references}
+                onchange={(v)=>setIn(refSection,'references',v)}
+                labelOpacity={config.reference_label_opacity}
+                onLabelOpacityChange={(v)=>setField('reference_label_opacity',v)}
+                videoPath={config.video.video_init_path}
+                frameRange={config.frame_range}
+                extractNth={config.video.extract_nth_frame}
+                maxReferences={schema.max_edit_references?.[activeModelFamily] ?? 10}
+                sourceLabels={schema.edit_reference_sources}/>
             {:else}
               {#each group.items as item (item.section+'.'+item.name)}
                 <Field name={item.name} schema={item.schema} path={item.section}

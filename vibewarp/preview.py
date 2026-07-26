@@ -32,6 +32,8 @@ _DEBUG_LABELS = {
     'flux_reference_1': ('FLUX.2 reference 1', 'Edit inputs'),
     'flux_reference_2': ('FLUX.2 reference 2', 'Edit inputs'),
     'hidream_reference_2': ('HiDream reference 2 — style', 'Edit inputs'),
+    'qwen_reference_1': ('Qwen reference 1', 'Edit inputs'),
+    'mage_reference_1': ('Mage-Flow reference 1', 'Edit inputs'),
 }
 
 
@@ -332,6 +334,11 @@ def _debug_label(stem: str) -> tuple:
         return _DEBUG_LABELS[stem]
     if stem.startswith('flux_reference_'):
         return stem.replace('_', ' ').replace('flux', 'FLUX.2', 1), 'Edit inputs'
+    if stem.startswith('qwen_reference_'):
+        return stem.replace('_', ' ').replace('qwen', 'Qwen', 1), 'Edit inputs'
+    if stem.startswith('mage_reference_'):
+        return stem.replace('_', ' ').replace(
+            'mage', 'Mage-Flow', 1), 'Edit inputs'
     for suffix, kind in (('_detected', 'detected map'), ('_source', 'source')):
         if stem.endswith(suffix):
             net = stem[: -len(suffix)]

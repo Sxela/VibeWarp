@@ -15,7 +15,8 @@ from dataclasses import asdict
 
 import pytest
 
-from vibewarp.config import FluxConfig, RunConfig
+from vibewarp.config import (
+    EditReferenceConfig, FluxConfig, RunConfig, flux_model_files)
 from vibewarp.config_io import (
     FIELD_CHOICES,
     config_from_dict,
@@ -40,28 +41,46 @@ def test_flux_config_defaults():
     assert fx.guidance_scale == 1.0
     assert fx.fixed_seed is True
     assert fx.denoise == 1.0
-    assert fx.reference_mode == 'raw + warped'
-    assert fx.use_unwarped_style_reference is False
-    assert fx.label_raw_reference is False
-    assert fx.label_style_reference is False
+    assert [ref.source for ref in fx.references] == ['raw', 'none']
+    assert all(ref.label is False for ref in fx.references)
     assert 'reference image 1' in fx.multi_reference_instruction
-    assert fx.feed_consistency_mask_as_context is False
-    assert fx.feed_prev_frame_as_context is False
     assert fx.model_repo  # a non-empty default repo id
 
 
 def test_model_version_choice_is_offered():
     assert 'flux2_klein_edit' in FIELD_CHOICES['RunConfig.model_version']
+    assert 'flux2_klein_9b_edit' in FIELD_CHOICES['RunConfig.model_version']
     assert FIELD_CHOICES['FluxConfig.backend'] == ['comfy', 'diffusers']
-    assert FIELD_CHOICES['FluxConfig.reference_mode'] == [
-        'raw + warped', 'raw only', 'warped only']
+
+
+def test_flux_9b_uses_its_matching_model_and_text_encoder_defaults():
+    config = RunConfig(model_version='flux2_klein_9b_edit')
+    files = flux_model_files(config)
+    assert files['comfy_unet_name'] == 'flux-2-klein-9b-fp8.safetensors'
+    assert files['comfy_clip_name'] == 'qwen_3_8b_fp8mixed.safetensors'
+    assert files['comfy_vae_name'] == 'flux2-vae.safetensors'
+    assert files['model_repo'] == 'black-forest-labs/FLUX.2-klein-9B'
+
+    config.flux.comfy_clip_name = 'custom-qwen.safetensors'
+    assert flux_model_files(config)['comfy_clip_name'] == \
+        'custom-qwen.safetensors'
+
+    loaded = config_from_dict({'model_version': 'flux2_klein_9b_edit'})
+    assert loaded.flux.comfy_unet_name == \
+        'flux-2-klein-9b-fp8.safetensors'
+    assert loaded.flux.comfy_clip_name == \
+        'qwen_3_8b_fp8mixed.safetensors'
+
+    loaded.model_version = 'flux2_klein_edit'
+    assert flux_model_files(loaded)['comfy_unet_name'] == \
+        'flux-2-klein-4b-fp8.safetensors'
 
 
 def test_flux_json_codec_round_trip():
     c = RunConfig(model_version='flux2_klein_edit')
     c.flux.denoise = 0.7
     c.flux.model_repo = 'org/flux-klein-edit'
-    c.flux.reference_mode = 'raw only'
+    c.flux.references = [EditReferenceConfig(source='warped')]
     loaded = config_from_dict(config_to_dict(c))
     assert loaded.flux == c.flux
     assert loaded.model_version == 'flux2_klein_edit'
@@ -80,7 +99,8 @@ def test_flux_migrates_previous_raw_reference_boolean():
         'model_version': 'flux2_klein_edit',
         'flux': {'feed_init_as_context': True},
     })
-    assert loaded.flux.reference_mode == 'raw + warped'
+    assert [ref.source for ref in loaded.flux.references] == [
+        'raw', 'warped', 'none']
 
     loaded = config_from_dict({
         'flux': {
@@ -88,7 +108,7 @@ def test_flux_migrates_previous_raw_reference_boolean():
             'reference_mode': 'raw only',
         },
     })
-    assert loaded.flux.reference_mode == 'raw only'
+    assert [ref.source for ref in loaded.flux.references] == ['raw', 'none']
 
 
 # ---- VibeWarp's own flat saved format --------------------------------------
@@ -129,12 +149,8 @@ def load_vibewarp_settings_from_dict(flat, tmp_path=None):
 
 def test_flux_fields_are_classified():
     from vibewarp.ui_layout import classify
-    for field in ('denoise', 'guidance_scale', 'steps', 'reference_mode',
-                  'use_unwarped_style_reference', 'label_raw_reference',
-                  'label_style_reference',
+    for field in ('denoise', 'guidance_scale', 'steps', 'references',
                   'multi_reference_instruction',
-                  'feed_consistency_mask_as_context',
-                  'feed_prev_frame_as_context',
                   'max_sequence_length'):
         assert classify('flux', field) is not None, field
     # model_repo is a machine path — must live in the System tier so it does not
@@ -200,7 +216,7 @@ def test_render_flux_frame_passes_only_supported_kwargs(monkeypatch):
     ctx = Image.new('RGB', (64, 64), (200, 100, 50))
     out = render_flux_frame(
         pipe, cfg, edit_image=edit, prompt='p', negative_prompt='n',
-        seed=1, width=64, height=64, context_image=ctx,
+        seed=1, width=64, height=64, reference_images=[ctx, edit],
     )
 
     # The fake pipeline does not declare `max_sequence_length`/`height`/`width`/
@@ -225,13 +241,12 @@ def test_render_flux_frame_warped_only_omits_raw_context(monkeypatch):
     pipe = _FakePipe()
     cfg = RunConfig(model_version='flux2_klein_edit')
     cfg.flux.denoise = 1.0
-    cfg.flux.reference_mode = 'warped only'
 
     edit = Image.new('RGB', (32, 32), (0, 0, 0))
     ctx = Image.new('RGB', (32, 32), (255, 255, 255))
     render_flux_frame(
         pipe, cfg, edit_image=edit, prompt='p', negative_prompt='',
-        seed=0, width=32, height=32, context_image=ctx,
+        seed=0, width=32, height=32, reference_images=[edit],
     )
     assert pipe.received['image_2'] is None
 
@@ -265,12 +280,16 @@ def test_flux_frame_seed_policy_is_independent_from_sd(monkeypatch, tmp_path,
     assert captured['seed'] == expected
 
 
-def test_flux_frame_passes_unwarped_previous_frame_as_context(monkeypatch, tmp_path):
+def test_flux_frame_resolves_ordered_raw_previous_and_warped_references(
+        monkeypatch, tmp_path):
     from PIL import Image
 
     from vibewarp.core.diffusion import FrameState, RenderContext, render_frame_flux
     import vibewarp.core.flux as flux_module
 
+    frames = tmp_path / 'frames'
+    frames.mkdir()
+    Image.new('RGB', (32, 32), 'green').save(frames / '000002.jpg')
     edit_path = tmp_path / 'warped.png'
     Image.new('RGB', (32, 32), 'red').save(edit_path)
     captured = {}
@@ -282,25 +301,38 @@ def test_flux_frame_passes_unwarped_previous_frame_as_context(monkeypatch, tmp_p
     monkeypatch.setattr(flux_module, 'render_flux_frame', fake_render)
     config = RunConfig(model_version='flux2_klein_edit')
     config.video.width = config.video.height = 32
-    config.flux.feed_prev_frame_as_context = True
+    config.flux.references = [
+        EditReferenceConfig(source='raw'),
+        EditReferenceConfig(source='previous'),
+        EditReferenceConfig(source='warped'),
+        EditReferenceConfig(source='none'),
+    ]
     previous = Image.new('RGB', (32, 32), 'blue')
     state = FrameState(frame_num=1, init_image=str(edit_path), prev_frame=previous)
 
-    render_frame_flux(RenderContext(config=config, flux_pipe=object()), state)
+    render_frame_flux(RenderContext(
+        config=config, flux_pipe=object(),
+        video_frames_folder=str(frames) + '/'), state)
 
-    assert captured['edit_image'].getpixel((0, 0)) == (255, 0, 0)
-    assert captured['prev_context_image'].getpixel((0, 0)) == (0, 0, 255)
+    pixels = [image.getpixel((0, 0))
+              for image in captured['reference_images']]
+    assert pixels[0][1] > pixels[0][0] and pixels[0][1] > pixels[0][2]
+    assert pixels[1:] == [(0, 0, 255), (255, 0, 0)]
+    assert captured['edit_image'] is captured['reference_images'][0]
     assert state.prev_frame.getpixel((0, 0)) == (0, 128, 0)
 
 
-def test_flux_can_replace_warped_style_with_unwarped_previous_frame(monkeypatch, tmp_path):
+def test_flux_first_frame_omits_optional_temporal_references(
+        monkeypatch, tmp_path):
     from PIL import Image
 
     from vibewarp.core.diffusion import FrameState, RenderContext, render_frame_flux
     import vibewarp.core.flux as flux_module
 
-    edit_path = tmp_path / 'warped.png'
-    Image.new('RGB', (32, 32), 'red').save(edit_path)
+    frames = tmp_path / 'frames'
+    frames.mkdir()
+    raw_path = frames / '000001.jpg'
+    Image.new('RGB', (32, 32), 'green').save(raw_path)
     captured = {}
 
     def fake_render(pipe, config, **kwargs):
@@ -310,47 +342,17 @@ def test_flux_can_replace_warped_style_with_unwarped_previous_frame(monkeypatch,
     monkeypatch.setattr(flux_module, 'render_flux_frame', fake_render)
     config = RunConfig(model_version='flux2_klein_edit')
     config.video.width = config.video.height = 32
-    config.flux.use_unwarped_style_reference = True
-    # If both switches are imported from an experiment, do not send the same
-    # unwarped image twice.
-    config.flux.feed_prev_frame_as_context = True
-    previous = Image.new('RGB', (32, 32), 'blue')
-    state = FrameState(frame_num=1, init_image=str(edit_path), prev_frame=previous)
+    config.flux.references = [
+        EditReferenceConfig(source='raw'),
+        EditReferenceConfig(source='previous'),
+        EditReferenceConfig(source='warped'),
+        EditReferenceConfig(source='none'),
+    ]
+    state = FrameState(frame_num=0, init_image=str(raw_path), prev_frame=None)
 
-    render_frame_flux(RenderContext(config=config, flux_pipe=object()), state)
+    render_frame_flux(RenderContext(
+        config=config, flux_pipe=object(),
+        video_frames_folder=str(frames) + '/'), state)
 
-    assert captured['edit_image'].getpixel((0, 0)) == (0, 0, 255)
-    assert captured['prev_context_image'] is None
-    assert state.prev_frame.getpixel((0, 0)) == (0, 128, 0)
-
-
-def test_flux_frame_passes_processed_consistency_mask_as_context(monkeypatch, tmp_path):
-    from PIL import Image
-
-    from vibewarp.core.diffusion import FrameState, RenderContext, render_frame_flux
-    import vibewarp.core.flux as flux_module
-
-    edit_path = tmp_path / 'warped.png'
-    Image.new('RGB', (32, 32), 'red').save(edit_path)
-    debug_dir = tmp_path / 'debug'
-    debug_dir.mkdir()
-    Image.new('L', (16, 16), 192).save(debug_dir / 'consistency_mask_000001.png')
-    captured = {}
-
-    def fake_render(pipe, config, **kwargs):
-        captured.update(kwargs)
-        return Image.new('RGB', (32, 32), 'green')
-
-    monkeypatch.setattr(flux_module, 'render_flux_frame', fake_render)
-    config = RunConfig(model_version='flux2_klein_edit')
-    config.video.width = config.video.height = 32
-    config.flux.feed_consistency_mask_as_context = True
-    state = FrameState(frame_num=1, init_image=str(edit_path))
-    ctx = RenderContext(config=config, flux_pipe=object(), batch_folder=str(tmp_path))
-
-    render_frame_flux(ctx, state)
-
-    mask = captured['mask_context_image']
-    assert mask.mode == 'RGB'
-    assert mask.size == (32, 32)
-    assert mask.getpixel((0, 0)) == (192, 192, 192)
+    assert len(captured['reference_images']) == 1
+    assert captured['reference_images'][0].getpixel((0, 0))[1] > 100

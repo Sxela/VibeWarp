@@ -41,9 +41,14 @@ MODEL_FAMILY_BY_VERSION = {
     'control_multi_v15': 'sd',
     'control_multi_sdxl': 'sd',
     'flux2_klein_edit': 'flux',
+    'flux2_klein_9b_edit': 'flux',
     'hidream_o1_edit': 'hidream',
+    'qwen_image_edit_2511': 'qwen',
+    'qwen_image_edit_2511_gguf': 'qwen',
+    'mage_flow_edit': 'mage',
+    'mage_flow_edit_turbo': 'mage',
 }
-ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream')
+ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream', 'qwen', 'mage')
 SECTION_MODEL_FAMILIES = {
     'controlnet': ('sd',),
     'freeu': ('sd',),
@@ -54,10 +59,15 @@ SECTION_MODEL_FAMILIES = {
     'diffusion': ('sd',),
     'flux': ('flux',),
     'hidream': ('hidream',),
+    'qwen': ('qwen',),
+    'mage': ('mage',),
 }
 FIELD_MODEL_FAMILIES = {
     # External edit renderers still use this seed as their base starting noise.
     'diffusion.seed': ALL_MODEL_FAMILIES,
+    'main.reference_label_opacity': ('flux', 'hidream', 'qwen', 'mage'),
+    # FLUX.2 uses positive instructions with zeroed negative conditioning.
+    'main.negative_prompts': ('sd', 'hidream', 'qwen', 'mage'),
     # These paths and precision settings belong to the local SD stack.
     'main.sd_checkpoint_path': ('sd',),
     'main.model_path': ('sd',),
@@ -78,10 +88,14 @@ FIELD_MODEL_FAMILIES = {
 # to strangers: `animatediff.enabled` on the Model card would just say "Enabled".
 LABELS: Dict[str, str] = {
     'animatediff.enabled': 'AnimateDiff (motion module)',
-    'flux.use_unwarped_style_reference': 'Use unwarped previous frame for style',
-    'hidream.use_unwarped_style_reference': 'Use unwarped previous frame for style',
-    'flux.label_raw_reference': 'Label raw input reference',
-    'hidream.label_raw_reference': 'Label raw input reference',
+    'color.before_enabled': 'Enabled',
+    'color.before_strength': 'Strength',
+    'color.before_method': 'Method',
+    'color.before_regrain': 'Regrain',
+    'color.after_enabled': 'Enabled',
+    'color.after_strength': 'Strength',
+    'color.after_method': 'Method',
+    'color.after_regrain': 'Regrain',
 }
 
 
@@ -116,7 +130,11 @@ _assign('project', 'Model',
 
 # --- RENDER (the 80%) ------------------------------------------------------------------
 _assign('render', 'Prompts',
-        'main.text_prompts', 'main.negative_prompts')
+        'main.text_prompts', 'main.negative_prompts',
+        'flux.multi_reference_instruction',
+        'hidream.multi_reference_instruction',
+        'qwen.multi_reference_instruction',
+        'mage.multi_reference_instruction')
 _assign('render', 'Diffusion',
         'diffusion.steps_schedule', 'diffusion.cfg_scale_schedule',
         'diffusion.style_strength_schedule', 'diffusion.sampler',
@@ -128,17 +146,21 @@ _assign('render', 'ControlNet',
 # Flux 2 Klein Edit (diffusers). Only active when model_version='flux2_klein_edit';
 # the fields live on the Render tab so the edit knobs sit next to the prompts they
 # drive. model_repo is a machine path and goes to System > Paths (below).
+_assign('render', 'Reference Images',
+        'main.reference_label_opacity', 'flux.references')
 _assign('render', 'Flux Edit',
-        'flux.guidance_scale', 'flux.steps', 'flux.fixed_seed',
-        'flux.reference_mode', 'flux.use_unwarped_style_reference',
-        'flux.label_raw_reference', 'flux.label_style_reference',
-        'flux.feed_consistency_mask_as_context',
-        'flux.feed_prev_frame_as_context')
+        'flux.guidance_scale', 'flux.steps', 'flux.fixed_seed')
+_assign('render', 'Reference Images', 'hidream.references')
 _assign('render', 'HiDream-O1 Edit',
         'hidream.guidance_scale', 'hidream.steps', 'hidream.fixed_seed',
-        'hidream.use_trained_resolution', 'hidream.reference_mode',
-        'hidream.use_unwarped_style_reference',
-        'hidream.label_raw_reference', 'hidream.label_style_reference')
+        'hidream.use_trained_resolution')
+_assign('render', 'Reference Images', 'qwen.references')
+_assign('render', 'Qwen Image Edit',
+        'qwen.use_lightning_lora', 'qwen.lora_strength',
+        'qwen.guidance_scale', 'qwen.steps', 'qwen.fixed_seed')
+_assign('render', 'Reference Images', 'mage.references')
+_assign('render', 'Mage-Flow Edit',
+        'mage.guidance_scale', 'mage.steps', 'mage.fixed_seed')
 # The per-net settings (detectors, thresholds, mask options) live INSIDE the card of the
 # net they affect -- ControlNetEditor renders them from the catalog's `detectors` tuple.
 # Do not hoist them into an "advanced" tab: you would have to leave the ControlNet screen
@@ -166,7 +188,14 @@ _assign('system', 'Paths',
         'flux.comfy_clip_name', 'flux.comfy_vae_name',
         'flux.comfy_timeout', 'flux.model_repo',
         'hidream.comfy_server_url', 'hidream.comfy_checkpoint_name',
-        'hidream.comfy_timeout')
+        'hidream.comfy_timeout',
+        'qwen.comfy_server_url', 'qwen.comfy_unet_name',
+        'qwen.comfy_clip_name', 'qwen.comfy_vae_name',
+        'qwen.comfy_lora_name',
+        'qwen.comfy_timeout',
+        'mage.comfy_server_url', 'mage.comfy_unet_name',
+        'mage.comfy_clip_name', 'mage.comfy_vae_name',
+        'mage.comfy_timeout')
 # "Performance" was a junk drawer: tiled VAE, tiled sampler and the optical-flow workers
 # are three unrelated subsystems with their own knobs. Give each its own group so you can
 # see what a setting actually belongs to.
@@ -240,11 +269,12 @@ _assign('advanced', 'Diffusion (advanced)',
         'diffusion.guidance_use_start_code')
 _assign('advanced', 'HiDream-O1',
         'hidream.sampler', 'hidream.scheduler', 'hidream.noise_scale',
-        'hidream.multi_reference_instruction',
         'hidream.patch_seam_smoothing', 'hidream.patch_seam_start',
         'hidream.patch_seam_passes', 'hidream.patch_seam_blend')
-_assign('advanced', 'Flux Edit',
-        'flux.multi_reference_instruction')
+_assign('advanced', 'Qwen Image Edit',
+        'qwen.sampler', 'qwen.scheduler', 'qwen.sampling_shift')
+_assign('advanced', 'Mage-Flow Edit',
+        'mage.sampler', 'mage.scheduler')
 _assign('advanced', 'Reconstruction Noise',
         'reconstruction_noise.enabled', 'reconstruction_noise.randomness',
         'reconstruction_noise.cfg_scale', 'reconstruction_noise.steps_pct',
@@ -284,11 +314,16 @@ _assign('advanced', 'Render Mask',
         'mask.use_background_mask', 'mask.invert_mask', 'mask.apply_mask_after_warp',
         'mask.background', 'mask.background_source',
         'mask.mask_clip_low', 'mask.mask_clip_high')
-_assign('advanced', 'Color',
+_assign('advanced', 'Color Match — Before Diffusion',
+        'color.before_enabled', 'color.before_strength',
+        'color.before_method', 'color.before_regrain')
+_assign('advanced', 'Color Match — After Diffusion',
+        'color.after_enabled', 'color.after_strength',
+        'color.after_method', 'color.after_regrain')
+_assign('hidden', 'Legacy Color fields',
         'color.match_color_strength', 'color.colormatch_method',
         'color.colormatch_regrain', 'color.colormatch_mode',
-        'color.colormatch_turbo')
-_assign('hidden', 'Legacy Color fields', 'color.colormatch_after')
+        'color.colormatch_after', 'color.colormatch_turbo')
 # NOTE: brightness.* is deliberately HIDDEN (see the hidden tier above). _assign is
 # last-write-wins and this block runs later, so re-listing it here would silently drag the
 # whole group back into Advanced.
@@ -332,6 +367,8 @@ def model_family_for_version(model_version: str) -> str:
     lowered = (model_version or '').lower()
     if 'hidream' in lowered:
         return 'hidream'
+    if 'qwen' in lowered and 'edit' in lowered:
+        return 'qwen'
     if 'flux' in lowered:
         return 'flux'
     return 'sd'

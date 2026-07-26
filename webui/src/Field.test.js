@@ -82,6 +82,23 @@ describe('prompt routing', () => {
                     value: { 0: 'blurry' }, onchange: vi.fn() });
     expect(screen.getByLabelText('Prompt')).toHaveValue('blurry');
   });
+
+  it('renders the multi-reference instruction as plain multiline text', async () => {
+    const onchange = vi.fn();
+    render(Field, {
+      name: 'multi_reference_instruction', schema: stringField,
+      value: 'Use image 1 for content.', onchange,
+    });
+
+    const editor = screen.getByLabelText('Multi Reference Instruction');
+    expect(editor.tagName).toBe('TEXTAREA');
+    expect(editor).toHaveValue('Use image 1 for content.');
+    expect(screen.queryByText('Keyframes')).not.toBeInTheDocument();
+    expect(screen.queryByText('JSON')).not.toBeInTheDocument();
+
+    await fireEvent.change(editor, { target: { value: 'Use image 2 for style.' } });
+    expect(onchange).toHaveBeenCalledWith('Use image 2 for style.');
+  });
 });
 
 describe('validation errors', () => {

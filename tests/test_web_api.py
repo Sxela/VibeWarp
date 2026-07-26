@@ -1,8 +1,10 @@
 import os
+import io
 from dataclasses import asdict
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from vibewarp.config import RunConfig
 from vibewarp.web import create_app
@@ -28,6 +30,30 @@ def test_config_endpoint_exposes_complete_defaults_and_schema():
     assert body["defaults"]["video"]["max_size"] == 512
     assert body["prefilled"] is False
     assert "video_assembly" in body["schema"]["properties"]
+
+
+def test_config_endpoint_prefills_flux_9b_model_files():
+    initial = RunConfig(model_version='flux2_klein_9b_edit')
+    client = TestClient(create_app(
+        JobManager(runner=lambda *_args, **_kwargs: []),
+        initial_config=initial))
+    body = client.get('/api/config').json()
+    assert body['defaults']['flux']['comfy_unet_name'] == \
+        'flux-2-klein-9b-fp8.safetensors'
+    assert body['defaults']['flux']['comfy_clip_name'] == \
+        'qwen_3_8b_fp8mixed.safetensors'
+
+
+def test_config_endpoint_prefills_qwen_gguf_model_file():
+    initial = RunConfig(model_version='qwen_image_edit_2511_gguf')
+    client = TestClient(create_app(
+        JobManager(runner=lambda *_args, **_kwargs: []),
+        initial_config=initial))
+
+    body = client.get('/api/config').json()
+
+    assert body['defaults']['qwen']['comfy_unet_name'] == \
+        'Qwen-Image-Edit-2511-Q5_K_M.gguf'
 
 
 def test_config_endpoint_uses_startup_settings():
@@ -157,6 +183,43 @@ def test_comfy_status_rejects_invalid_server_urls():
     status = client.get('/api/comfy/status', params={'url': 'localhost:8188'}).json()
     assert status['available'] is False
     assert status['message'].startswith('Invalid ComfyUI URL:')
+
+
+def test_reference_upload_and_thumbnail_round_trip(tmp_path, monkeypatch):
+    monkeypatch.setenv('VIBEWARP_HOME', str(tmp_path))
+    payload = io.BytesIO()
+    Image.new('RGB', (19, 11), 'purple').save(payload, format='PNG')
+    client = TestClient(create_app(JobManager(runner=lambda *_a, **_k: [])))
+
+    response = client.post(
+        '/api/references/upload',
+        params={'filename': 'my style?.jpg'},
+        content=payload.getvalue(),
+        headers={'content-type': 'image/png'},
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data['width'] == 19 and data['height'] == 11
+    target = data['path']
+    assert os.path.isfile(target)
+    assert str(tmp_path) in target
+
+    thumbnail = client.get('/api/references/thumbnail', params={'path': target})
+    assert thumbnail.status_code == 200
+    assert thumbnail.headers['content-type'] == 'image/jpeg'
+    assert thumbnail.headers['cache-control'] == 'no-store'
+
+
+def test_reference_upload_rejects_non_images(tmp_path, monkeypatch):
+    monkeypatch.setenv('VIBEWARP_HOME', str(tmp_path))
+    client = TestClient(create_app(JobManager(runner=lambda *_a, **_k: [])))
+    response = client.post(
+        '/api/references/upload',
+        params={'filename': 'not-an-image.txt'},
+        content=b'hello',
+    )
+    assert response.status_code == 422
+    assert response.json()['detail'] == 'The uploaded file is not a readable image'
 
 
 def test_system_settings_survive_a_settings_import(tmp_path, monkeypatch):
@@ -305,3 +368,26 @@ def test_video_thumbnail_returns_a_visible_frame():
     image = Image.open(BytesIO(response.content))
     assert max(image.size) <= 480
     assert np.asarray(image.convert("L")).mean() >= 8.0     # not black
+
+
+def test_video_thumbnail_can_request_the_first_frame_of_a_render_range(
+        tmp_path, monkeypatch):
+    import numpy as np
+    import vibewarp.web as web
+
+    video = tmp_path / 'input.mp4'
+    video.write_bytes(b'placeholder')
+    calls = []
+    monkeypatch.setattr(
+        web, 'frame_at',
+        lambda path, frame: (
+            calls.append((path, frame)) or
+            (frame, np.full((8, 12, 3), 127, dtype=np.uint8))))
+    client = TestClient(create_app(JobManager(runner=lambda *_a, **_k: [])))
+
+    response = client.get(
+        '/api/video/thumbnail', params={'path': str(video), 'frame': 18})
+
+    assert response.status_code == 200
+    assert response.headers['x-frame-index'] == '18'
+    assert calls == [(str(video), 18)]

@@ -1,17 +1,18 @@
 """Local FastAPI server for the VibeWarp Svelte application."""
-import argparse, asyncio, copy, json, math, mimetypes, os, socket, tempfile, webbrowser
+import argparse, asyncio, copy, io, json, math, mimetypes, os, socket, tempfile, uuid, webbrowser
 from dataclasses import asdict
 from pathlib import Path
 from threading import Timer
 from urllib.parse import urlsplit
-from vibewarp.config import RunConfig
+from PIL import Image
+from vibewarp.config import RunConfig, flux_model_files, qwen_model_files
 from vibewarp.config_io import ConfigError, apply_path_defaults, config_from_dict, config_from_settings, config_schema, strip_path_quotes, validate_config
 from vibewarp.controlnet_catalog import CONTROLNET_MODES, MODE_PRESETS, specs_for_version
 from vibewarp import system_settings
 from vibewarp.preview import (describe_run, image_path, list_runs, resume_status,
                               run_dir, runs_root, set_run_label, settings_file,
                               video_file)
-from vibewarp.video.input import first_visible_frame, fit_dimensions, probe_video
+from vibewarp.video.input import first_visible_frame, fit_dimensions, frame_at, probe_video
 from vibewarp.web_jobs import JobManager, TERMINAL_STATES
 
 STATIC_DIR = Path(__file__).with_name("web_static")
@@ -45,6 +46,10 @@ def _comfy_port_status(server_url: str, timeout: float = 0.5) -> dict:
 
 def _ui_config(config: RunConfig) -> RunConfig:
     config = copy.deepcopy(config)
+    for key, value in flux_model_files(config).items():
+        setattr(config.flux, key, value)
+    for key, value in qwen_model_files(config).items():
+        setattr(config.qwen, key, value)
     if config.video.max_size <= 0:
         config.video.max_size = max(config.video.width, config.video.height)
     return config
@@ -96,8 +101,9 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
     @app.get("/api/config")
     def get_config_metadata():
         # This machine's paths/VRAM tuning win over the shipped defaults.
-        defaults = system_settings.overlay(
-            asdict(_ui_config(initial_config or RunConfig())))
+        overlaid = config_from_dict(system_settings.overlay(
+            asdict(initial_config or RunConfig())))
+        defaults = asdict(_ui_config(overlaid))
         return {
             "defaults": defaults,
             "schema": config_schema(),
@@ -163,7 +169,7 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         }
 
     @app.get("/api/video/thumbnail")
-    def video_thumbnail(path: str = ""):
+    def video_thumbnail(path: str = "", frame: int | None = None):
         """The first frame that is not essentially black.
 
         Clips that open on a fade-in would otherwise show a black thumbnail, which tells
@@ -173,19 +179,59 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         if not cleaned or not os.path.isfile(cleaned):
             raise HTTPException(404, detail="No video at that path")
         try:
-            index, frame = first_visible_frame(cleaned)
+            index, pixels = (
+                frame_at(cleaned, frame) if frame is not None
+                else first_visible_frame(cleaned))
         except Exception as exc:
             raise HTTPException(422, detail=str(exc))
 
         from io import BytesIO
-        from PIL import Image
-        image = Image.fromarray(frame)
+        image = Image.fromarray(pixels)
         image.thumbnail((480, 480))
         buffer = BytesIO()
         image.save(buffer, format="JPEG", quality=82)
         buffer.seek(0)
         return StreamingResponse(buffer, media_type="image/jpeg",
                                  headers={"X-Frame-Index": str(index)})
+
+    @app.post('/api/references/upload')
+    async def upload_reference(request: Request, filename: str = 'reference.png'):
+        """Store a browser-uploaded style reference in the portable app cache."""
+        payload = await request.body()
+        if not payload or len(payload) > 50 * 1024 * 1024:
+            raise HTTPException(422, detail='Reference image must be between 1 B and 50 MB')
+        try:
+            image = Image.open(io.BytesIO(payload))
+            image.load()
+            image = image.convert('RGB')
+        except Exception as exc:
+            raise HTTPException(422, detail='The uploaded file is not a readable image') from exc
+        root = system_settings.settings_path().parent / '.vibewarp_cache' / 'reference_uploads'
+        root.mkdir(parents=True, exist_ok=True)
+        stem = ''.join(
+            char if char.isalnum() or char in '-_' else '_'
+            for char in Path(filename).stem)[:60] or 'reference'
+        target = root / f'{stem}-{uuid.uuid4().hex[:12]}.png'
+        image.save(target, format='PNG')
+        return {'path': str(target.resolve()), 'width': image.width, 'height': image.height}
+
+    @app.get('/api/references/thumbnail')
+    def reference_thumbnail(path: str = ''):
+        cleaned = strip_path_quotes(path or '')
+        if not cleaned or not os.path.isfile(cleaned):
+            raise HTTPException(404, detail='Reference image does not exist')
+        try:
+            image = Image.open(cleaned)
+            image.load()
+            image = image.convert('RGB')
+        except Exception as exc:
+            raise HTTPException(422, detail='Could not read the reference image') from exc
+        image.thumbnail((480, 480))
+        buffer = io.BytesIO()
+        image.save(buffer, format='JPEG', quality=86)
+        buffer.seek(0)
+        return StreamingResponse(buffer, media_type='image/jpeg',
+                                 headers={'Cache-Control': 'no-store'})
 
     @app.put("/api/system")
     async def put_system_settings(request: Request):
