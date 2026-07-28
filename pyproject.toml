@@ -36,7 +36,7 @@ dependencies = [
     # Required by k-diffusion's SDE samplers (sample_dpmpp_sde, ..._2m_sde).
     # Version matches the reference notebook env.
     "torchsde==0.2.6",
-    "tqdm==4.67.3",
+    "tqdm==4.70.0",
     "piexif==1.1.3",
     "requests==2.34.2",
     # Streams ComfyUI queue, active-node, and sampler-step events into the UI.
