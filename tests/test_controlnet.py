@@ -202,14 +202,42 @@ class TestAnnotateImageModelBacked:
         loader.assert_called_once()
 
     def test_openpose_dispatches(self):
-        result, loader, _ = self._run(
+        result, loader, detector = self._run(
             'openpose', 'vibewarp.core.controlnet._load_openpose')
         loader.assert_called_once()
+        assert detector.call_args.kwargs['include_body'] is True
+        assert detector.call_args.kwargs['include_hand'] is False
+        assert detector.call_args.kwargs['include_face'] is False
+
+    def test_openpose_forwards_body_hand_and_face_settings(self):
+        _, _, detector = self._run(
+            'openpose', 'vibewarp.core.controlnet._load_openpose',
+            opts={
+                'pose_include_body': False,
+                'pose_include_hand': True,
+                'pose_include_face': True,
+            })
+        assert detector.call_args.kwargs['include_body'] is False
+        assert detector.call_args.kwargs['include_hand'] is True
+        assert detector.call_args.kwargs['include_face'] is True
 
     def test_dwpose_dispatches(self):
-        result, loader, _ = self._run(
-            'dwpose', 'vibewarp.core.controlnet._load_dwpose')
-        loader.assert_called_once()
+        expected = np.zeros((64, 64, 3), dtype=np.uint8)
+        with patch('vibewarp.core.controlnet._run_dwpose',
+                   return_value=expected) as run:
+            result = annotate_image(
+                _dummy_image(), 'dwpose', resolution=128,
+                opts={
+                    'pose_include_body': False,
+                    'pose_include_hand': True,
+                    'pose_include_face': True,
+                })
+        assert result is expected
+        assert run.call_args.kwargs == {
+            'include_body': False,
+            'include_hand': True,
+            'include_face': True,
+        }
 
     def test_shuffle_dispatches(self):
         result, loader, _ = self._run(
@@ -237,7 +265,6 @@ class TestAnnotateImageModelBacked:
             ('lineart_anime', 'vibewarp.core.controlnet._load_lineart_anime'),
             ('mlsd',          'vibewarp.core.controlnet._load_mlsd'),
             ('openpose',      'vibewarp.core.controlnet._load_openpose'),
-            ('dwpose',        'vibewarp.core.controlnet._load_dwpose'),
             ('shuffle',       'vibewarp.core.controlnet._load_shuffle'),
             ('normalbae',     'vibewarp.core.controlnet._load_normalbae'),
         ]

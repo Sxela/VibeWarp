@@ -14,7 +14,7 @@ Notebook-faithful quirks preserved:
   (both as in the notebook; both schedules are currently unsupported in
   vibewarp and warn-skip — see apply_content_schedules).
 
-LPIPS requires the optional ``lpips`` package (``pip install lpips``).
+LPIPS is also used by pixel-space temporal guidance.
 """
 
 import os
@@ -52,18 +52,17 @@ def rmse(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
 
 
 def init_lpips(device: str = 'cuda'):
-    """Load LPIPS (vgg net, as the notebook). Requires the `lpips` package."""
+    """Load LPIPS (vgg net, as the notebook)."""
     global _lpips_model
     if _lpips_model is None:
         try:
             import lpips
         except ImportError as e:
             raise ImportError(
-                "Content-aware scheduling with an lpips diff function requires "
-                "the 'lpips' package: pip install lpips "
-                "(or use diff_function='rmse')") from e
+                "LPIPS guidance/scheduling requires the 'lpips' package: "
+                "pip install lpips") from e
         _lpips_model = lpips.LPIPS(net='vgg').to(device)
-    return _lpips_model
+    return _lpips_model.to(device)
 
 
 def analyze_video_frames(

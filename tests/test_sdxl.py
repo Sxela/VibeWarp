@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn as nn
+from types import SimpleNamespace
 
 from vibewarp.core.model_loader import (
     CFGDenoiser,
@@ -11,6 +12,52 @@ from vibewarp.core.model_loader import (
     setup_sdxl_model,
     split_sdxl_cond,
 )
+from vibewarp.vendor.sgm.modules.encoders.modules import (
+    FrozenOpenCLIPEmbedder2,
+)
+
+
+class _TinyOpenClipBlock(nn.Module):
+    def __init__(self, batch_first):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(
+            4, 2, batch_first=batch_first)
+
+    def forward(self, x, attn_mask=None):
+        return self.attn(
+            x, x, x, attn_mask=attn_mask, need_weights=False)[0]
+
+
+def _tiny_openclip_embedder(batch_first):
+    embedder = FrozenOpenCLIPEmbedder2.__new__(
+        FrozenOpenCLIPEmbedder2)
+    nn.Module.__init__(embedder)
+    model = nn.Module()
+    model.token_embedding = nn.Embedding(16, 4)
+    model.positional_embedding = nn.Parameter(torch.zeros(3, 4))
+    model.transformer = SimpleNamespace(
+        resblocks=nn.ModuleList([
+            _TinyOpenClipBlock(batch_first),
+            _TinyOpenClipBlock(batch_first),
+        ]),
+        grad_checkpointing=False,
+    )
+    model.attn_mask = torch.zeros(3, 3)
+    model.ln_final = nn.Identity()
+    model.text_projection = nn.Parameter(torch.eye(4))
+    embedder.model = model
+    embedder.layer = 'penultimate'
+    embedder.legacy = False
+    return embedder
+
+
+@pytest.mark.parametrize('batch_first', [False, True])
+def test_sdxl_openclip_accepts_cached_attention_layout(batch_first):
+    """Old and new OpenCLIP pickle caches use opposite tensor layouts."""
+    embedder = _tiny_openclip_embedder(batch_first)
+    encoded = embedder.encode_with_transformer(torch.tensor([[1, 2, 3]]))
+    assert encoded['last'].shape == (1, 3, 4)
+    assert encoded['penultimate'].shape == (1, 3, 4)
 
 
 class TestIsSDXLModel:

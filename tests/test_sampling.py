@@ -213,6 +213,115 @@ class TestTiledModelFn:
         assert all(h < 64 and w < 80 for h, w in seen)
         assert sd_model._cn_hints['depth'] is original
 
+    def test_multiscale_is_whole_frame_below_100_then_tiles(self):
+        calls = []
+
+        def model(x, sigma, **kwargs):
+            calls.append(tuple(x.shape[-2:]))
+            return torch.full_like(x, 2.0)
+
+        tiled = TiledModelFn(
+            model, tile_size=64, scale_schedule={0: 50, 2: 100})
+        tiled.set_sigma_schedule(torch.tensor([10.0, 5.0, 1.0, 0.0]))
+        x = torch.randn(1, 4, 128, 128)
+
+        coarse = tiled(x, torch.tensor([10.0]))
+        assert calls == [(64, 64)]  # one whole-frame evaluation, never four tiles
+        assert coarse.shape == x.shape
+
+        calls.clear()
+        full = tiled(x, torch.tensor([1.0]))
+        assert len(calls) == 4
+        assert all(height < 128 and width < 128 for height, width in calls)
+        assert full.shape == x.shape
+
+    def test_multiscale_resizes_spatial_conditioning_and_restores_hints(self):
+        class Model:
+            pass
+
+        sd_model = Model()
+        original_hint = torch.randn(2, 3, 1024, 1024)
+        sd_model._cn_hints = {'depth': original_hint}
+        seen = {}
+
+        def model(x, sigma, **kwargs):
+            seen['x'] = x.shape[-2:]
+            seen['image_cond'] = kwargs['image_cond'].shape[-2:]
+            seen['hint'] = sd_model._cn_hints['depth'].shape[-2:]
+            return x
+
+        tiled = TiledModelFn(
+            model, tile_size=64, sd_model=sd_model,
+            scale_schedule={0: 50})
+        tiled.set_sigma_schedule(torch.tensor([10.0, 0.0]))
+        x = torch.randn(2, 4, 128, 128)
+        image_cond = torch.randn(2, 3, 1024, 1024)
+
+        result = tiled(x, torch.tensor([10.0]), image_cond=image_cond)
+
+        assert seen == {
+            'x': (64, 64),
+            'image_cond': (512, 512),
+            'hint': (512, 512),
+        }
+        assert result.shape == x.shape
+        assert sd_model._cn_hints['depth'] is original_hint
+
+    def test_multiscale_schedule_uses_sampling_steps_not_model_call_count(self):
+        tiled = TiledModelFn(
+            lambda x, sigma, **kwargs: x,
+            scale_schedule={0: 50, 2: 75, 3: 100})
+        tiled.set_sigma_schedule(torch.tensor([10.0, 6.0, 3.0, 1.0, 0.0]))
+
+        assert tiled._scale_for_sigma(torch.tensor([10.0])) == 50
+        assert tiled._scale_for_sigma(torch.tensor([4.0])) == 50
+        assert tiled._scale_for_sigma(torch.tensor([3.0])) == 75
+        assert tiled._scale_for_sigma(torch.tensor([1.0])) == 100
+
+    def test_multiscale_works_with_tiling_disabled(self):
+        calls = []
+
+        def model(x, sigma, **kwargs):
+            calls.append(tuple(x.shape[-2:]))
+            return x
+
+        wrapped = TiledModelFn(
+            model, tile_size=32, scale_schedule={0: 50, 1: 100},
+            enable_tiling=False)
+        wrapped.set_sigma_schedule(torch.tensor([10.0, 1.0, 0.0]))
+        x = torch.randn(1, 4, 128, 128)
+
+        assert wrapped(x, torch.tensor([10.0])).shape == x.shape
+        assert calls == [(64, 64)]
+        calls.clear()
+        assert wrapped(x, torch.tensor([1.0])).shape == x.shape
+        assert calls == [(128, 128)]  # one normal full-frame call, never tiles
+
+    def test_multiscale_pixel_floor_uses_longest_side(self):
+        calls = []
+
+        def model(x, sigma, **kwargs):
+            calls.append(tuple(x.shape[-2:]))
+            return x
+
+        # 1920x1080 output -> 240x135 latent. A scheduled 10% pass would be
+        # far smaller, but a 512px floor requires a 64-unit longest latent side.
+        wrapped = TiledModelFn(
+            model, scale_schedule={0: 10}, enable_tiling=False,
+            min_scale_size=512)
+        wrapped.set_sigma_schedule(torch.tensor([10.0, 0.0]))
+        x = torch.randn(1, 4, 135, 240)
+
+        assert wrapped(x, torch.tensor([10.0])).shape == x.shape
+        assert calls == [(32, 64)]
+
+    def test_multiscale_pixel_floor_never_upscales_past_final_size(self):
+        wrapped = TiledModelFn(
+            lambda x, sigma, **kwargs: x,
+            scale_schedule={0: 25}, enable_tiling=False,
+            min_scale_size=2048)
+        assert wrapped._scaled_size(64, 64, 25) == (64, 64)
+
 
 class TestTiledSamplerLogging:
     """The tiled sampler must say what it actually did.
@@ -222,12 +331,15 @@ class TestTiledSamplerLogging:
     paying the crop/blend cost, which is worth shouting about.
     """
 
-    def _cfg(self, enabled=True, tile=512, overlap=35.0):
+    def _cfg(self, enabled=True, tile=512, overlap=35.0,
+             scale_schedule=None):
         from vibewarp.config import RunConfig
         config = RunConfig()
         config.diffusion.tiled_sampler = enabled
         config.diffusion.sampler_tile_size = tile
         config.diffusion.sampler_tile_overlap = overlap
+        config.diffusion.sampler_scale_schedule = (
+            {0: 50, 10: 100} if scale_schedule is None else scale_schedule)
         return config
 
     def _wrap(self):
@@ -244,6 +356,8 @@ class TestTiledSamplerLogging:
         assert 'Tiled sampler: ON' in out
         assert '2x2 tiles' in out          # 1024px frame / 512px tiles
         assert '1024x1024' in out
+        assert '0:50%, 10:100%' in out
+        assert 'below 100% = whole frame' in out
         assert wrap._tiled_inner_model is not None
 
     def test_logs_once_per_configuration_not_once_per_frame(self, capsys):
@@ -275,10 +389,26 @@ class TestTiledSamplerLogging:
         _configure_tiled_sampler(wrap, self._cfg(), None, H=1024, W=1024)
         capsys.readouterr()
 
-        _configure_tiled_sampler(wrap, self._cfg(enabled=False), None, H=1024, W=1024)
+        _configure_tiled_sampler(
+            wrap, self._cfg(enabled=False, scale_schedule={0: 100}),
+            None, H=1024, W=1024)
 
-        assert 'Tiled sampler: disabled' in capsys.readouterr().out
+        assert 'sampler: disabled' in capsys.readouterr().out
         assert wrap._tiled_inner_model is None
+
+    def test_multiscale_installs_when_tiling_is_off(self, capsys):
+        from vibewarp.core.diffusion import _configure_tiled_sampler
+        wrap = self._wrap()
+
+        _configure_tiled_sampler(
+            wrap, self._cfg(enabled=False, scale_schedule={0: 50, 10: 100}),
+            None, H=1024, W=1024)
+
+        out = capsys.readouterr().out
+        assert 'Multiscale sampler: ON' in out
+        assert 'tiling off' in out
+        assert wrap._tiled_inner_model is not None
+        assert wrap._tiled_inner_model.enable_tiling is False
 
 
 class TestStepProgress:

@@ -55,6 +55,13 @@ def test_schema_carries_tier_and_group():
     assert relative['tier'] == 'project'
     assert relative['group'] == 'Input Video'
     assert relative['label'] == 'Keyframes relative to frame range'
+    assert diffusion['unet_cache']['group'] == 'Performance'
+    assert diffusion['unet_cache']['choices'] == [
+        'off', 'deepcache', 'first_block']
+    controlnet = schema['properties']['controlnet']['properties']
+    assert controlnet['pose_include_body']['label'] == 'Detect body'
+    assert controlnet['pose_include_hand']['label'] == 'Detect hands'
+    assert controlnet['pose_include_face']['label'] == 'Detect face'
 
 
 def test_ipadapter_sits_directly_below_controlnet_on_render_tab():

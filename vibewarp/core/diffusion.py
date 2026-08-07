@@ -40,6 +40,7 @@ class FrameState:
     frame_num: int = 0
     seed: int = 0
     init_image: Optional[str] = None
+    guidance_image: Optional[str] = None
     init_latent: Optional[torch.Tensor] = None
     prev_frame: Optional[Image.Image] = None
     prev_latent: Optional[torch.Tensor] = None
@@ -317,9 +318,11 @@ def _configure_tiled_sampler(model_wrap_cfg: Any, config: RunConfig, sd_model: A
     only when the configuration changes — otherwise it would print on every frame.
     """
     diffusion = config.diffusion
-    if not diffusion.tiled_sampler:
+    scale_schedule = diffusion.sampler_scale_schedule
+    multiscale_enabled = any(scale < 100 for scale in scale_schedule.values())
+    if not diffusion.tiled_sampler and not multiscale_enabled:
         if getattr(model_wrap_cfg, '_tiled_inner_model', None) is not None:
-            print('Tiled sampler: disabled')
+            print('Multiscale/tiled sampler: disabled')
         model_wrap_cfg._tiled_inner_model = None
         model_wrap_cfg._tiled_log_key = None
         return
@@ -335,12 +338,28 @@ def _configure_tiled_sampler(model_wrap_cfg: Any, config: RunConfig, sd_model: A
         overlap_w=overlap,
         split_threshold=threshold,
         sd_model=sd_model,
+        scale_schedule=scale_schedule,
+        enable_tiling=diffusion.tiled_sampler,
+        min_scale_size=diffusion.sampler_scale_min_size,
     )
 
-    key = (diffusion.sampler_tile_size, overlap, threshold, H, W)
+    schedule_key = tuple(sorted(scale_schedule.items()))
+    key = (
+        diffusion.tiled_sampler, diffusion.sampler_tile_size, overlap,
+        threshold, schedule_key, H, W)
     if getattr(model_wrap_cfg, '_tiled_log_key', None) == key:
         return
     model_wrap_cfg._tiled_log_key = key
+    schedule_text = ', '.join(
+        f'{step}:{scale:g}%' for step, scale in sorted(scale_schedule.items()))
+    minimum_text = (
+        f', minimum longest side {diffusion.sampler_scale_min_size}px'
+        if diffusion.sampler_scale_min_size else '')
+    if not diffusion.tiled_sampler:
+        print(f'Multiscale sampler: ON ({schedule_text}{minimum_text}); '
+              f'below 100% = scaled '
+              f'whole frame, 100% = normal whole frame (tiling off)')
+        return
     if not (H and W):
         print(f'Tiled sampler: ON (tile {diffusion.sampler_tile_size}px, '
               f'overlap {overlap}%, split threshold {threshold}%)')
@@ -361,6 +380,8 @@ def _configure_tiled_sampler(model_wrap_cfg: Any, config: RunConfig, sd_model: A
     print(f'Tiled sampler: ON — {rows}x{cols} tiles ({rows * cols} per model eval) '
           f'of {actual}, overlap {overlap}%, over {W}x{H} '
           f'(requested {diffusion.sampler_tile_size}px, split threshold {threshold}%)')
+    print(f'  Multiscale: {schedule_text}{minimum_text}; below 100% = whole frame, '
+          f'100% = tiled')
     if rows * cols == 1:
         # One tile is not tiling: it pays the crop/blend cost and changes nothing. Almost
         # always means sampler_tile_size >= the frame, i.e. the setting is doing nothing.
@@ -404,6 +425,120 @@ def _encode_prompt_weighted(
     return result
 
 
+def _differentiable_decode_half(sd_model: Any, latent: torch.Tensor) -> torch.Tensor:
+    """Decode every-other latent pixel while retaining gradients to ``latent``."""
+    latent = latent[:, :, ::2, ::2]
+    differentiable = getattr(sd_model, 'differentiable_decode_first_stage', None)
+    if differentiable is not None:
+        return differentiable(latent)
+
+    # SGM/SDXL exposes only a @no_grad decode_first_stage, so call its frozen
+    # first-stage decoder directly. Frozen weights still propagate dL/dlatent.
+    latent = latent / getattr(sd_model, 'scale_factor', 1.0)
+    disable_autocast = bool(
+        getattr(sd_model, 'disable_first_stage_autocast', False))
+    with torch.amp.autocast('cuda', enabled=not disable_autocast):
+        return sd_model.first_stage_model.decode(latent)
+
+
+def make_temporal_guidance_model_fn(
+    model: Callable,
+    *,
+    sd_model: Any,
+    target_image: Optional[torch.Tensor],
+    target_latent: Optional[torch.Tensor],
+    init_scale: float,
+    init_latent_scale: float,
+    clamp_grad: bool,
+    clamp_max: float,
+    add_noise: bool,
+    guidance_start_code: Optional[torch.Tensor],
+    source_label: str,
+) -> Callable:
+    """Add WarpFusion pixel/latent loss gradients to a denoiser prediction."""
+    step = 0
+    lpips_model = None
+
+    def model_fn(x, sigma, **kwargs):
+        nonlocal step, lpips_model
+        # We only differentiate the loss from the clean-latent prediction. A
+        # backward graph through the UNet is unnecessary and much more costly.
+        with torch.no_grad():
+            denoised = model(x, sigma, **kwargs)
+
+        with torch.enable_grad():
+            guided = denoised.detach().requires_grad_(True)
+            loss = guided.new_zeros(())
+            latent_loss = None
+            pixel_loss = None
+
+            if init_latent_scale > 0 and target_latent is not None:
+                latent_target = target_latent
+                sigma_value = sigma.flatten()[0]
+                if add_noise and float(sigma_value) != 0:
+                    noise = (guidance_start_code
+                             if guidance_start_code is not None
+                             else torch.randn_like(latent_target))
+                    latent_target = latent_target + noise * sigma_value
+                from vibewarp.core.losses import spherical_dist_loss
+                latent_loss = spherical_dist_loss(
+                    guided.float(), latent_target.float()).sum()
+                loss = loss + latent_loss * init_latent_scale
+
+            if init_scale > 0 and target_image is not None:
+                if lpips_model is None:
+                    from vibewarp.core.scene_detect import init_lpips
+                    lpips_model = init_lpips(str(guided.device))
+                    for parameter in lpips_model.parameters():
+                        parameter.requires_grad_(False)
+                decoded = _differentiable_decode_half(sd_model, guided)
+                pixel_loss = lpips_model(
+                    decoded.float(), target_image[:, :, ::2, ::2].float()).sum()
+                loss = loss + pixel_loss * init_scale
+
+            grad = -torch.autograd.grad(loss, guided)[0]
+            if not bool(torch.isfinite(grad).all()):
+                raise RuntimeError(
+                    f"Temporal guidance produced a non-finite gradient at step {step}")
+
+            grad_f = grad.float()
+            raw_rms = grad_f.square().mean().sqrt()
+            raw_mean = grad_f.mean()
+            raw_std = grad_f.std()
+            raw_max = grad_f.abs().max()
+            clamped = False
+            if clamp_grad and raw_rms.item() > 0:
+                applied_rms = raw_rms.clamp(max=clamp_max)
+                clamped = bool(raw_rms.item() > clamp_max)
+                grad = grad * (applied_rms / raw_rms).to(grad.dtype)
+            else:
+                applied_rms = raw_rms
+
+            latent_text = (
+                f"{float(latent_loss.detach()):.6g}"
+                if latent_loss is not None else "off")
+            pixel_text = (
+                f"{float(pixel_loss.detach()):.6g}"
+                if pixel_loss is not None else "off")
+            print(
+                f"  Temporal guidance [{source_label}] step {step + 1}: "
+                f"sigma={float(sigma.flatten()[0]):.5g} "
+                f"latent_loss={latent_text} pixel_lpips={pixel_text} "
+                f"grad_raw(mean={float(raw_mean):.4g}, "
+                f"std={float(raw_std):.4g}, rms={float(raw_rms):.4g}, "
+                f"max={float(raw_max):.4g}) "
+                f"grad_applied_rms={float(applied_rms):.4g} "
+                f"clamped={'yes' if clamped else 'no'}")
+            step += 1
+
+        sigma_sq = sigma ** 2
+        while sigma_sq.ndim < denoised.ndim:
+            sigma_sq = sigma_sq[..., None]
+        return denoised + grad.detach().to(denoised.dtype) * sigma_sq
+
+    return model_fn
+
+
 def run_sd(
     ctx: RenderContext,
     init_image_path: Optional[str],
@@ -418,6 +553,7 @@ def run_sd(
     state: FrameState,
     image_cond: Optional[torch.Tensor] = None,
     rec_noise: Optional[torch.Tensor] = None,
+    guidance_image_path: Optional[str] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Core Stable Diffusion sampling — simplified from notebook's run_sd().
 
@@ -454,6 +590,8 @@ def run_sd(
     model_wrap_cfg = ctx.model_wrap_cfg
     model_wrap_cfg._sd_batch_size = ctx.config.diffusion.sd_batch_size
     _configure_tiled_sampler(model_wrap_cfg, ctx.config, sd_model, H, W)
+    from vibewarp.core.unet_acceleration import reset_unet_cache
+    reset_unet_cache(sd_model)
 
     C, f = 4, 8  # latent channels, downscale factor
     shape = [C, H // f, W // f]
@@ -491,22 +629,58 @@ def run_sd(
 
     t_enc = steps - skip_timesteps
 
-    # Encode init image if provided. Offload VAE before sampler runs to
-    # keep VRAM headroom for UNet + ControlNet + IP-Adapter.
+    init_scale = float(ctx.config.diffusion.init_scale)
+    init_latent_scale = float(ctx.config.diffusion.init_latent_scale)
+    guidance_enabled = (
+        guidance_image_path is not None
+        and (init_scale > 0 or init_latent_scale > 0)
+    )
+
+    # Encode the normal img2img init and the independent temporal guidance
+    # target. Pixel guidance retains the VAE on GPU for per-step decoding.
     x0 = None
+    target_image_sd = None
+    target_latent = None
+    guidance_start_code = None
+    keep_vae_for_guidance = guidance_enabled and init_scale > 0
+    if init_image_path is not None or guidance_enabled:
+        _move_to_cuda(sd_model.first_stage_model)
     if init_image_path is not None:
         with _phase(ctx, 'vae_encode'):
             init_image_sd = load_img_for_sd(init_image_path, size=(W, H))
-            _move_to_cuda(sd_model.first_stage_model)
             with torch.inference_mode(), torch.amp.autocast('cuda'):
                 x0 = sd_model.get_first_stage_encoding(sd_model.encode_first_stage(init_image_sd))
-            _offload_to_cpu(sd_model.first_stage_model)
-        # Notebook diffuse() draws guidance_start_code = randn_like(init_latent)
-        # here whenever guidance_use_start_code is on (default), even though the
-        # guidance itself is deprecated. The draw advances the CUDA RNG stream,
-        # so skipping it desynchronizes every subsequent same-seed randn.
-        if ctx.config.diffusion.guidance_use_start_code:
-            torch.randn_like(x0)
+
+    if guidance_enabled:
+        if not os.path.exists(guidance_image_path):
+            raise FileNotFoundError(
+                f"Temporal guidance source does not exist: {guidance_image_path}")
+        target_image_sd = load_img_for_sd(guidance_image_path, size=(W, H))
+        if (init_image_path is not None
+                and os.path.abspath(guidance_image_path)
+                == os.path.abspath(init_image_path)):
+            target_latent = x0
+        else:
+            with _phase(ctx, 'guidance_vae_encode'):
+                with torch.inference_mode(), torch.amp.autocast('cuda'):
+                    target_latent = sd_model.get_first_stage_encoding(
+                        sd_model.encode_first_stage(target_image_sd))
+        print(
+            f"  Temporal guidance active: source={guidance_image_path} "
+            f"pixel_scale={init_scale:g} latent_scale={init_latent_scale:g} "
+            f"clamp={'on' if ctx.config.diffusion.clamp_grad else 'off'}"
+            + (f"@{ctx.config.diffusion.clamp_max:g}"
+               if ctx.config.diffusion.clamp_grad else ""))
+
+    # The reference draws this whenever an init latent exists and the option is
+    # enabled, including when both scales are zero. Preserve its RNG ordering
+    # and reuse the tensor when latent guidance is active.
+    code_shape = target_latent if target_latent is not None else x0
+    if code_shape is not None and ctx.config.diffusion.guidance_use_start_code:
+        guidance_start_code = torch.randn_like(code_shape)
+
+    if (init_image_path is not None or guidance_enabled) and not keep_vae_for_guidance:
+        _offload_to_cpu(sd_model.first_stage_model)
 
     # Build extra_args for CFGDenoiser
     # Per-step CFG ramp: store on model_wrap_cfg for popping each step
@@ -540,12 +714,34 @@ def run_sd(
     # Wrap model in static thresholding (notebook: dynamic_thresh)
     from vibewarp.core.model_loader import make_static_thresh_model_fn
     _dyn_thresh = ctx.config.diffusion.dynamic_thresh if ctx is not None else 30.0
-    model_fn = make_static_thresh_model_fn(model_wrap_cfg, value=_dyn_thresh)
+    model_fn = model_wrap_cfg
+    if guidance_enabled:
+        model_fn = make_temporal_guidance_model_fn(
+            model_fn,
+            sd_model=sd_model,
+            target_image=target_image_sd,
+            target_latent=target_latent,
+            init_scale=init_scale,
+            init_latent_scale=init_latent_scale,
+            clamp_grad=ctx.config.diffusion.clamp_grad,
+            clamp_max=ctx.config.diffusion.clamp_max,
+            add_noise=ctx.config.diffusion.guidance_add_noise,
+            guidance_start_code=guidance_start_code,
+            source_label=ctx.config.diffusion.guidance_mode,
+        )
+    # Notebook order: compute and apply cond_fn first, then clamp the guided
+    # clean-latent prediction with the static/dynamic threshold wrapper.
+    model_fn = make_static_thresh_model_fn(model_fn, value=_dyn_thresh)
 
     noise_mode = ctx.config.diffusion.noise_mode
     code_randomness = ctx.config.diffusion.code_randomness
 
-    with torch.inference_mode():
+    # Keep the fast/strict inference path unless this frame has a real target
+    # and a nonzero guidance scale. Only active gradient guidance needs a
+    # no_grad outer context that its wrapper can locally override.
+    sampling_context = (
+        torch.no_grad if guidance_enabled else torch.inference_mode)
+    with sampling_context():
         if skip_timesteps > 0 and x0 is not None:
             # img2img: add noise to init latent and denoise partially
             # Cast x0 to float32 for sampler arithmetic precision
@@ -592,6 +788,8 @@ def run_sd(
             if t_enc != 0:
                 xi = x0_f + noise
                 sigma_sched = sigmas[steps - t_enc - 1:]
+                if model_wrap_cfg._tiled_inner_model is not None:
+                    model_wrap_cfg._tiled_inner_model.set_sigma_schedule(sigma_sched)
                 with _phase(ctx, 'sampler'), \
                         _step_progress(len(sigma_sched) - 1, 'img2img steps') as on_step:
                     samples_ddim = sampler(
@@ -624,6 +822,8 @@ def run_sd(
                 print(f"[diag] x_in std={x.std().item():.4f} cfg={effective_cfg} "
                       f"sampler={ctx.config.diffusion.sampler} "
                       f"x8={[round(v, 5) for v in x.flatten()[:8].tolist()]}")
+            if model_wrap_cfg._tiled_inner_model is not None:
+                model_wrap_cfg._tiled_inner_model.set_sigma_schedule(sigmas)
             with _phase(ctx, 'sampler'), \
                     _step_progress(len(sigmas) - 1, 'txt2img steps') as on_step:
                 samples_ddim = sampler(
@@ -635,7 +835,11 @@ def run_sd(
                       f"mean={samples_ddim.mean().item():.4f} "
                       f"min={samples_ddim.min().item():.4f} max={samples_ddim.max().item():.4f}")
 
+    from vibewarp.core.unet_acceleration import log_unet_cache_summary
+    log_unet_cache_summary(sd_model)
     model_wrap_cfg._tiled_inner_model = None
+    if keep_vae_for_guidance:
+        _offload_to_cpu(sd_model.first_stage_model)
 
     # Offload UNet, bring VAE for decode
     _offload_to_cpu(sd_model.model)
@@ -1484,6 +1688,9 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
                 annotator_opts={
                     'scribble_detector': config.controlnet.scribble_detector,
                     'softedge_detector': config.controlnet.softedge_detector,
+                    'pose_include_body': config.controlnet.pose_include_body,
+                    'pose_include_hand': config.controlnet.pose_include_hand,
+                    'pose_include_face': config.controlnet.pose_include_face,
                     'canny_low_threshold': config.controlnet.canny_low_threshold,
                     'canny_high_threshold': config.controlnet.canny_high_threshold,
                     'mlsd_value_threshold': config.controlnet.mlsd_value_threshold,
@@ -1523,6 +1730,7 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
             state=state,
             image_cond=image_cond,
             rec_noise=rec_noise_tensor,
+            guidance_image_path=state.guidance_image,
         )
 
     # Convert to PIL (move to float32 for PIL conversion).
@@ -1754,6 +1962,7 @@ def _render_single_frame(
     """
     config = ctx.config
     state.frame_num = frame_num
+    state.guidance_image = None
 
     # Set init image from video frames (for img2img after first frame)
     if frame_num > start_frame and ctx.video_frames_folder:
@@ -1787,20 +1996,42 @@ def _render_single_frame(
                 print(f"  Warped frame {frame_num}: {warped.size} (target: {config.video.width}x{config.video.height})")
                 from vibewarp.core.model_loader import is_edit_model
                 guidance_mode = config.diffusion.guidance_mode
+                # The normal img2img feedback remains warp+CC. This selector
+                # controls the independent init_scale/init_latent_scale target.
+                state.init_image = warped_path
                 if is_edit_model(config.model_version):
-                    # Edit backends keep their established warp+CC target.
-                    state.init_image = warped_path
+                    state.guidance_image = None
                 elif guidance_mode == 'prev stylized':
-                    state.init_image = prev_frame_path
+                    state.guidance_image = prev_frame_path
                 elif guidance_mode == 'prev warped':
-                    state.init_image = warped_without_cc_path
+                    state.guidance_image = warped_without_cc_path
                 else:
-                    state.init_image = warped_path
-                print(
-                    f"  SD temporal guidance frame {frame_num}: "
-                    f"{guidance_mode} -> {state.init_image}")
+                    state.guidance_image = warped_path
+                if state.guidance_image is not None:
+                    scales = (
+                        f"pixel={config.diffusion.init_scale:g}, "
+                        f"latent={config.diffusion.init_latent_scale:g}")
+                    status = (
+                        "active" if (config.diffusion.init_scale > 0
+                                     or config.diffusion.init_latent_scale > 0)
+                        else "disabled (both scales are 0)")
+                    print(
+                        f"  SD gradient target frame {frame_num}: "
+                        f"{guidance_mode} -> {state.guidance_image}; "
+                        f"{status}, {scales}")
             else:
                 state.init_image = prev_frame_path
+                from vibewarp.core.model_loader import is_edit_model
+                state.guidance_image = (
+                    None if is_edit_model(config.model_version)
+                    else prev_frame_path)
+                if state.guidance_image is not None and (
+                        config.diffusion.init_scale > 0
+                        or config.diffusion.init_latent_scale > 0):
+                    print(
+                        f"  SD gradient target frame {frame_num}: "
+                        f"{config.diffusion.guidance_mode} requested, "
+                        f"warp unavailable -> {state.guidance_image}; active")
     elif ctx.video_frames_folder:
         video_frame_path = os.path.join(
             ctx.video_frames_folder,
@@ -1808,6 +2039,12 @@ def _render_single_frame(
         )
         if os.path.exists(video_frame_path):
             state.init_image = video_frame_path
+        state.guidance_image = None
+        if (config.diffusion.init_scale > 0
+                or config.diffusion.init_latent_scale > 0):
+            print(
+                f"  SD gradient target frame {frame_num}: unavailable "
+                "(no previous rendered frame); guidance skipped")
 
     # Background-mask the init image right before diffusion (notebook masks
     # init_image/prevFrameScaled here for ALL frames — on warped frames this
@@ -2068,6 +2305,23 @@ def _adiff_prepare_hints(ctx, frames: List[int], init_paths: List[str], H: int, 
             t_ratio=0.0, debug_dir=debug_dir, frame_num=frame_num,
             depth_detector=config.controlnet.depth_detector,
             seg_detector=config.controlnet.seg_detector,
+            annotator_opts={
+                'scribble_detector': config.controlnet.scribble_detector,
+                'softedge_detector': config.controlnet.softedge_detector,
+                'pose_include_body': config.controlnet.pose_include_body,
+                'pose_include_hand': config.controlnet.pose_include_hand,
+                'pose_include_face': config.controlnet.pose_include_face,
+                'canny_low_threshold': config.controlnet.canny_low_threshold,
+                'canny_high_threshold': config.controlnet.canny_high_threshold,
+                'mlsd_value_threshold': config.controlnet.mlsd_value_threshold,
+                'mlsd_distance_threshold': config.controlnet.mlsd_distance_threshold,
+                'qr_cn_mask_grayscale': config.controlnet.qr_cn_mask_grayscale,
+                'qr_cn_mask_invert': config.controlnet.qr_cn_mask_invert,
+                'qr_cn_mask_thresh': config.controlnet.qr_cn_mask_thresh,
+                'qr_cn_mask_clip_low': config.controlnet.qr_cn_mask_clip_low,
+                'qr_cn_mask_clip_high': config.controlnet.qr_cn_mask_clip_high,
+                'downscale_tile': config.controlnet.downscale_tile,
+            },
         )
         for key, hint in (ctx.sd_model._cn_hints or {}).items():
             stacked.setdefault(key, []).append(hint)
@@ -2290,6 +2544,8 @@ def _adiff_run_batch(
 
     model_wrap_cfg = ctx.model_wrap_cfg
     _configure_tiled_sampler(model_wrap_cfg, config, ctx.sd_model, H, W)
+    if model_wrap_cfg._tiled_inner_model is not None:
+        model_wrap_cfg._tiled_inner_model.set_sigma_schedule(sigma_sched)
     model_wrap_cfg._adiff_ctx_schedule = repeat_schedule_for_sampler(schedule, sampler_name)
     model_wrap_cfg._adiff_zero_uncond_hints = False
 

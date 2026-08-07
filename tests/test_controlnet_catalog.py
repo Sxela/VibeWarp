@@ -169,6 +169,14 @@ class TestCatalogEndpoint:
         assert body['mode_presets']['balanced']['layer_weights'] == [1.0] * 13
         assert body['mode_presets']['controlnet']['zero_uncond'] is True
 
+    def test_pose_nets_expose_body_hand_and_face_settings(self):
+        body = client().get("/api/controlnet/catalog").json()
+        expected = [
+            'pose_include_body', 'pose_include_hand', 'pose_include_face']
+        for key in ('control_sd15_openpose', 'control_sdxl_openpose'):
+            pose = next(net for net in body['nets'] if net['key'] == key)
+            assert pose['detectors'] == expected
+
     def test_filters_by_model_version(self):
         body = client().get("/api/controlnet/catalog", params={"model_version": "sdxl"}).json()
         assert {net['model_version'] for net in body['nets']} == {'sdxl'}

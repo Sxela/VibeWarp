@@ -673,6 +673,10 @@ class CFGDenoiser(torch.nn.Module):
         if hasattr(self, '_cfg_schedule') and self._cfg_schedule:
             cfg_scale = self._cfg_schedule.pop()
 
+        sd_model = self._get_sd_model()
+        from vibewarp.core.unet_acceleration import begin_unet_evaluation
+        begin_unet_evaluation(sd_model)
+
         # AnimateDiff denoises a whole batch of frames at once, and the motion
         # module attends across that batch axis — so it needs its own path
         # (notebook: CFGDenoiser_adiff). Crucially it runs cond and uncond as
@@ -682,7 +686,6 @@ class CFGDenoiser(torch.nn.Module):
             return self._forward_animatediff(x, sigma, uncond, cond, cfg_scale, **kwargs)
 
         # Update ControlNet timestep ratio for time gating
-        sd_model = self._get_sd_model()
         if sd_model is not None and hasattr(sd_model, '_cn_t_ratio'):
             # Convert sigma to timestep ratio: higher sigma = earlier in diffusion = lower t_ratio
             sigma_max = self.inner_model.sigmas[-1].item() if hasattr(self.inner_model, 'sigmas') else 1.0

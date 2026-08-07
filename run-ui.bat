@@ -15,10 +15,11 @@ if not exist "%~dp0env\Scripts\activate.bat" (
 
 call "%~dp0env\Scripts\activate"
 
-REM Install the optional local API server on first run.
-python -c "import fastapi, uvicorn" 2>nul
+REM Install/update dependencies when an existing environment predates a
+REM required package. torchsde is needed by the DPM++ SDE samplers.
+python -c "import fastapi, uvicorn, torchsde" 2>nul
 if errorlevel 1 (
-    echo Installing UI dependencies...
+    echo Installing or updating VibeWarp UI dependencies...
     python -m pip install -e "%~dp0.[ui]"
 )
 

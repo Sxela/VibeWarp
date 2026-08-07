@@ -83,7 +83,8 @@ class TestConfigAcceptsEveryEditorShape:
                 return
             seen.add(cls)
             for item in fields(cls):
-                if item.name.endswith('_schedule'):
+                if (item.name.endswith('_schedule')
+                        and item.metadata.get('schedule_domain') != 'sampling_step'):
                     default = item.default
                     assert default is None, f"{cls.__name__}.{item.name} defaults to {default!r}"
                 if is_dataclass(item.type):

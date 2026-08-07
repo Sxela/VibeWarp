@@ -19,6 +19,7 @@ from vibewarp.vendor.controlmodel_ipadapter import (  # noqa: E402
     clear_all_ip_adapter,
     clip_vision_h_uc,
     clip_vision_vith_uc,
+    composition_precise_weights,
 )
 
 CROSS_DIM = 768   # SD1.5 cross-attention dim (read from '1.to_k_ip.weight')
@@ -115,12 +116,13 @@ class TestHookForwardUnhook:
     def teardown_method(self):
         clear_all_ip_adapter()
 
-    def _hook(self, unet, adapter, weight=1.0, start=0.0, end=1.0):
+    def _hook(self, unet, adapter, weight=1.0, start=0.0, end=1.0,
+              weight_type='linear'):
         adapter.hook(
             model=unet,
             clip_vision_output={'image_embeds': torch.randn(1, CLIP_DIM)},
             weight=weight, start=start, end=end,
-            weight_type='linear', embeds_scaling='V only',
+            weight_type=weight_type, embeds_scaling='V only',
         )
 
     def test_hook_replaces_forwards(self):
@@ -134,6 +136,30 @@ class TestHookForwardUnhook:
         hooked = sum(
             1 for m in unet.modules() if getattr(m, 'ipadapter_hacks', None))
         assert hooked == 16
+
+    def test_composition_precise_sd15_layer_map(self):
+        adapter = PlugableIPAdapter(make_sd15_adapter_state())
+        unet = make_fake_unet()
+        self._hook(
+            unet, adapter, weight=2.0,
+            weight_type='composition precise')
+
+        assert adapter.weight == {
+            0: 2.0, 1: 2.0, 2: 2.0, 3: 2.0,
+            4: 0.5, 5: 2.0,
+            6: 0.2, 7: 0.2, 8: 0.2,
+            9: 2.0, 10: 2.0, 11: 2.0, 12: 2.0,
+            13: 2.0, 14: 2.0, 15: 2.0,
+        }
+
+    def test_composition_precise_sdxl_layer_map(self):
+        assert composition_precise_weights(2.0, is_sdxl=True) == {
+            0: 0.2, 1: 0.2, 2: 0.2,
+            3: 2.0,
+            4: 0.2, 5: 0.2,
+            6: 2.0,
+            7: 0.2, 8: 0.2, 9: 0.2, 10: 0.2,
+        }
 
     def test_forward_adds_ip_contribution_and_unhook_restores(self):
         torch.manual_seed(1)

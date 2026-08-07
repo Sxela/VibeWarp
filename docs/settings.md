@@ -63,6 +63,12 @@ On frame 0, `'stylized'` falls back to the raw video frame since no previous ren
 
 The `preprocess` field maps to annotator type: `'PIDI'` → `softedge`, `'dw_pose'` → `dwpose`, `'depth_anything'` → `depth`, `'global'` → auto-detect from model key.
 
+OpenPose ControlNet cards expose **Detect body**, **Detect hands**, and
+**Detect face**. Body detection is enabled by default; hands and face are off
+because they add preprocessing work and are only useful when those details need
+explicit pose guidance. The same switches apply when the annotator is overridden
+to `dwpose`.
+
 **Schedule formats supported:**
 
 - `[value]` — constant for all frames
@@ -163,6 +169,13 @@ Identical image/encoder pairs may share the cached CLIP computation without
 changing either behavior. `average` is the lightest multi-image choice;
 `concat` retains the most separate image information but creates a longer
 attention context.
+
+The weight-type selector includes the current ComfyUI IPAdapter Plus
+`composition precise` preset for both SD1.5 and SDXL. It keeps the
+composition-bearing attention blocks at full weight and applies a 10% signal
+to the other selected blocks, reducing style leakage while retaining the
+reference layout. This is a layer-weight preset; it is independent of the
+adapter checkpoint and the multi-image combine method.
 
 FaceID variants and the IP-Adapter + AnimateDiff batch combination are not yet
 parity-complete. Regular and Plus adapters on the non-AnimateDiff path are
@@ -319,8 +332,18 @@ Background types:
 
 ## SD/SDXL temporal guidance
 
-`diffusion.guidance_mode` selects the img2img target used after the first
-rendered frame:
+`diffusion.guidance_mode` selects the loss target for the two optional
+WarpFusion gradient-guidance controls:
+
+- `diffusion.init_latent_scale` compares the predicted clean latent with the
+  selected target using spherical distance. `0` disables it; the notebook
+  suggests starting around `100` when enabled.
+- `diffusion.init_scale` decodes the predicted latent at half resolution and
+  compares it with the selected target using VGG LPIPS. `0` disables it; the
+  notebook suggests starting around `1000` when enabled. This is substantially
+  slower and uses more VRAM than latent guidance.
+
+The target choices are:
 
 - `prev stylized` uses the previous output without motion compensation.
 - `prev warped` uses the previous output after optical-flow warping, before
@@ -328,9 +351,64 @@ rendered frame:
 - `prev warped + cc` (default) uses the warped output composited with the
   current raw frame through the consistency mask.
 
-The first frame in the selected range has no previous output, so it keeps the
-existing raw-frame initialization. This setting applies only to SD 1.5 and
-SDXL; edit-model backends continue to use their reference-image pipeline.
+The normal SD/SDXL img2img initialization remains the warped+consistency
+composite; the selector does not replace that input. The first frame in the
+selected range has no previous output, so gradient guidance is skipped for that
+frame. Edit-model backends continue to use their reference-image pipeline.
+
+When either scale is active, every sampler step prints the selected source,
+latent and LPIPS losses, raw gradient mean/std/RMS/max, applied RMS, and whether
+the gradient was clamped. `diffusion.clamp_grad` defaults on and
+`diffusion.clamp_max` defaults to an RMS of `2`, matching WarpFusion.
+
+## Local U-Net acceleration
+
+The local SD1.5/SDXL renderer exposes U-Net acceleration under **System →
+Performance**. These settings do not affect ComfyUI edit-model workflows.
+
+`unet_cache` has three modes:
+
+- `off` performs every U-Net block on every denoiser evaluation.
+- `deepcache` recomputes the shallow encoder and decoder blocks but reuses the
+  expensive inner U-Net branch between refresh evaluations.
+  `unet_cache_interval=2` is the conservative default: one full evaluation,
+  then one cached evaluation.
+- `first_block` always evaluates the first encoder block and reuses the
+  previous full U-Net residual only when its relative activation change is at
+  or below `unet_cache_threshold`. Start with `0.05`; lower values trade speed
+  for fidelity, and `0` accepts only an exact activation match.
+
+Cache state is reset at the start of every rendered frame. CFG batches and
+spatial tiles receive independent cache streams. After sampling, the console
+prints cached-hit and full-pass counts for the frame so a selected cache cannot
+silently do nothing.
+
+`compile_unet=True` compiles the unified SD/SDXL U-Net, every active
+ControlNet, and the VAE encode/decode paths with
+`torch.compile(mode="reduce-overhead")`. The option keeps its historical name
+for settings compatibility. The first invocation is a compile warm-up rather
+than a representative render time. A multiscale schedule, tiled sampler, tiled
+VAE, or gradient-guidance decode can present multiple tensor shapes, each of
+which may require a separate graph.
+
+Inductor, FX-graph, and Triton artifacts persist under
+`<root_dir>/.vibewarp_cache/torchinductor`, rather than the operating system's
+temporary directory. Later processes can reuse a matching graph and compiled
+kernel. PyTorch validates the environment before reuse, so a changed PyTorch or
+Triton version, GPU, compiler configuration, or tensor shape correctly creates
+a new entry. An explicitly configured `TORCHINDUCTOR_CACHE_DIR` environment
+variable takes precedence.
+
+U-Net caching is intentionally rejected when pixel or latent gradient guidance
+is enabled because reused detached activations would break the guidance
+gradient. Compilation and caching also cannot currently be enabled together.
+
+| Field | Default | Description |
+|---|---:|---|
+| `unet_cache` | `off` | `off`, `deepcache`, or `first_block` |
+| `unet_cache_interval` | `2` | Full inner U-Net refresh interval for DeepCache; must be at least 2 |
+| `unet_cache_threshold` | `0.05` | Maximum relative first-block change accepted by First Block Cache |
+| `compile_unet` | `False` | Compile local U-Net, active ControlNets, and VAE paths; persist matching compiler artifacts |
 
 ## Tiled sampler
 
@@ -339,12 +417,33 @@ splits the latent spatially on every denoiser evaluation, runs each overlapping
 tile independently, then combines the predictions with normalized trapezoidal
 blend windows before the sampler takes its next step.
 
+`sampler_scale_schedule` adds a coarse-to-fine whole-frame stage without
+changing the sampler's full-resolution latent. Its keys are sampling steps
+relative to the active img2img/txt2img range and its values are percentages of
+the final resolution. At values below `100`, VibeWarp temporarily downsamples
+the latent and spatial conditioning, evaluates the entire frame once, and
+upsamples the prediction back for the sampler. **Tiling is disabled below
+100%.** When `tiled_sampler=True`, tiling starts only when the schedule reaches
+`100`, so early high-noise steps establish global composition before local
+tiles add detail. When `tiled_sampler=False`, the multiscale schedule still
+applies; `100` uses a normal untiled whole-frame evaluation.
+
+For a 1024px SD1.5 render, `{0: 50, 15: 100}` is a useful starting point.
+`{0: 100}` preserves the original full-resolution tiled behaviour.
+`sampler_scale_min_size=512` provides the same native-resolution floor without
+requiring the user to calculate a percentage: the effective scale is the larger
+of the scheduled percentage and `512 / final_longest_side`. Aspect ratio is
+preserved approximately while latent dimensions are aligned for the UNet. Set
+it to `0` to disable the floor.
+
 ```python
 from vibewarp.config import DiffusionConfig, RunConfig
 
 config = RunConfig(
     diffusion=DiffusionConfig(
         tiled_sampler=True,
+        sampler_scale_schedule={0: 50, 15: 100},
+        sampler_scale_min_size=512,
         sampler_tile_size=512,
         sampler_tile_overlap=35,
         sampler_tile_split_threshold=20,
@@ -364,7 +463,9 @@ encoding/decoding.
 
 | Field | Default | Description |
 |---|---:|---|
-| `tiled_sampler` | `False` | Enable per-evaluation spatial tiling |
+| `tiled_sampler` | `False` | Enable per-evaluation spatial tiling at 100% schedule steps. Multiscale below 100% works with this off. |
+| `sampler_scale_schedule` | `{0: 100}` | Sampling step → percent of final resolution. Values below 100 use one whole-frame pass; only 100 enables tiles. |
+| `sampler_scale_min_size` | `0` | Minimum longest side for multiscale evaluations, in pixels. `0` disables the floor; `512` is useful for SD1.5. |
 | `sampler_tile_size` | `512` | Target tile edge in output-image pixels; grid is automatic |
 | `sampler_tile_overlap` | `35.0` | Overlap between neighbouring tiles, as a percentage of the tile edge. This is the cross-fade that hides the seams. `0` = hard cuts (fastest, seams likely). |
 | `sampler_tile_split_threshold` | `20.0` | Leftover a tile may absorb before another is added, as a percentage of the tile edge: `n = ceil(total/tile - threshold)`. Tiles are sized *from* the count, so without slack a 1080px side against a 1024px target splits into two ~640px tiles. `0` = the plain `ceil()` behaviour. Independent of the overlap. |

@@ -54,6 +54,7 @@ class Job:
     condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
 
     def snapshot(self, *, include_config: bool = False) -> dict:
+        run_id = os.path.basename(self.run_dir) if self.run_dir else None
         data = {
             "id": self.id, "state": self.state, "stage": self.stage,
             "message": self.message, "frame": self.frame,
@@ -65,6 +66,9 @@ class Job:
             "preview_available": bool(self.preview_path),
             "logs": list(self.logs), "revision": self.revision,
             "operation": self.operation,
+            # Lets History attach live progress to the run card without
+            # exposing an absolute server-side output path.
+            "run_id": run_id,
         }
         if include_config:
             data["config"] = asdict(self.config)

@@ -42,7 +42,16 @@
   let activeModelFamily=$derived(modelFamily(config?.model_version, schema));
   let comfyTarget=$derived(comfyConnection(config, schema));
   let comfyStatus=$state(null);
-  let entries=$derived(allEntries.filter(e=>fieldSupportsModel(e.schema,activeModelFamily)));
+  function fieldEnabledForConfig(entry){
+    if(entry.section!=='diffusion') return true;
+    if(entry.name==='unet_cache_interval')
+      return config?.diffusion?.unet_cache==='deepcache';
+    if(entry.name==='unet_cache_threshold')
+      return config?.diffusion?.unet_cache==='first_block';
+    return true;
+  }
+  let entries=$derived(allEntries.filter(
+    e=>fieldSupportsModel(e.schema,activeModelFamily)&&fieldEnabledForConfig(e)));
   // Groups for the selected tab, preserving field order within each.
   let groups=$derived.by(()=>{
     let out=[];
@@ -152,6 +161,16 @@
   function fieldHint(item){
     let modelHint=modelFieldHint(config,item.section,item.name);
     if(modelHint) return modelHint;
+    if(item.section==='diffusion'&&item.name==='sampler_scale_min_size')
+      return 'Minimum longest-side resolution for multiscale passes, in pixels. 0 disables the floor; try 512 for SD1.5.';
+    if(item.section==='diffusion'&&item.name==='unet_cache')
+      return 'DeepCache refreshes the inner U-Net every N evaluations. First Block Cache reuses a result only when the first encoder activation changes less than its threshold. State resets for every frame.';
+    if(item.section==='diffusion'&&item.name==='unet_cache_interval')
+      return '2 is the conservative default: alternate a full inner U-Net pass with one cached pass. Larger values are faster but drift more.';
+    if(item.section==='diffusion'&&item.name==='unet_cache_threshold')
+      return 'Relative first-block change allowed for reuse. 0 only accepts an exact match; start near 0.05 for conservative caching.';
+    if(item.section==='diffusion'&&item.name==='compile_unet')
+      return 'Compiles the U-Net, active ControlNets, and VAE encode/decode. Artifacts persist under .vibewarp_cache/torchinductor. Each new multiscale, tile, or VAE shape may compile separately. Cannot currently be combined with a U-Net cache.';
     if(item.section!=='diffusion'||item.name!=='sampler_tile_size') return '';
     let vanillaSdxl=(config?.model_version||'').toLowerCase().includes('sdxl')&&!config?.animatediff?.enabled;
     return vanillaSdxl

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   filterRunsByMinimumFrames,
+  frameAfterRunLoad,
+  latestRenderedFrame,
   normalizeMinimumFrames,
 } from './historyFilters.js';
 
@@ -23,5 +25,54 @@ describe('History rendered-frame filtering', () => {
     expect(filterRunsByMinimumFrames(runs, 4).map(run => run.id))
       .toEqual(['complete']);
     expect(filterRunsByMinimumFrames(runs, 0)).toEqual(runs);
+  });
+
+  it('selects the latest rendered output instead of an unrendered input frame', () => {
+    let detail = {
+      frames: [60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70],
+      layers: [
+        {id: 'init', frames: [60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70]},
+        {id: 'output', frames: [60, 61, 62]},
+      ],
+    };
+    expect(latestRenderedFrame(detail)).toBe(62);
+  });
+
+  it('uses the first input while an in-progress run has no output yet', () => {
+    expect(latestRenderedFrame({
+      frames: [60, 61, 62],
+      layers: [{id: 'init', frames: [60, 61, 62]}],
+    })).toBe(60);
+  });
+
+  it('preserves the selected frame when switching runs even if it is out of range', () => {
+    expect(frameAfterRunLoad({
+      selectedFrame: 70,
+      previousRun: 'run-a',
+      nextRun: 'run-b',
+      previousLatest: 70,
+      nextLatest: 12,
+    })).toBe(70);
+  });
+
+  it('continues following the latest frame only within the same active run', () => {
+    expect(frameAfterRunLoad({
+      selectedFrame: 12,
+      previousRun: 'run-a',
+      nextRun: 'run-a',
+      previousLatest: 12,
+      nextLatest: 13,
+    })).toBe(13);
+  });
+
+  it('selects the latest output for the initial history load', () => {
+    expect(frameAfterRunLoad({
+      selectedFrame: 0,
+      previousRun: undefined,
+      nextRun: 'run-a',
+      previousLatest: null,
+      nextLatest: 62,
+      selectLatest: true,
+    })).toBe(62);
   });
 });

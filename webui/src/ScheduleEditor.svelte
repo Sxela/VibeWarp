@@ -10,7 +10,7 @@
   // falls back to raw JSON rather than being mangled.
   // kind: 'number' (default) | 'text' — text is for prompt schedules, whose values are
   // strings ({frame: [prompt]}) rather than numbers.
-  let { name, value, onchange, kind = 'number' } = $props();
+  let { name, value, onchange, kind = 'number', axis = 'frame' } = $props();
 
   let raw = $state('');
   let rawInvalid = $state(false);
@@ -139,6 +139,7 @@
   }
 
   let title = $derived(name.replaceAll('_', ' ').replace(/\b\w/g, c => c.toUpperCase()));
+  const stepHelp = 'Each key is a sampling step and each value is a percentage of the final resolution. The minimum-size setting can raise that percentage so the longest side never falls below its pixel floor. Below 100%, the UNet evaluates one downscaled whole frame with no tiles. If Tiled Sampler is enabled, tiling runs only on steps whose scheduled value is 100%; otherwise those steps use a normal whole-frame evaluation. Multiscale remains active when Tiled Sampler is off. Values hold until the next keyed step.';
 
   // A sparkline of the schedule. `0:7, 20:9, 40:5` tells you nothing at a glance; the shape
   // does. Only for numeric multi-point schedules — a constant is a flat line (pointless) and
@@ -168,14 +169,21 @@
   // meaningless for them, and a lone keyframe at frame 0 already IS the constant, so
   // they get Keyframes + JSON only. That also keeps us from ever coercing the list
   // into a bare scalar.
-  let modes = $derived(kind === 'text'
+  let modes = $derived(axis === 'step'
+    ? [['keyframes','Steps'],['json','JSON']]
+    : kind === 'text'
     ? [['keyframes','Keyframes'],['json','JSON']]
     : [['constant','Constant'],['list','Per-frame'],['keyframes','Keyframes'],['json','JSON']]);
 </script>
 
 <div class="sched">
   <div class="head">
-    <span>{title}</span>
+    <span>{title}
+      {#if axis === 'step'}
+        <button type="button" class="info" title={stepHelp}
+                aria-label="How multiscale tiled sampling works">?</button>
+      {/if}
+    </span>
     {#if spark}
       <svg class="spark" viewBox={`0 0 ${spark.W} ${spark.H}`} preserveAspectRatio="none"
            role="img" aria-label={`Schedule from ${spark.lo} to ${spark.hi}`}>
@@ -201,7 +209,8 @@
         <span class="chip" class:text={kind === 'text'}>
           {#if mode === 'keyframes'}
             <input class="frame" type="number" min="0" step="1" value={chip.key}
-                   onchange={(e)=>setFrame(index, e.target.value)} aria-label="Frame"/>
+                   onchange={(e)=>setFrame(index, e.target.value)}
+                   aria-label={axis === 'step' ? 'Step' : 'Frame'}/>
             <i>:</i>
           {:else if mode === 'list'}
             <b>{index}</b><i>:</i>
@@ -220,11 +229,13 @@
         </span>
       {/each}
       {#if mode !== 'constant'}
-        <button class="add" onclick={add}>+ {mode === 'keyframes' ? 'keyframe' : 'frame'}</button>
+        <button class="add" onclick={add}>+
+          {axis === 'step' ? 'step' : mode === 'keyframes' ? 'keyframe' : 'frame'}</button>
       {/if}
     </div>
     <p class="hint">
-      {#if mode === 'constant'}Same {kind === 'text' ? 'prompt' : 'value'} on every frame.
+      {#if axis === 'step'}Sampling step → percent of final resolution. Multiscale works independently; when tiling is enabled it runs only at 100%.
+      {:else if mode === 'constant'}Same {kind === 'text' ? 'prompt' : 'value'} on every frame.
       {:else if mode === 'list'}One value per frame, indexed from 0. Frames past the last entry reuse it.
       {:else if kind === 'text'}Frame → prompt. Supports <code>a:0.7 | b:0.3</code> blending and <code>&lt;lora:name:weight&gt;</code>.
       {:else}Frame → value. Values between keyframes are interpolated when schedule blending is on.
@@ -237,6 +248,8 @@
   .sched{grid-column:1/-1;display:flex;flex-direction:column;gap:9px}
   .head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
   .head>span{color:#aeb4bd;font-size:12px}
+  .info{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;margin-left:5px;padding:0;background:transparent;border:1px solid #59616d;border-radius:50%;color:#9da6b2;font:600 10px/1 system-ui,sans-serif;cursor:help}
+  .info:hover,.info:focus{border-color:#8ea834;color:#d8ff55;outline:none}
   .head{position:relative}
   .spark{width:96px;height:22px;margin-left:auto;overflow:visible}
   .spark path{fill:none;stroke:#8ea834;stroke-width:1.4;vector-effect:non-scaling-stroke;stroke-linejoin:round}

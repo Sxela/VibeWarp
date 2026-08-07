@@ -2,6 +2,8 @@
   import { diffSettings, formatSettingValue } from './settingsDiff.js';
   import {
     filterRunsByMinimumFrames,
+    frameAfterRunLoad,
+    latestRenderedFrame,
     normalizeMinimumFrames,
   } from './historyFilters.js';
   // Frame-by-frame comparison of a run's layers: init frame, warped init, each
@@ -30,6 +32,7 @@
   let draftLabel = $state('');
   let savingLabel = $state(false);
   let action = $state('');
+  let cancelling = $state(false);
   let showVideo = $state(false);
   let compareIds = $state([]);
   let diffRows = $state([]);
@@ -55,6 +58,8 @@
     finally { loadingSettings = false; }
   }
   let current = $derived(runs.find(r => r.id === runId));
+  let activeJob = $derived(
+    job && ['queued', 'running'].includes(job.state) ? job : null);
 
   function pick(id, event){
     if (event?.ctrlKey || event?.metaKey) {
@@ -118,6 +123,23 @@
     } catch {
       error = `Could not ${kind === 'resume' ? 'resume the run' : 'build the video'}`;
     } finally { action = ''; }
+  }
+  async function cancelActiveJob(){
+    if (!activeJob || cancelling || activeJob.cancel_requested) return;
+    cancelling = true; error = '';
+    try {
+      let r = await fetch(`/api/jobs/${activeJob.id}/cancel`, {method: 'POST'});
+      let d = await r.json();
+      if (!r.ok) {
+        error = typeof d.detail === 'string' ? d.detail : 'Could not cancel the render';
+        return;
+      }
+      onjob?.(d);
+    } catch {
+      error = 'Could not cancel the render';
+    } finally {
+      cancelling = false;
+    }
   }
   function beginRename(){
     draftLabel = current?.label || '';
@@ -204,22 +226,35 @@
         error = `No runs rendered at least ${minimumFrames} frame${minimumFrames===1?'':'s'}`;
         return;
       }
-      if (!keep || !available.some(run => run.id === runId)) runId = available[0].id;
-      await loadRun();
+      let switched = !keep || !available.some(run => run.id === runId);
+      if (switched) runId = available[0].id;
+      await loadRun(!detail);
     } catch { error = 'Could not list runs'; }
     finally { loading = false; }
   }
 
-  async function loadRun(){
+  async function loadRun(selectLatestOutput = false){
     if (!runId) return;
     error = '';
     try {
+      let previousRun = detail?.run;
+      let previousLatest = latestRenderedFrame(detail);
       let r = await fetch(`/api/preview/runs/${runId}?${params}`);
       if (!r.ok) { error = 'Could not read that run'; detail = null; return; }
       detail = await r.json();
       if (!detail.frames.length) { error = 'That run has no frames yet'; return; }
-      // Keep the current frame if it still exists, else clamp into range.
-      if (!detail.frames.includes(frame)) frame = detail.frames.at(-1);
+      let latest = latestRenderedFrame(detail);
+      // The frame number is global across history runs. Only the initial load
+      // selects the latest output; an in-progress run keeps following its own
+      // latest frame until the user scrubs away from it.
+      frame = frameAfterRunLoad({
+        selectedFrame: frame,
+        previousRun,
+        nextRun: runId,
+        previousLatest,
+        nextLatest: latest,
+        selectLatest: selectLatestOutput,
+      });
     } catch { error = 'Could not read that run'; }
   }
 
@@ -308,6 +343,9 @@
           </div>
           <div class="meta">
             <b>{run.label || `#${run.id}`}</b>
+            {#if activeJob?.run_id === run.id}
+              <strong class="run-live">{activeJob.message} · {Math.round(activeJob.progress || 0)}%</strong>
+            {/if}
             <span>{run.label ? `#${run.id} · ` : ''}{run.frames} frame{run.frames === 1 ? '' : 's'} · {when(run.modified)}</span>
             {#if run.prompt}<em>{run.prompt}</em>{/if}
           </div>
@@ -363,6 +401,24 @@
                 onclick={()=>showVideo=!showVideo}>{showVideo ? 'View frames' : 'Play video'}</button>
       {/if}
     </div>
+    {#if activeJob}
+      <div class="live-job" role="status" aria-live="polite">
+        <div class="live-copy">
+          <span>{activeJob.operation === 'video' ? 'Video assembly'
+            : activeJob.operation === 'resume' ? 'Resuming render' : 'Rendering'}
+            {activeJob.run_id ? ` run #${activeJob.run_id}` : ''}</span>
+          <b>{activeJob.message || activeJob.stage}</b>
+        </div>
+        <div class="live-meter" aria-label={`Render progress ${Math.round(activeJob.progress || 0)}%`}>
+          <i style={`width:${Math.max(0, Math.min(100, activeJob.progress || 0))}%`}></i>
+        </div>
+        <strong>{Math.round(activeJob.progress || 0)}%</strong>
+        <button class="cancel-job" onclick={cancelActiveJob}
+                disabled={cancelling || activeJob.cancel_requested}>
+          {activeJob.cancel_requested ? 'Cancelling…' : cancelling ? 'Requesting…' : 'Cancel render'}
+        </button>
+      </div>
+    {/if}
     {#if loaded}<div class="loaded">{loaded}</div>{/if}
 
     <div class="stage">
@@ -373,6 +429,8 @@
                src={`/api/preview/runs/${runId}/video?${params}&v=${current.modified}`}>
           <track kind="captions"/>
         </video>
+      {:else if frames.length && !frames.includes(frame)}
+        <div class="empty">Frame {frame} was not rendered in this run.</div>
       {:else if !shown.length}
         <div class="empty">Pick a layer below to compare.</div>
       {:else}
@@ -488,6 +546,8 @@
   .meta{display:flex;flex-direction:column;justify-content:center;gap:3px;
         padding:9px 10px 9px 0;min-width:0}
   .meta b{color:#e7eaee;font:600 13px Consolas,monospace}
+  .meta .run-live{color:#d8ff55;font:600 10px Consolas,monospace;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .meta span{color:#8b929c;font-size:11px}
   .meta em{color:#68717d;font-size:10px;font-style:normal;line-height:1.4;
            display:-webkit-box;-webkit-line-clamp:3;line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
@@ -511,6 +571,21 @@
   .history-action:hover:not(:disabled){border-color:#8ea834;color:#d8ff55;background:#20290f}
   .history-action:disabled{opacity:.4;cursor:default}
   .history-action.play,.history-action.play.on{border-color:#4d5d2a;color:#d8ff55}
+  .live-job{flex:0 0 auto;display:grid;grid-template-columns:minmax(180px,auto) minmax(120px,1fr) 42px auto;
+            align-items:center;gap:12px;padding:9px 20px;background:#12170d;
+            border-bottom:1px solid #35431c}
+  .live-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .live-copy span{color:#8ea834;font:600 9px Consolas,monospace;text-transform:uppercase;
+                  letter-spacing:.08em}
+  .live-copy b{color:#dfe7c8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .live-meter{height:6px;overflow:hidden;border-radius:999px;background:#252c1b}
+  .live-meter i{display:block;height:100%;border-radius:inherit;background:#d8ff55;
+                transition:width .2s ease}
+  .live-job>strong{color:#d8ff55;font:600 11px Consolas,monospace;text-align:right}
+  .cancel-job{border:1px solid #733d3d;background:#281616;color:#ffb4b4;border-radius:8px;
+              padding:7px 10px;font-size:11px;cursor:pointer;white-space:nowrap}
+  .cancel-job:hover:not(:disabled){border-color:#d66;color:#ffd4d4}
+  .cancel-job:disabled{opacity:.5;cursor:default}
   .rename{display:flex;align-items:center;gap:5px;min-width:260px}
   .rename input{min-width:120px;padding:7px 9px;font-size:12px}
   .rename button{border:1px solid #3a414b;background:#191c21;color:#cbd0d6;border-radius:7px;

@@ -28,6 +28,7 @@ _CANNY = ('canny_low_threshold', 'canny_high_threshold')
 _SEG = ('seg_detector',)
 _SCRIBBLE = ('scribble_detector',)
 _SOFTEDGE = ('softedge_detector',)
+_POSE = ('pose_include_body', 'pose_include_hand', 'pose_include_face')
 _MLSD = ('mlsd_value_threshold', 'mlsd_distance_threshold')
 _TILE = ('downscale_tile',)
 _QR = ('qr_cn_mask_grayscale', 'qr_cn_mask_invert', 'qr_cn_mask_thresh',
@@ -67,7 +68,8 @@ CONTROLNET_CATALOG: Dict[str, ControlNetSpec] = {
         _spec('control_sd15_scribble', 'Scribble', 'sd15', 'scribble',
               'control_v11p_sd15_scribble.pth', f'{_LLYAS}/control_v11p_sd15_scribble.pth', _SCRIBBLE),
         _spec('control_sd15_openpose', 'OpenPose', 'sd15', 'openpose',
-              'control_v11p_sd15_openpose.pth', f'{_LLYAS}/control_v11p_sd15_openpose.pth'),
+              'control_v11p_sd15_openpose.pth', f'{_LLYAS}/control_v11p_sd15_openpose.pth',
+              _POSE),
         _spec('control_sd15_lineart', 'Line Art', 'sd15', 'lineart',
               'control_v11p_sd15_lineart.pth', f'{_LLYAS}/control_v11p_sd15_lineart.pth'),
         # NOTE: the real file is "sd15s2", not "sd15" — settings.py had this wrong,
@@ -126,7 +128,8 @@ CONTROLNET_CATALOG: Dict[str, ControlNetSpec] = {
               _SOFTEDGE),
         _spec('control_sdxl_openpose', 'OpenPose', 'sdxl', 'openpose',
               'thibaud-OpenPoseXL2.safetensors',
-              f'{_HF}/thibaud/controlnet-openpose-sdxl-1.0/resolve/main/OpenPoseXL2.safetensors'),
+              f'{_HF}/thibaud/controlnet-openpose-sdxl-1.0/resolve/main/OpenPoseXL2.safetensors',
+              _POSE),
         _spec('control_sdxl_inpaint', 'Inpaint', 'sdxl', 'inpaint',
               'control_v01e_sdxl_inpaint_diffusers_15k.safetensors',
               f'{_HF}/sxela/out/resolve/main/checkpoint-15000/controlnet/diffusion_pytorch_model.safetensors',

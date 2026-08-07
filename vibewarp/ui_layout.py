@@ -87,7 +87,21 @@ FIELD_MODEL_FAMILIES = {
 # which reads fine INSIDE its own section but is meaningless once a field is hoisted next
 # to strangers: `animatediff.enabled` on the Model card would just say "Enabled".
 LABELS: Dict[str, str] = {
-    'diffusion.guidance_mode': 'Temporal guidance source',
+    'diffusion.guidance_mode': 'Gradient guidance source',
+    'diffusion.init_scale': 'Pixel guidance scale (0 off; try 1000)',
+    'diffusion.init_latent_scale': 'Latent guidance scale (0 off; try 100)',
+    'diffusion.clamp_grad': 'Clamp guidance gradient',
+    'diffusion.clamp_max': 'Maximum gradient RMS',
+    'diffusion.guidance_add_noise': 'Noise latent guidance target',
+    'diffusion.sampler_scale_min_size':
+        'Minimum multiscale size (longest side, px)',
+    'diffusion.unet_cache': 'U-Net cache',
+    'diffusion.unet_cache_interval': 'DeepCache interval',
+    'diffusion.unet_cache_threshold': 'First Block similarity threshold',
+    'diffusion.compile_unet': 'Compile U-Net, ControlNets, and VAE',
+    'controlnet.pose_include_body': 'Detect body',
+    'controlnet.pose_include_hand': 'Detect hands',
+    'controlnet.pose_include_face': 'Detect face',
     'animatediff.enabled': 'AnimateDiff (motion module)',
     'main.keyframes_relative_to_frame_range':
         'Keyframes relative to frame range',
@@ -142,7 +156,8 @@ _assign('render', 'Prompts',
 _assign('render', 'Diffusion',
         'diffusion.steps_schedule', 'diffusion.cfg_scale_schedule',
         'diffusion.style_strength_schedule', 'diffusion.sampler',
-        'diffusion.clip_skip', 'diffusion.guidance_mode')
+        'diffusion.clip_skip', 'diffusion.guidance_mode',
+        'diffusion.init_scale', 'diffusion.init_latent_scale')
 _assign('render', 'Seed', 'diffusion.seed')
 _assign('render', 'ControlNet',
         'controlnet.enabled', 'controlnet.models', 'controlnet.mode',
@@ -176,6 +191,8 @@ _assign('render', 'Mage-Flow Edit',
 _assign('render', 'ControlNet',
         'controlnet.depth_detector', 'controlnet.seg_detector',
         'controlnet.scribble_detector', 'controlnet.softedge_detector',
+        'controlnet.pose_include_body', 'controlnet.pose_include_hand',
+        'controlnet.pose_include_face',
         'controlnet.canny_low_threshold', 'controlnet.canny_high_threshold',
         'controlnet.mlsd_value_threshold', 'controlnet.mlsd_distance_threshold',
         'controlnet.qr_cn_mask_grayscale', 'controlnet.qr_cn_mask_invert',
@@ -207,9 +224,13 @@ _assign('system', 'Paths',
 # see what a setting actually belongs to.
 _assign('system', 'Performance',
         'diffusion.sd_batch_size', 'main.lora_merge_precision',
+        'diffusion.unet_cache', 'diffusion.unet_cache_interval',
+        'diffusion.unet_cache_threshold', 'diffusion.compile_unet',
         'ipadapter.cache_embeddings', 'ipadapter.cache_size')
-_assign('system', 'Tiled Sampler',
-        'diffusion.tiled_sampler', 'diffusion.sampler_tile_size',
+_assign('system', 'Multiscale / Tiled Sampler',
+        'diffusion.tiled_sampler', 'diffusion.sampler_scale_schedule',
+        'diffusion.sampler_scale_min_size',
+        'diffusion.sampler_tile_size',
         'diffusion.sampler_tile_overlap', 'diffusion.sampler_tile_split_threshold')
 _assign('system', 'Tiled VAE',
         'vae.use_tiled_vae', 'vae.num_tiles', 'vae.tile_size',
@@ -268,11 +289,11 @@ _assign('advanced', 'Warp',
         'warp.padding_ratio', 'warp.padding_mode')
 _assign('advanced', 'Diffusion (advanced)',
         'diffusion.fixed_seed', 'diffusion.use_karras_noise',
-        'diffusion.clip_final_layer_norm', 'diffusion.init_scale',
-        'diffusion.init_latent_scale', 'diffusion.dynamic_thresh',
+        'diffusion.clip_final_layer_norm', 'diffusion.dynamic_thresh',
         'diffusion.code_randomness', 'diffusion.do_softcap',
         'diffusion.softcap_thresh', 'diffusion.softcap_q', 'diffusion.noise_mode',
-        'diffusion.guidance_use_start_code')
+        'diffusion.clamp_grad', 'diffusion.clamp_max',
+        'diffusion.guidance_add_noise', 'diffusion.guidance_use_start_code')
 _assign('advanced', 'HiDream-O1',
         'hidream.sampler', 'hidream.scheduler', 'hidream.noise_scale',
         'hidream.patch_seam_smoothing', 'hidream.patch_seam_start',

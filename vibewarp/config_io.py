@@ -59,6 +59,7 @@ FIELD_CHOICES = {
     "WarpConfig.warp_towards_init": ["off", "init"],
     "WarpConfig.padding_mode": ["reflect", "edge", "symmetric", "wrap", "constant"],
     "DiffusionConfig.sampler": ["sample_euler_ancestral", "sample_euler", "sample_dpm_2", "sample_dpm_2_ancestral", "sample_heun", "sample_lms", "sample_dpmpp_2m", "sample_dpmpp_2s_ancestral", "sample_dpmpp_sde", "sample_lcm"],
+    "DiffusionConfig.unet_cache": ["off", "deepcache", "first_block"],
     "DiffusionConfig.sampler_tile_size": [256, 512, 768, 1024],
     "DiffusionConfig.noise_mode": ["default", "fixed", "reconstructed"],
     "DiffusionConfig.guidance_mode": [
@@ -88,7 +89,7 @@ FIELD_CHOICES = {
     "CaptionConfig.offset_mode": ["Fixed", "Between Keyframes", "None"],
     "BackgroundMaskConfig.background": ["color", "image", "init_video"],
     "ReconstructionNoiseConfig.source": ["init", "stylized"],
-    "IPAdapterEntry.weight_type": ["linear", "ease in", "ease out", "ease in-out", "reverse in-out", "weak input", "weak middle", "weak output", "strong middle", "style transfer", "composition", "strong style transfer", "style and composition", "strong style and composition", "style transfer precise"],
+    "IPAdapterEntry.weight_type": ["linear", "ease in", "ease out", "ease in-out", "reverse in-out", "weak input", "weak middle", "weak output", "strong middle", "style transfer", "composition", "strong style transfer", "style and composition", "strong style and composition", "style transfer precise", "composition precise"],
     "IPAdapterEntry.combine_embeds": [
         "concat", "add", "subtract", "average", "norm average"],
     "IPAdapterEntry.embeds_scaling": ["V only", "K+V", "K+V w/ C penalty", "K+mean(V) w/ C penalty"],
@@ -457,6 +458,28 @@ def validate_config(
             error("diffusion.style_strength", "Style strength must be between 0 and 1")
         if config.diffusion.guidance_mode not in FIELD_CHOICES["DiffusionConfig.guidance_mode"]:
             error("diffusion.guidance_mode", "Unknown SD/SDXL guidance mode")
+        if config.diffusion.init_scale < 0:
+            error("diffusion.init_scale", "Pixel guidance scale cannot be negative")
+        if config.diffusion.init_latent_scale < 0:
+            error("diffusion.init_latent_scale", "Latent guidance scale cannot be negative")
+        if config.diffusion.clamp_max <= 0:
+            error("diffusion.clamp_max", "Maximum gradient RMS must be positive")
+        if config.diffusion.unet_cache not in FIELD_CHOICES["DiffusionConfig.unet_cache"]:
+            error("diffusion.unet_cache", "Unknown U-Net cache mode")
+        if config.diffusion.unet_cache_interval < 2:
+            error("diffusion.unet_cache_interval",
+                  "DeepCache interval must be at least 2")
+        if config.diffusion.unet_cache_threshold < 0:
+            error("diffusion.unet_cache_threshold",
+                  "First Block Cache threshold cannot be negative")
+        if config.diffusion.compile_unet and config.diffusion.unet_cache != 'off':
+            error("diffusion.compile_unet",
+                  "Compiled U-Net and U-Net caching cannot currently be combined")
+        if (config.diffusion.unet_cache != 'off'
+                and (config.diffusion.init_scale > 0
+                     or config.diffusion.init_latent_scale > 0)):
+            error("diffusion.unet_cache",
+                  "U-Net caching cannot be combined with gradient guidance")
         if (config.diffusion.sampler_tile_size < 8
                 or config.diffusion.sampler_tile_size % 8):
             error("diffusion.sampler_tile_size",
@@ -464,6 +487,26 @@ def validate_config(
         if not 0 <= config.diffusion.sampler_tile_overlap <= 50:
             error("diffusion.sampler_tile_overlap",
                   "Sampler tile overlap must be between 0 and 50 percent")
+        scale_schedule = config.diffusion.sampler_scale_schedule
+        if not scale_schedule:
+            error("diffusion.sampler_scale_schedule",
+                  "Scale schedule must contain a step 0 value")
+        else:
+            if 0 not in scale_schedule:
+                error("diffusion.sampler_scale_schedule",
+                      "Scale schedule must start at sampling step 0")
+            for step, scale in scale_schedule.items():
+                if step < 0:
+                    error("diffusion.sampler_scale_schedule",
+                          "Scale schedule steps cannot be negative")
+                    break
+                if not 0 < scale <= 100:
+                    error("diffusion.sampler_scale_schedule",
+                          "Scale schedule values must be above 0 and at most 100 percent")
+                    break
+        if config.diffusion.sampler_scale_min_size < 0:
+            error("diffusion.sampler_scale_min_size",
+                  "Minimum multiscale size cannot be negative")
     if config.video.extract_nth_frame < 1:
         error("video.extract_nth_frame", "Frame extraction interval must be at least 1")
     if config.video.max_size < 0:

@@ -52,6 +52,7 @@ def test_schema_marks_booleans_and_limited_values_for_ui_controls():
     entry = schema["ipadapter"]["properties"]["models"]["additional"]
     assert entry["properties"]["combine_embeds"]["choices"] == [
         "concat", "add", "subtract", "average", "norm average"]
+    assert "composition precise" in entry["properties"]["weight_type"]["choices"]
 
 
 def test_validation_reports_inputs_and_resolution():
@@ -94,6 +95,41 @@ def test_validation_reports_invalid_tiled_sampler_geometry():
     paths = {error["path"] for error in validate_config(config, require_inputs=False)}
     assert "diffusion.sampler_tile_size" in paths
     assert "diffusion.sampler_tile_overlap" in paths
+
+
+def test_validation_reports_invalid_sampler_scale_schedule():
+    config = RunConfig()
+    config.diffusion.sampler_scale_schedule = {1: 50, 10: 101}
+
+    paths = {issue["path"] for issue in validate_config(
+        config, require_inputs=False)}
+
+    assert "diffusion.sampler_scale_schedule" in paths
+
+
+def test_validation_rejects_negative_multiscale_minimum_size():
+    config = RunConfig()
+    config.diffusion.sampler_scale_min_size = -1
+
+    paths = {issue["path"] for issue in validate_config(
+        config, require_inputs=False)}
+
+    assert "diffusion.sampler_scale_min_size" in paths
+
+
+def test_validation_rejects_invalid_unet_acceleration_combinations():
+    config = RunConfig()
+    config.diffusion.unet_cache = 'deepcache'
+    config.diffusion.unet_cache_interval = 1
+    config.diffusion.compile_unet = True
+    config.diffusion.init_latent_scale = 1
+
+    paths = {issue["path"] for issue in validate_config(
+        config, require_inputs=False)}
+
+    assert "diffusion.unet_cache_interval" in paths
+    assert "diffusion.compile_unet" in paths
+    assert "diffusion.unet_cache" in paths
 
 
 def test_validation_rejects_reference_label_opacity_outside_fraction():

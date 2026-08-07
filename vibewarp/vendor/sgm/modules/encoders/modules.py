@@ -508,7 +508,10 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
     def encode_with_transformer(self, text):
         x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
         x = x + self.model.positional_embedding
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        first_block = self.model.transformer.resblocks[0]
+        batch_first = bool(getattr(first_block.attn, "batch_first", False))
+        if not batch_first:
+            x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
         if self.legacy:
             x = x[self.layer]
@@ -532,9 +535,15 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
 
     def text_transformer_forward(self, x: torch.Tensor, attn_mask=None):
         outputs = {}
+        first_block = self.model.transformer.resblocks[0]
+        batch_first = bool(getattr(first_block.attn, "batch_first", False))
+
+        def as_nld(value):
+            return value if batch_first else value.permute(1, 0, 2)
+
         for i, r in enumerate(self.model.transformer.resblocks):
             if i == len(self.model.transformer.resblocks) - 1:
-                outputs["penultimate"] = x.permute(1, 0, 2)  # LND -> NLD
+                outputs["penultimate"] = as_nld(x)
             if (
                 self.model.transformer.grad_checkpointing
                 and not torch.jit.is_scripting()
@@ -542,7 +551,7 @@ class FrozenOpenCLIPEmbedder2(AbstractEmbModel):
                 x = checkpoint(r, x, attn_mask)
             else:
                 x = r(x, attn_mask=attn_mask)
-        outputs["last"] = x.permute(1, 0, 2)  # LND -> NLD
+        outputs["last"] = as_nld(x)
         return outputs
 
     def encode(self, text):
@@ -598,9 +607,13 @@ class FrozenOpenCLIPEmbedder(AbstractEmbModel):
     def encode_with_transformer(self, text):
         x = self.model.token_embedding(text)  # [batch_size, n_ctx, d_model]
         x = x + self.model.positional_embedding
-        x = x.permute(1, 0, 2)  # NLD -> LND
+        first_block = self.model.transformer.resblocks[0]
+        batch_first = bool(getattr(first_block.attn, "batch_first", False))
+        if not batch_first:
+            x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.text_transformer_forward(x, attn_mask=self.model.attn_mask)
-        x = x.permute(1, 0, 2)  # LND -> NLD
+        if not batch_first:
+            x = x.permute(1, 0, 2)  # LND -> NLD
         x = self.model.ln_final(x)
         return x
 

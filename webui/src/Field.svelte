@@ -45,7 +45,9 @@
 {#if isSchedule || isPrompts || name === 'frame_range'}
   <div class="wrap" class:errored={!!error} id={anchor}>
     {#if name === 'frame_range'}<FrameRange {value} {onchange}/>
-    {:else}<ScheduleEditor {name} {value} {onchange} kind={isPrompts ? 'text' : 'number'}/>{/if}
+    {:else}<ScheduleEditor {name} {value} {onchange}
+      kind={isPrompts ? 'text' : 'number'}
+      axis={name === 'sampler_scale_schedule' ? 'step' : 'frame'}/>{/if}
     {#if error}<small class="err">{error}</small>{/if}
   </div>
 {:else if schema.type === 'dataclass'}

@@ -475,6 +475,26 @@ def concat_projected_embeddings(cond, uncond):
     )
 
 
+def composition_precise_weights(weight, is_sdxl):
+    """Current ComfyUI IPAdapter Plus ``composition precise`` layer map."""
+    if is_sdxl:
+        return {
+            0: weight * 0.1, 1: weight * 0.1, 2: weight * 0.1,
+            3: weight,
+            4: weight * 0.1, 5: weight * 0.1,
+            6: weight,
+            7: weight * 0.1, 8: weight * 0.1,
+            9: weight * 0.1, 10: weight * 0.1,
+        }
+    return {
+        0: weight, 1: weight, 2: weight, 3: weight,
+        4: weight * 0.25, 5: weight,
+        6: weight * 0.1, 7: weight * 0.1, 8: weight * 0.1,
+        9: weight, 10: weight, 11: weight, 12: weight,
+        13: weight, 14: weight, 15: weight,
+    }
+
+
 class PlugableIPAdapter(torch.nn.Module):
     def __init__(self, state_dict, is_v2: bool = False):
         """
@@ -636,6 +656,12 @@ class PlugableIPAdapter(torch.nn.Module):
                 weight = { 3:weight, 6:weight }
             else:
                 weight = { 0:weight, 1:weight, 2:weight, 3:weight, 4:weight*0.25, 5:weight, 9:weight, 10:weight, 11:weight, 12:weight, 13:weight, 14:weight, 15:weight }
+        elif weight_type == "composition precise":
+            # Current ComfyUI_IPAdapter_plus preset: keep the
+            # composition-bearing blocks at full strength while retaining a
+            # 10% signal in the other selected blocks to reduce style leakage
+            # without making composition guidance brittle.
+            weight = composition_precise_weights(weight, is_sdxl)
 
         print('Using weight type: ', weight_type, ' ', weight)
         self.weight = weight

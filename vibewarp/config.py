@@ -113,9 +113,31 @@ class DiffusionConfig:
     # look is often preferred; leave it on for parity work.
     clip_final_layer_norm: bool = True
     sd_batch_size: int = 1
+    # Optional local SD/SDXL U-Net acceleration. DeepCache reuses the expensive
+    # inner U-Net branch on intermediate denoiser evaluations; First Block Cache
+    # reuses a previous output when the first encoder block changes less than the
+    # configured relative threshold. Cache state is reset for every rendered frame.
+    unet_cache: str = 'off'
+    unet_cache_interval: int = 2
+    unet_cache_threshold: float = 0.05
+    # Compile the unified U-Net, active ControlNets, and VAE encode/decode paths.
+    # Compilation is deliberately opt-in: every new multiscale/tile/VAE shape may
+    # need another graph. Inductor artifacts persist under .vibewarp_cache.
+    compile_unet: bool = False
     # MultiDiffusion-style spatial tiling: every denoiser evaluation runs on
     # overlapping latent tiles and blends a full-size prediction for the sampler.
     tiled_sampler: bool = False
+    # Sampling-step -> percent of final latent resolution. Below 100%, the UNet
+    # evaluates the whole downscaled frame and tiling is deliberately disabled;
+    # at 100%, the normal tiled path takes over. The sampler latent itself always
+    # remains full resolution.
+    sampler_scale_schedule: Dict[int, float] = field(
+        default_factory=lambda: {0: 100.0},
+        metadata={'schedule_domain': 'sampling_step'})
+    # Pixel-space lower bound for the longest side of a temporary multiscale
+    # evaluation. 0 disables the floor. For SD1.5, 512 keeps coarse passes at
+    # least at the model's nominal training resolution.
+    sampler_scale_min_size: int = 0
     # Pixel-space target tile edge. Tile rows/columns are derived from the
     # actual latent dimensions; overlap is shared by both spatial axes.
     sampler_tile_size: int = 512
@@ -134,11 +156,15 @@ class DiffusionConfig:
     # 0 = never stretch: split as soon as the dimension exceeds the tile.
     sampler_tile_split_threshold: float = 20.0
     style_strength: float = 0.65
-    # Temporal img2img target used by the SD/SDXL renderer after the first
-    # frame. The first rendered frame still initializes from the raw video.
+    # Target used by pixel/latent gradient guidance after the first frame.
+    # This is independent of the normal img2img init, which remains the
+    # warp+consistency composite.
     guidance_mode: str = 'prev warped + cc'
     init_scale: float = 0.0
     init_latent_scale: float = 0.0
+    clamp_grad: bool = True
+    clamp_max: float = 2.0
+    guidance_add_noise: bool = True
     dynamic_thresh: float = 30.0  # static thresholding clamp value (notebook: dynamic_thresh)
     code_randomness: float = 0.0  # blend ratio for fixed_code noise path (notebook: code_randomness)
     # Softcap: soft-compress decoded-image values beyond ±softcap_thresh
@@ -148,10 +174,8 @@ class DiffusionConfig:
     softcap_q: float = 1.0
     # noise_mode: 'default' (randn each frame), 'fixed' (persistent start_code), 'reconstructed' (DDIM inversion)
     noise_mode: str = 'default'
-    # Notebook diffuse() draws guidance_start_code = randn_like(init_latent)
-    # whenever this flag is on (its default), even though latent guidance is
-    # deprecated — the draw advances the CUDA RNG stream and therefore changes
-    # every same-seed render. Kept for RNG parity with the notebook.
+    # Reuse one noise tensor when guidance_add_noise perturbs the latent target
+    # to the current sampler sigma. The draw also preserves notebook RNG order.
     guidance_use_start_code: bool = True
     # Schedules: dict {frame: value} or list [value_per_frame] or scalar (constant)
     steps_schedule: Any = None
@@ -236,6 +260,9 @@ class ControlNetConfig:
     seg_detector: str = 'Seg_UFADE20K'  # 'Seg_OFADE20K' / 'Seg_OFCOCO' / 'Seg_UFADE20K' / 'Seg_SAM' (control_sd15_seg_detector)
     scribble_detector: str = 'PIDI'  # 'PIDI' / 'HED' (control_sd15_scribble_detector)
     softedge_detector: str = 'PIDI'  # 'PIDI' / 'HED' (control_sd15_softedge_detector)
+    pose_include_body: bool = True   # draw body keypoints for OpenPose / DWPose
+    pose_include_hand: bool = False  # detect and draw hand keypoints
+    pose_include_face: bool = False  # detect and draw facial keypoints
     canny_low_threshold: int = 100   # notebook low_threshold
     canny_high_threshold: int = 200  # notebook high_threshold
     mlsd_value_threshold: float = 0.1     # notebook value_threshold

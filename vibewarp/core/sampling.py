@@ -246,6 +246,33 @@ def _crop_spatial_tensor(
                  left * scale_w:right * scale_w].contiguous()
 
 
+def _resize_spatial_tensor(
+    value: Any,
+    full_size: Tuple[int, int],
+    target_size: Tuple[int, int],
+) -> Any:
+    """Resize a tensor whose trailing axes track the sampler latent spatially."""
+    if not torch.is_tensor(value) or value.ndim < 3:
+        return value
+    height, width = full_size
+    value_h, value_w = value.shape[-2:]
+    if value_h % height or value_w % width:
+        return value
+    scale_h, scale_w = value_h // height, value_w // width
+    if scale_h < 1 or scale_w < 1:
+        return value
+    flat = value.float().reshape(-1, 1, value_h, value_w)
+    resized = F.interpolate(
+        flat,
+        size=(target_size[0] * scale_h, target_size[1] * scale_w),
+        mode='bilinear',
+        align_corners=False,
+    )
+    return resized.reshape(
+        *value.shape[:-2], resized.shape[-2], resized.shape[-1],
+    ).to(dtype=value.dtype)
+
+
 class TiledModelFn:
     """Evaluate a denoiser in spatial tiles and blend its full prediction.
 
@@ -264,6 +291,9 @@ class TiledModelFn:
         overlap_w: float = 25,
         split_threshold: float = 0.0,
         sd_model: Any = None,
+        scale_schedule: Optional[Dict[int, float]] = None,
+        enable_tiling: bool = True,
+        min_scale_size: int = 0,
     ):
         self.model_fn = model_fn
         self.tiles_h = max(1, int(tiles_h))
@@ -274,13 +304,105 @@ class TiledModelFn:
         # How far a dimension may exceed tile_size before another tile is worth it.
         self.split_threshold = float(split_threshold)
         self.sd_model = sd_model
+        self.scale_schedule = dict(sorted((scale_schedule or {0: 100.0}).items()))
+        self.enable_tiling = bool(enable_tiling)
+        self.min_scale_size = max(0, int(min_scale_size))
+        self._sigma_schedule: Sequence[float] = ()
         self._specs: Dict[Tuple[int, int], Sequence[Tuple[int, int, int, int, torch.Tensor]]] = {}
+
+    def set_sigma_schedule(self, sigmas: torch.Tensor) -> None:
+        """Bind schedule step numbers to the sigma range used by this sample."""
+        self._sigma_schedule = tuple(float(s) for s in sigmas.detach().cpu().flatten())
+
+    def _step_for_sigma(self, sigma: torch.Tensor) -> int:
+        if not self._sigma_schedule:
+            return 0
+        current = float(sigma.detach().float().flatten()[0].cpu())
+        # Schedules descend. An intermediate second-order evaluation belongs to
+        # the interval that contains it; an exact next-step sigma belongs to that
+        # next step.
+        for index in range(len(self._sigma_schedule) - 1):
+            next_sigma = self._sigma_schedule[index + 1]
+            tolerance = max(abs(next_sigma), 1.0) * 1e-6
+            if current > next_sigma + tolerance:
+                return index
+        return max(0, len(self._sigma_schedule) - 2)
+
+    def _scale_for_sigma(self, sigma: torch.Tensor) -> float:
+        step = self._step_for_sigma(sigma)
+        scale = next(iter(self.scale_schedule.values()))
+        for key, value in self.scale_schedule.items():
+            if key > step:
+                break
+            scale = value
+        return float(scale)
+
+    def _scaled_size(self, height: int, width: int, scale: float) -> Tuple[int, int]:
+        ratio = scale / 100.0
+        if self.min_scale_size:
+            final_longest_px = max(height, width) * 8
+            ratio = max(ratio, self.min_scale_size / final_longest_px)
+        ratio = min(ratio, 1.0)
+
+        def aligned(value: int) -> int:
+            # SD UNets downsample the latent internally three times. Keeping the
+            # temporary axes on an 8-latent-unit boundary avoids skip-connection
+            # shape mismatches at fractional scales.
+            return min(value, max(8, int(round(value * ratio / 8.0)) * 8))
+
+        return aligned(height), aligned(width)
+
+    def _call_scaled(
+        self,
+        x: torch.Tensor,
+        sigma: torch.Tensor,
+        scale: float,
+        kwargs: Dict[str, Any],
+    ) -> torch.Tensor:
+        """Whole-frame coarse pass. Spatial tiling is never used below 100%."""
+        full_size = x.shape[-2:]
+        target_size = self._scaled_size(*full_size, scale)
+        scaled_x = F.interpolate(
+            x.float(), size=target_size, mode='bilinear', align_corners=False,
+        ).to(dtype=x.dtype)
+        spatial_kwargs = {'image_cond', 'c_concat', 'denoise_mask', 'mask'}
+        scaled_kwargs = {
+            key: (_resize_spatial_tensor(value, full_size, target_size)
+                  if key in spatial_kwargs else value)
+            for key, value in kwargs.items()
+        }
+        original_hints = (
+            dict(getattr(self.sd_model, '_cn_hints', {}) or {})
+            if self.sd_model is not None else {})
+        try:
+            if self.sd_model is not None and original_hints:
+                self.sd_model._cn_hints = {
+                    key: _resize_spatial_tensor(hint, full_size, target_size)
+                    for key, hint in original_hints.items()
+                }
+            prediction = self.model_fn(scaled_x, sigma, **scaled_kwargs)
+        finally:
+            if self.sd_model is not None and original_hints:
+                self.sd_model._cn_hints = original_hints
+        if prediction.shape != scaled_x.shape:
+            raise RuntimeError(
+                f"Multiscale denoiser returned {tuple(prediction.shape)} for "
+                f"scaled latent {tuple(scaled_x.shape)}")
+        return F.interpolate(
+            prediction.float(), size=full_size, mode='bilinear', align_corners=False,
+        ).to(dtype=x.dtype)
 
     def __call__(self, x: torch.Tensor, sigma: torch.Tensor, **kwargs) -> torch.Tensor:
         if x.ndim != 4:
             return self.model_fn(x, sigma, **kwargs)
 
         height, width = x.shape[-2:]
+        scale = self._scale_for_sigma(sigma)
+        if scale < 100.0:
+            return self._call_scaled(x, sigma, scale, kwargs)
+        if not self.enable_tiling:
+            return self.model_fn(x, sigma, **kwargs)
+
         tiles_h, tiles_w = self.tiles_h, self.tiles_w
         if self.tile_size is not None:
             # split_threshold decides whether the leftover is worth another tile.

@@ -42,6 +42,8 @@ dependencies = [
     # Streams ComfyUI queue, active-node, and sampler-step events into the UI.
     "websocket-client==1.9.0",
     "controlnet-aux==0.0.10",
+    # Pixel-space temporal guidance uses the notebook's VGG LPIPS loss.
+    "lpips==0.1.4",
 ]
 
 [project.scripts]
@@ -56,7 +58,7 @@ Issues = "https://github.com/Sxela/VibeWarp/issues"
 [project.optional-dependencies]
 # Optional local web server and content-aware scheduling dependencies.
 ui = ["fastapi>=0.115,<1", "uvicorn>=0.34,<1"]
-sched = ["lpips"]  # content-aware scheduling with lpips/rmse+lpips diff
+sched = []  # retained for compatibility; LPIPS is now used by core guidance
 # Optional Diffusers backend for FLUX.2 Klein Edit. The default Comfy server
 # backend uses the core requests dependency and needs no extra Python packages.
 flux = ["diffusers>=0.39", "sentencepiece"]

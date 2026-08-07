@@ -88,6 +88,23 @@ describe('keyframes', () => {
   });
 });
 
+describe('sampling-step schedules', () => {
+  it('uses step labels and explains that tiling starts only at 100%', () => {
+    editor({
+      name: 'sampler_scale_schedule',
+      value: { 0: 50, 15: 100 },
+      axis: 'step',
+    });
+
+    expect(screen.getByRole('button', { name: 'Steps' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Per-frame' })).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText('Step')).toHaveLength(2);
+    expect(screen.getByText(/Multiscale works independently/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('How multiscale tiled sampling works'))
+      .toHaveAttribute('title', expect.stringMatching(/Below 100%.*no tiles.*only.*100%.*remains active.*off/i));
+  });
+});
+
 describe('prompt schedules (kind="text")', () => {
   it('emits a STRING, not a list', async () => {
     // REGRESSION: the editor split on newlines and emitted a list, but text_prompts is

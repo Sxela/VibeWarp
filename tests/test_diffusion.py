@@ -19,6 +19,7 @@ from vibewarp.core.diffusion import (
     get_premature_sigma_min,
     get_sampler_fn,
     load_img_for_sd,
+    make_temporal_guidance_model_fn,
     run_frames,
     run_sd,
 )
@@ -295,6 +296,36 @@ def _make_run_sd_ctx(style_strength=0.65, steps=20, rec_noise_cfg=None):
     return ctx
 
 
+class TestTemporalGuidance:
+    def test_latent_gradient_is_applied_clamped_and_logged(self, capsys):
+        denoised = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
+        target = torch.tensor([[[[0.0, 1.0], [0.0, 1.0]]]])
+        guided_model = make_temporal_guidance_model_fn(
+            lambda x, sigma, **kwargs: x,
+            sd_model=None,
+            target_image=None,
+            target_latent=target,
+            init_scale=0.0,
+            init_latent_scale=1.0,
+            clamp_grad=True,
+            clamp_max=0.01,
+            add_noise=False,
+            guidance_start_code=None,
+            source_label='prev stylized',
+        )
+
+        result = guided_model(denoised, torch.tensor([1.0]))
+
+        delta_rms = (result - denoised).square().mean().sqrt()
+        assert delta_rms.item() == pytest.approx(0.01)
+        output = capsys.readouterr().out
+        assert 'Temporal guidance [prev stylized] step 1' in output
+        assert 'latent_loss=' in output
+        assert 'grad_raw(' in output
+        assert 'grad_applied_rms=0.01' in output
+        assert 'clamped=yes' in output
+
+
 class TestRunSdImg2Img:
     """Verify run_sd img2img path (style_strength < 1) noise and sigma logic."""
 
@@ -304,6 +335,44 @@ class TestRunSdImg2Img:
             calls.append({'x': x.detach().clone(), 'sigma_sched': sigma_sched.detach().clone()})
             return torch.zeros_like(x)
         return sampler
+
+    def test_sampler_context_is_conditional_on_active_guidance(self, tmp_path):
+        img_path = str(tmp_path / 'init.png')
+        Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(img_path)
+
+        ordinary = _make_run_sd_ctx(steps=4)
+        ordinary_modes = []
+
+        def ordinary_sampler(model_fn, x, sigmas, **kwargs):
+            ordinary_modes.append((
+                torch.is_inference_mode_enabled(), torch.is_grad_enabled()))
+            return torch.zeros_like(x)
+
+        ordinary.sampler_fn = ordinary_sampler
+        run_sd(
+            ordinary, init_image_path=img_path, skip_timesteps=2,
+            H=64, W=64, text_prompt='test', neg_prompt='', steps=4,
+            seed=0, cfg_scale=7.5, state=FrameState(),
+        )
+        assert ordinary_modes == [(True, False)]
+
+        guided = _make_run_sd_ctx(steps=4)
+        guided.config.diffusion.init_latent_scale = 1.0
+        guided_modes = []
+
+        def guided_sampler(model_fn, x, sigmas, **kwargs):
+            guided_modes.append((
+                torch.is_inference_mode_enabled(), torch.is_grad_enabled()))
+            return torch.zeros_like(x)
+
+        guided.sampler_fn = guided_sampler
+        run_sd(
+            guided, init_image_path=img_path, skip_timesteps=2,
+            H=64, W=64, text_prompt='test', neg_prompt='', steps=4,
+            seed=0, cfg_scale=7.5, state=FrameState(),
+            guidance_image_path=img_path,
+        )
+        assert guided_modes == [(False, False)]
 
     def test_img2img_sigma_sched_sliced_correctly(self, tmp_path):
         """sigma_sched should start at sigmas[skip_steps - 1] for style_strength < 1."""

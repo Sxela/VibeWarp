@@ -77,6 +77,7 @@ def annotate_image(
             prepare_cn_hints_for_frame from ControlNetConfig):
             canny_low/high thresholds, mlsd value/distance thresholds,
             scribble_detector / softedge_detector ('PIDI'/'HED'),
+            pose_include_body / pose_include_hand / pose_include_face,
             qr_cn_mask_* + downscale_tile (+ 'is_tile_model' per CN key),
             'target_hw' for post-passes that run at render resolution.
 
@@ -124,9 +125,17 @@ def annotate_image(
             thr_v=opts.get('mlsd_value_threshold', 0.1),
             thr_d=opts.get('mlsd_distance_threshold', 0.1))
     elif annotator_type == 'openpose':
-        return _run_detector('openpose', _load_openpose, source_image, resolution)
+        return _run_detector(
+            'openpose', _load_openpose, source_image, resolution,
+            include_body=opts.get('pose_include_body', True),
+            include_hand=opts.get('pose_include_hand', False),
+            include_face=opts.get('pose_include_face', False))
     elif annotator_type == 'dwpose':
-        return _run_detector('dwpose', _load_dwpose, source_image, resolution)
+        return _run_dwpose(
+            source_image, resolution,
+            include_body=opts.get('pose_include_body', True),
+            include_hand=opts.get('pose_include_hand', False),
+            include_face=opts.get('pose_include_face', False))
     elif annotator_type == 'shuffle':
         return _run_detector('shuffle', _load_shuffle, source_image, resolution)
     elif annotator_type == 'normalbae':
@@ -167,6 +176,10 @@ def _to_cuda(detector) -> None:
             m.cuda()
     if isinstance(detector, nn.Module):
         detector.cuda()
+    elif torch.cuda.is_available() and callable(getattr(detector, 'to', None)):
+        # DWPose owns its modules behind a Wholebody wrapper rather than one of
+        # the conventional attributes above.
+        detector.to('cuda')
 
 
 def _run_detector(
@@ -195,6 +208,75 @@ def _run_detector(
                       image_resolution=resolution, **det_kwargs)
     log_time(f"annotator {cache_key} inference", time.time() - t1)
     return np.array(result)
+
+
+def _run_dwpose(
+    image: np.ndarray,
+    resolution: int,
+    *,
+    include_body: bool = True,
+    include_hand: bool = False,
+    include_face: bool = False,
+) -> np.ndarray:
+    """Run DWPose and selectively draw body, hand, and face landmarks.
+
+    controlnet_aux 0.0.10 accepts arbitrary kwargs in ``DWposeDetector`` but
+    ignores them and always draws every landmark group. Rendering the detected
+    groups here gives DWPose the same meaningful switches as OpenPose.
+    """
+    cache_key = 'dwpose'
+    if cache_key not in _annotator_cache:
+        import time
+        from vibewarp.core.timing import log_time
+        t0 = time.time()
+        detector = _load_dwpose()
+        _to_cuda(detector)
+        _annotator_cache[cache_key] = detector
+        log_time(f"annotator {cache_key}", time.time() - t0)
+
+    import time
+    from controlnet_aux.dwpose import util as dwpose_util
+    from controlnet_aux.util import HWC3, resize_image
+    from vibewarp.core.timing import log_time
+
+    detector = _annotator_cache[cache_key]
+    detector_input = cv2.cvtColor(
+        np.asarray(Image.fromarray(image), dtype=np.uint8), cv2.COLOR_RGB2BGR)
+    detector_input = resize_image(HWC3(detector_input), resolution)
+    height, width = detector_input.shape[:2]
+
+    t1 = time.time()
+    with torch.no_grad():
+        candidate, subset = detector.pose_estimation(detector_input)
+    log_time(f"annotator {cache_key} inference", time.time() - t1)
+
+    candidate = candidate.copy()
+    subset = subset.copy()
+    candidate[..., 0] /= float(width)
+    candidate[..., 1] /= float(height)
+    candidate[subset < 0.3] = -1
+
+    canvas = np.zeros((height, width, 3), dtype=np.uint8)
+    if include_body:
+        people, _, values = candidate.shape
+        body = candidate[:, :18].copy().reshape(people * 18, values)
+        body_subset = subset[:, :18].copy()
+        for person in range(len(body_subset)):
+            for point in range(len(body_subset[person])):
+                body_subset[person, point] = (
+                    18 * person + point
+                    if body_subset[person, point] > 0.3 else -1)
+        canvas = dwpose_util.draw_bodypose(canvas, body, body_subset)
+    if include_hand:
+        hands = np.vstack((candidate[:, 92:113], candidate[:, 113:]))
+        canvas = dwpose_util.draw_handpose(canvas, hands)
+    if include_face:
+        canvas = dwpose_util.draw_facepose(canvas, candidate[:, 24:92])
+
+    target = resize_image(detector_input, resolution)
+    return cv2.resize(
+        HWC3(canvas), (target.shape[1], target.shape[0]),
+        interpolation=cv2.INTER_LINEAR)
 
 
 def _load_midas():
@@ -646,7 +728,28 @@ def patch_model_for_controlnets(sd_model, loaded_controlnets: Dict[str, dict],
 
     def controlled_unet_forward(x, timesteps=None, context=None, control=None,
                                 only_mid_control=False, **kwargs):
+        from vibewarp.core.unet_acceleration import next_cache_slot
+
         hs = []
+        cache_mode = getattr(diffusion_model, '_vw_cache_mode', 'off')
+        cache_slot = None
+        refresh_cache = True
+        if cache_mode != 'off':
+            cache_slot, refresh_cache = next_cache_slot(diffusion_model)
+
+        input_blocks = diffusion_model.input_blocks
+        output_blocks = diffusion_model.output_blocks
+        shallow_blocks = max(1, min(
+            len(input_blocks), len(output_blocks), len(input_blocks) // 4))
+        deep_output_count = len(output_blocks) - shallow_blocks
+        cache_signature = (
+            tuple(x.shape),
+            tuple(context.shape) if torch.is_tensor(context) else None,
+            len(input_blocks),
+            len(output_blocks),
+        )
+        reused_deep = False
+
         with torch.inference_mode():
             t_emb = timestep_embedding(timesteps, diffusion_model.model_channels, repeat_only=False)
             emb = diffusion_model.time_embed(t_emb)
@@ -655,13 +758,88 @@ def patch_model_for_controlnets(sd_model, loaded_controlnets: Dict[str, dict],
                 assert y is not None, "SDXL/class-conditional UNet requires vector conditioning"
                 emb = emb + diffusion_model.label_emb(y)
             h = x.type(diffusion_model.dtype)
-            for module in diffusion_model.input_blocks:
+
+            # First Block Cache follows the common FBCache rule: always evaluate
+            # the first encoder block, compare its relative change, and reuse the
+            # last full U-Net residual when it is sufficiently similar.
+            first_block = input_blocks[0]
+            h = first_block(h, emb, context)
+            hs.append(h)
+            if cache_mode == 'first_block':
+                previous = cache_slot.get('first')
+                residual = cache_slot.get('output_residual')
+                compatible = (
+                    cache_slot.get('signature') == cache_signature
+                    and torch.is_tensor(previous)
+                    and previous.shape == h.shape
+                    and torch.is_tensor(residual)
+                    and residual.shape == x.shape
+                )
+                metric = None
+                if compatible:
+                    denominator = previous.float().abs().mean().clamp_min(1e-6)
+                    metric = (
+                        (h.float() - previous.float()).abs().mean() / denominator)
+                cache_slot['first'] = h.detach()
+                threshold = float(
+                    getattr(diffusion_model, '_vw_cache_threshold', 0.05))
+                if metric is not None and float(metric) <= threshold:
+                    diffusion_model._vw_cache_runtime['hits'] += 1
+                    cache_slot['last_metric'] = float(metric)
+                    return (x + residual.to(device=x.device, dtype=x.dtype))
+
+            # DeepCache refreshes only every Nth logical denoiser evaluation.
+            # A reuse pass recomputes the shallow encoder blocks, injects the
+            # cached inner decoder feature, and executes the matching shallow
+            # decoder blocks with fresh skip connections.
+            can_reuse_deep = (
+                cache_mode == 'deepcache'
+                and not refresh_cache
+                and cache_slot.get('signature') == cache_signature
+                and torch.is_tensor(cache_slot.get('deep_feature'))
+            )
+            encoder_stop = shallow_blocks if can_reuse_deep else len(input_blocks)
+            for module in input_blocks[1:encoder_stop]:
                 h = module(h, emb, context)
                 hs.append(h)
-            h = diffusion_model.middle_block(h, emb, context)
+            if can_reuse_deep:
+                cached = cache_slot['deep_feature']
+                expected_spatial = hs[-1].shape[-2:]
+                if cached.shape[0] == x.shape[0] and cached.shape[-2:] == expected_spatial:
+                    h = cached.to(device=x.device, dtype=diffusion_model.dtype)
+                    reused_deep = True
+                else:
+                    # A new tile/multiscale shape gets a full pass and replaces
+                    # this stream's cache instead of risking a malformed skip.
+                    for module in input_blocks[encoder_stop:]:
+                        h = module(h, emb, context)
+                        hs.append(h)
+                    h = diffusion_model.middle_block(h, emb, context)
+            else:
+                h = diffusion_model.middle_block(h, emb, context)
 
-        if control is not None:
-            h += control.pop()
+        # Active latent/pixel guidance deliberately leaves inference mode for
+        # the sampler. Materialize the middle activation as a normal tensor
+        # before ControlNet or FreeU can update it in place. Ordinary renders
+        # remain inside the outer inference context and pay no clone cost.
+        if not torch.is_inference_mode_enabled():
+            h = h.clone()
+
+        if reused_deep and control is not None:
+            # The cached inner decoder feature already contains the previous
+            # evaluation's middle/deep ControlNet residuals. Consume the current
+            # counterparts so the remaining pops line up with shallow blocks.
+            for _ in range(1 + deep_output_count):
+                if control:
+                    control.pop()
+        elif control is not None:
+            # `h` was created in the inference_mode block above. Gradient
+            # guidance intentionally runs the outer sampler under no_grad so
+            # it can locally enable autograd for the predicted latent; an
+            # in-place write to that inference tensor is illegal once the
+            # nested inference context exits. Out-of-place addition preserves
+            # the value and produces a normal tensor for the remaining UNet.
+            h = h + control.pop()
 
         # FreeU lives in the notebook's control_multi forward. VibeWarp uses
         # this forward universally, including with an empty CN model dict.
@@ -670,7 +848,8 @@ def patch_model_for_controlnets(sd_model, loaded_controlnets: Dict[str, dict],
         if freeu_cfg is not None:
             from vibewarp.core.freeu import apply_freeu
 
-        for i, module in enumerate(diffusion_model.output_blocks):
+        output_start = deep_output_count if reused_deep else 0
+        for i, module in enumerate(output_blocks[output_start:], start=output_start):
             _hs = hs.pop()
             if freeu_cfg is not None and not freeu_cfg['after_control']:
                 h, _hs = apply_freeu(h, _hs, freeu_cfg['b1'], freeu_cfg['b2'],
@@ -685,9 +864,21 @@ def patch_model_for_controlnets(sd_model, loaded_controlnets: Dict[str, dict],
                 h = torch.nn.functional.interpolate(h, _hs.shape[-2:], mode='nearest')
             h = torch.cat([h, _hs], dim=1)
             h = module(h, emb, context)
+            if (cache_mode == 'deepcache' and not reused_deep
+                    and i + 1 == deep_output_count):
+                cache_slot['deep_feature'] = h.detach()
 
         h = h.type(x.dtype)
-        return diffusion_model.out(h)
+        output = diffusion_model.out(h)
+        if cache_mode != 'off':
+            cache_slot['signature'] = cache_signature
+            if reused_deep:
+                diffusion_model._vw_cache_runtime['hits'] += 1
+            else:
+                diffusion_model._vw_cache_runtime['misses'] += 1
+            if cache_mode == 'first_block':
+                cache_slot['output_residual'] = (output - x).detach()
+        return output
 
     diffusion_model.forward = controlled_unet_forward
 

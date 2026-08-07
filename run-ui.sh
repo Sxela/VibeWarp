@@ -11,9 +11,10 @@ fi
 # shellcheck disable=SC1091
 source env/bin/activate
 
-# Install the optional local API server on first run.
-if ! python -c 'import fastapi, uvicorn' 2>/dev/null; then
-    echo "Installing UI dependencies..."
+# Install/update dependencies when an existing environment predates a
+# required package. torchsde is needed by the DPM++ SDE samplers.
+if ! python -c 'import fastapi, uvicorn, torchsde' 2>/dev/null; then
+    echo "Installing or updating VibeWarp UI dependencies..."
     pip install -e '.[ui]'
 fi
 

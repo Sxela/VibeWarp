@@ -331,6 +331,8 @@ def _configure_unified_forward(
     sd_model,
     loaded_controlnets: Dict,
     freeu_config,
+    diffusion_config=None,
+    compile_cache_dir: str = '',
     normalize_cn_weights: bool = False,
     validate_stock_forward: bool = False,
 ) -> None:
@@ -356,6 +358,20 @@ def _configure_unified_forward(
         print(f"  FreeU enabled (b1={freeu_config.b1}, b2={freeu_config.b2}, "
               f"s1={freeu_config.s1}, s2={freeu_config.s2}, "
               f"after_control={freeu_config.apply_freeu_after_control})")
+
+    if diffusion_config is not None:
+        from vibewarp.core.unet_acceleration import configure_unet_acceleration
+        configure_unet_acceleration(
+            sd_model,
+            cache_mode=diffusion_config.unet_cache,
+            cache_interval=diffusion_config.unet_cache_interval,
+            cache_threshold=diffusion_config.unet_cache_threshold,
+            compile_unet=diffusion_config.compile_unet,
+            compile_cache_dir=compile_cache_dir,
+        )
+        if diffusion_config.compile_unet:
+            from vibewarp.core.unet_acceleration import compile_auxiliary_models
+            compile_auxiliary_models(sd_model, loaded_controlnets)
 
 
 def run(
@@ -525,6 +541,9 @@ def run(
         validate_stock_forward = os.environ.get('VIBEWARP_VALIDATE_STOCK_FORWARD') == '1'
         _configure_unified_forward(
             models['sd_model'], loaded_controlnets, config.freeu,
+            diffusion_config=config.diffusion,
+            compile_cache_dir=os.path.join(
+                config.root_dir, '.vibewarp_cache', 'torchinductor'),
             normalize_cn_weights=config.controlnet.normalize_weights,
             validate_stock_forward=validate_stock_forward)
 

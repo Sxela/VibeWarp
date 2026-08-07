@@ -110,7 +110,7 @@ class TestEndToEndSmoke:
             ('prev warped + cc', '_warped_000001.png'),
         ],
     )
-    def test_sd_temporal_guidance_mode_selects_init_image(
+    def test_sd_temporal_guidance_mode_selects_gradient_target(
         self, tmp_path, mode, expected_name,
     ):
         vf_dir = self._create_video_frames(tmp_path, n_frames=2)
@@ -150,7 +150,9 @@ class TestEndToEndSmoke:
                 batch_folder=batch_dir, fmt='png',
             )
 
-        assert os.path.basename(mock_rf.call_args.args[1].init_image) == expected_name
+        rendered_state = mock_rf.call_args.args[1]
+        assert os.path.basename(rendered_state.guidance_image) == expected_name
+        assert os.path.basename(rendered_state.init_image) == '_warped_000001.png'
 
     def test_run_frames_standard_mode(self, tmp_path):
         """Standard run_frames should render each frame sequentially."""

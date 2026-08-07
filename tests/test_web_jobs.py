@@ -134,6 +134,7 @@ def test_preview_is_published_before_job_completes(tmp_path):
     assert job.state == "running"
     assert job.preview_path == str((tmp_path / "warpfusion(0)_000000.png").resolve())
     assert job.snapshot()["preview_available"] is True
+    assert job.snapshot()["run_id"] == tmp_path.name
     release.set()
     wait_terminal(job)
 
