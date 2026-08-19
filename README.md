@@ -29,8 +29,10 @@ produce, not an estimate.
 **History & Comparison** — every past run, inspectable frame by frame and layer by layer:
 the init frame, warped init, processed consistency mask, each ControlNet's source and
 detected map, the diffusion input, and the output. Load any run's settings back into the
-form to iterate on it. Cancelled runs keep their completed frames: resume from the first
-missing frame, assemble a partial video at any time, and play assembled videos in place.
+form to iterate on it. Press play on the frame stepper to loop the rendered frames in
+place — judge motion without assembling a video first, including part-way through a
+render. Cancelled runs keep their completed frames: resume from the first missing frame,
+assemble a partial video at any time, and play assembled videos in place.
 Ctrl/Cmd-click any two runs to compare every changed saved setting side by side.
 
 ![The history view: past runs on the left, and one frame compared across its layers](docs/assets/ui-history.jpg)

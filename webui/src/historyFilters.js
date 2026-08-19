@@ -8,9 +8,21 @@ export function filterRunsByMinimumFrames(runs, minimumFrames) {
   return (runs ?? []).filter(run => Number(run.frames ?? 0) >= minimum);
 }
 
-export function latestRenderedFrame(detail) {
+/**
+ * Frames this run has actually rendered.
+ *
+ * `detail.frames` is the UNION of every layer's frames, and extracted input
+ * frames already cover the whole selected range — so it is the range, not the
+ * progress. The output layer is what "rendered" means.
+ */
+export function renderedFrames(detail) {
   let output = (detail?.layers ?? []).find(layer => layer.id === 'output');
-  if (output?.frames?.length) return output.frames.at(-1);
+  return output?.frames ?? [];
+}
+
+export function latestRenderedFrame(detail) {
+  let rendered = renderedFrames(detail);
+  if (rendered.length) return rendered.at(-1);
   // Before frame 1 finishes, prefer the beginning of the selected range.
   // Extracted input frames already cover the whole range, so their final item
   // is specifically the misleading empty endpoint we want to avoid.

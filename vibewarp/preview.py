@@ -23,6 +23,11 @@ _FRAME_SUFFIX = re.compile(r'^(?P<stem>.*?)_?(?P<frame>\d{6})\.(?P<ext>png|jpg|j
 IMAGE_EXTS = ('.png', '.jpg', '.jpeg')
 RUN_LABEL_FILE = '.vibewarp-label'
 MAX_RUN_LABEL_LENGTH = 80
+# Per-run cache of downscaled gallery thumbnails. Dot-prefixed and matched by
+# nothing the frame scanners look for, so it cannot be mistaken for a layer.
+THUMBNAIL_DIR = '.thumbs'
+THUMBNAIL_MAX = 256
+_THUMB_UNSAFE = re.compile(r'[^A-Za-z0-9_-]')
 
 # Debug prefixes that aren't ControlNets.
 _DEBUG_LABELS = {
@@ -56,6 +61,35 @@ def runs_root(output_dir: str, batch_name: str) -> str:
     return os.path.join(output_dir or 'images_out', batch_name or 'warpfusion')
 
 
+def _mtime_or_none(path: Optional[str]) -> Optional[float]:
+    if not path:
+        return None
+    try:
+        return os.path.getmtime(path)
+    except OSError:
+        return None
+
+
+def _last_render_time(run: str, prefix: str, output: Dict[int, str]) -> float:
+    """When this run last produced a frame.
+
+    Deliberately NOT the run directory's own mtime. Anything written beside the
+    frames touches the directory — a run label, or the `.thumbs` cache — and a
+    history sorted by date would shuffle that run to the top even though it
+    rendered nothing new. Runs with no frames yet have nothing better to offer,
+    so they fall back to the directory.
+    """
+    if output:
+        newest = max(output)
+        frame = Layer('output', '', '', '', prefix).filename(
+            newest, output[newest])
+        try:
+            return os.path.getmtime(os.path.join(run, frame))
+        except OSError:
+            pass
+    return os.path.getmtime(run)
+
+
 def list_runs(output_dir: str, batch_name: str) -> List[dict]:
     """Run directories, newest first."""
     root = runs_root(output_dir, batch_name)
@@ -67,14 +101,14 @@ def list_runs(output_dir: str, batch_name: str) -> List[dict]:
         if not os.path.isdir(path) or not _RUN_ID.match(name):
             continue
         names = os.listdir(path)
-        output = _scan(
-            path, '', _output_prefix(path, batch_name, name, names), names=names)
+        prefix = _output_prefix(path, batch_name, name, names)
+        output = _scan(path, '', prefix, names=names)
         video = video_file(path, batch_name, names)
         resume = resume_status(path, batch_name, name, output_frames=output)
         runs.append({
             'id': name,
             'label': run_label(path),
-            'modified': os.path.getmtime(path),
+            'modified': _last_render_time(path, prefix, output),
             'frames': len(output),
             # Newest rendered frame — the gallery uses it as the run's thumbnail.
             'last_frame': max(output) if output else None,
@@ -83,6 +117,10 @@ def list_runs(output_dir: str, batch_name: str) -> List[dict]:
             # "Load settings" rather than offering a button that cannot work.
             'has_settings': settings_file(path) is not None,
             'video_available': video is not None,
+            # The player cache-busts on this. It cannot ride on 'modified':
+            # rebuilding a video renders no new frame, so that date does not
+            # move and the browser would replay the previous cut.
+            'video_modified': _mtime_or_none(video),
             'resume_available': resume is not None,
             'resume_from': resume,
         })
@@ -409,3 +447,88 @@ def image_path(output_dir: str, batch_name: str, run_id: str,
             if os.path.isfile(candidate):
                 return candidate
     return None
+
+
+def warm_thumbnails(output_dir: str, batch_name: str,
+                    runs: List[dict]) -> int:
+    """Pre-build gallery thumbnails for runs that have none yet.
+
+    Runs that predate the thumbnail cache would otherwise decode a full render
+    the first time each card scrolls into view. Building one costs ~30ms;
+    confirming an existing one costs two stat calls, so this is cheap to call
+    on every listing and only does real work once.
+
+    Returns the number built, for logging and tests.
+    """
+    built = 0
+    for run in runs:
+        frame = run.get('last_frame')
+        if frame is None:
+            continue
+        run_path = run_dir(output_dir, batch_name, run.get('id'))
+        if run_path is None:
+            continue
+        dest = _thumbnail_cache_file(run_path, 'output', frame)
+        existed = os.path.exists(dest)
+        made = thumbnail_path(
+            output_dir, batch_name, run.get('id'), 'output', frame)
+        if made == dest and not existed:
+            built += 1
+    return built
+
+
+def _thumbnail_cache_file(run: str, layer_id: str, frame: int) -> str:
+    """Where a layer/frame's cached thumbnail lives inside a run.
+
+    Layer ids carry colons ("debug:foo"), which are not legal in Windows
+    filenames, so the id is slugged rather than used verbatim.
+    """
+    name = f'{_THUMB_UNSAFE.sub("_", layer_id)}_{frame:06d}.jpg'
+    return os.path.join(run, THUMBNAIL_DIR, name)
+
+
+def thumbnail_path(output_dir: str, batch_name: str, run_id: str,
+                   layer_id: str, frame: int) -> Optional[str]:
+    """Path to a small cached copy of one layer's frame, building it if needed.
+
+    The run gallery draws each run at 102px but the renders themselves are
+    routinely over a megabyte, so serving originals costs hundreds of MB to
+    paint a list of thumbnails. Downscaled copies live in a `.thumbs` directory
+    inside the run, so they travel with a copied run and vanish with a deleted
+    one. That directory is inert to the scanners: `_scan` requires an image
+    extension, `video_file` requires `.mp4`, and `describe_run` only ever looks
+    in the named `video_frames` and `debug` subdirectories.
+
+    The cache is strictly optional. Anything that goes wrong falls back to the
+    original image, because a slow gallery beats a broken one.
+    """
+    source = image_path(output_dir, batch_name, run_id, layer_id, frame)
+    if source is None:
+        return None
+    run = run_dir(output_dir, batch_name, run_id)
+    if run is None:
+        return source
+
+    dest = _thumbnail_cache_file(run, layer_id, frame)
+    try:
+        if os.path.getmtime(dest) >= os.path.getmtime(source):
+            return dest
+    except OSError:
+        pass   # missing or unreadable cache entry: rebuild it below
+
+    try:
+        from PIL import Image   # deferred: only the gallery path needs PIL
+
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with Image.open(source) as image:
+            image.draft('RGB', (THUMBNAIL_MAX, THUMBNAIL_MAX))
+            image = image.convert('RGB')
+            image.thumbnail((THUMBNAIL_MAX, THUMBNAIL_MAX))
+            # Write-then-rename so a concurrent request never sees a partial
+            # file — two browsers hitting the same cold thumbnail is normal.
+            partial = f'{dest}.{os.getpid()}.part'
+            image.save(partial, 'JPEG', quality=82, optimize=True)
+        os.replace(partial, dest)
+        return dest
+    except Exception:
+        return source

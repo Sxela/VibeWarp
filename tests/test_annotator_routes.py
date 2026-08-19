@@ -385,3 +385,43 @@ class TestAnnotatorOptsSettings:
         assert (c.mlsd_value_threshold, c.mlsd_distance_threshold) == (0.1, 0.1)
         assert c.downscale_tile == 4
         assert c.qr_cn_mask_thresh == 0
+
+
+class TestPoseHandRendering:
+    """`pose_include_hand` shipped broken: controlnet-aux's OpenPose and
+    DWPose hand renderers lazily `import matplotlib` to colour the finger
+    edges, but controlnet-aux does not declare matplotlib. Enabling hands
+    therefore died at render time with ModuleNotFoundError, while body and
+    face -- which never take that path -- worked. matplotlib is now a declared
+    dependency; these tests fail if it is ever dropped again.
+
+    Pure drawing helpers: no detector and no model download.
+    """
+
+    HAND = [(0.2 + 0.03 * i, 0.3 + 0.02 * i) for i in range(21)]
+
+    def test_bare_matplotlib_import_exposes_colors(self):
+        # The renderers `import matplotlib` and then reach for
+        # matplotlib.colors, so the submodule has to resolve without being
+        # imported explicitly. A future lazy-submodule change upstream would
+        # break them even with matplotlib installed.
+        import matplotlib
+        assert hasattr(matplotlib, 'colors')
+
+    def test_openpose_draws_hand(self):
+        from controlnet_aux.open_pose import util
+        from controlnet_aux.open_pose.body import Keypoint
+
+        canvas = np.zeros((128, 128, 3), dtype=np.uint8)
+        out = util.draw_handpose(
+            canvas, [Keypoint(x=x, y=y) for x, y in self.HAND])
+        assert (out.sum(axis=2) > 0).any(), 'hand renderer drew nothing'
+
+    def test_dwpose_draws_hand(self):
+        # Same feature, different signature: DWPose takes arrays of peaks.
+        from controlnet_aux.dwpose import util
+
+        canvas = np.zeros((128, 128, 3), dtype=np.uint8)
+        peaks = np.array(self.HAND, dtype=np.float32)
+        out = util.draw_handpose(canvas, [peaks])
+        assert (out.sum(axis=2) > 0).any(), 'hand renderer drew nothing'

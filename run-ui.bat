@@ -16,8 +16,9 @@ if not exist "%~dp0env\Scripts\activate.bat" (
 call "%~dp0env\Scripts\activate"
 
 REM Install/update dependencies when an existing environment predates a
-REM required package. torchsde is needed by the DPM++ SDE samplers.
-python -c "import fastapi, uvicorn, torchsde" 2>nul
+REM required package. torchsde is needed by the DPM++ SDE samplers, and
+REM matplotlib by the OpenPose/DWPose hand renderer.
+python -c "import fastapi, uvicorn, torchsde, matplotlib" 2>nul
 if errorlevel 1 (
     echo Installing or updating VibeWarp UI dependencies...
     python -m pip install -e "%~dp0.[ui]"

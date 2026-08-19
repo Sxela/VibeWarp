@@ -42,6 +42,13 @@ dependencies = [
     # Streams ComfyUI queue, active-node, and sampler-step events into the UI.
     "websocket-client==1.9.0",
     "controlnet-aux==0.0.10",
+    # controlnet-aux does NOT declare this, but its OpenPose and DWPose hand
+    # renderers lazily `import matplotlib` to colour the finger edges
+    # (open_pose/util.py, dwpose/util.py). Without it, pose_include_hand dies
+    # at render time with "No module named 'matplotlib'" while body and face,
+    # which never take that path, work fine. Colab has matplotlib preinstalled,
+    # which is why the reference notebook never had to declare it either.
+    "matplotlib>=3.7",
     # Pixel-space temporal guidance uses the notebook's VGG LPIPS loss.
     "lpips==0.1.4",
 ]

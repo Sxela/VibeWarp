@@ -5,7 +5,14 @@
     frameAfterRunLoad,
     latestRenderedFrame,
     normalizeMinimumFrames,
+    renderedFrames,
   } from './historyFilters.js';
+  import {
+    PLAYBACK_FPS,
+    PLAYBACK_INTERVAL_MS,
+    canPlay,
+    nextFrame,
+  } from './framePlayback.js';
   // Frame-by-frame comparison of a run's layers: init frame, warped init, each
   // ControlNet's source + detected map, the diffusion input, and the output.
   //
@@ -294,9 +301,37 @@
   function toggle(id){
     selected = selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id];
   }
+  // Loop the rendered frames in place, so a run can be judged as motion
+  // without assembling a video first. One button toggles play and pause.
+  //
+  // Deliberately NOT `frames`: that is the union of every layer, and extracted
+  // inputs already span the whole selected range, so playing it would crawl
+  // through frames the run has not rendered yet.
+  let playing = $state(false);
+  let playbackFrames = $derived(renderedFrames(detail));
+  let playable = $derived(canPlay(playbackFrames));
+
   function step(delta){
+    playing = false;   // a manual move means you want to look at that frame
     frame = Math.min(maxFrame, Math.max(minFrame, frame + delta));
   }
+
+  // `playing`/`playable` are read synchronously so they are the effect's only
+  // dependencies; `frame` and `playbackFrames` are read inside the timer
+  // callback, which runs outside the tracked pass, so ticking does not restart
+  // the interval (and a still-rendering run picks up new frames as they land).
+  $effect(() => {
+    if (!playing || !playable) return;
+    const timer = setInterval(
+      () => { frame = nextFrame(frame, playbackFrames); },
+      PLAYBACK_INTERVAL_MS);
+    return () => clearInterval(timer);
+  });
+
+  // Switching runs, or losing the frame list, must not leave playback running
+  // against frames that no longer exist.
+  $effect(() => { if (!playable) playing = false; });
+  $effect(() => { runId; playing = false; });
   function src(layer){
     return `/api/preview/runs/${runId}/image?${params}&layer=${encodeURIComponent(layer)}&frame=${frame}`;
   }
@@ -337,7 +372,9 @@
           {/if}
           <div class="thumb">
             {#if run.last_frame !== null}
-              <img src={`/api/preview/runs/${run.id}/image?${params}&layer=output&frame=${run.last_frame}`}
+              <!-- Thumbnail, not the full render: these cards are 102px, and
+                   the originals average well over a megabyte each. -->
+              <img src={`/api/preview/runs/${run.id}/thumbnail?${params}&layer=output&frame=${run.last_frame}`}
                    alt={`Run ${run.id}`} loading="lazy"/>
             {:else}<span>none</span>{/if}
           </div>
@@ -364,6 +401,12 @@
         <button onclick={()=>step(-1)} disabled={frame <= minFrame} aria-label="Previous frame">‹</button>
         <input type="number" min={minFrame} max={maxFrame} bind:value={frame} aria-label="Frame"/>
         <button onclick={()=>step(1)} disabled={frame >= maxFrame} aria-label="Next frame">›</button>
+        <button class="loop" onclick={()=>playing = !playing} disabled={!playable}
+                aria-pressed={playing}
+                aria-label={playing ? 'Pause playback' : 'Play frames in a loop'}
+                title={playable
+                  ? (playing ? 'Pause' : `Loop the rendered frames at ${PLAYBACK_FPS} fps`)
+                  : 'Needs at least two rendered frames'}>{playing ? '❚❚' : '▶'}</button>
       </div>
       <input class="scrub" type="range" min={minFrame} max={maxFrame} step="1"
              bind:value={frame} disabled={!frames.length} aria-label="Frame"/>
@@ -426,7 +469,7 @@
         <div class="empty">{error}</div>
       {:else if showVideo && current?.video_available}
         <video class="video-player" controls preload="metadata"
-               src={`/api/preview/runs/${runId}/video?${params}&v=${current.modified}`}>
+               src={`/api/preview/runs/${runId}/video?${params}&v=${current.video_modified ?? current.modified}`}>
           <track kind="captions"/>
         </video>
       {:else if frames.length && !frames.includes(frame)}
@@ -600,6 +643,9 @@
   .stepper button{border:1px solid #353a42;background:#191c21;color:#d9dce0;border-radius:7px;
                   padding:6px 11px;cursor:pointer;line-height:1}
   .stepper button:disabled{color:#4b525b;cursor:default}
+  /* Distinct from .history-action.play, which shows the assembled video. */
+  .stepper .loop{min-width:34px;font-size:11px}
+  .stepper .loop[aria-pressed="true"]{background:#d8ff55;color:#111;border-color:#d8ff55}
 
   /* The images take whatever height is left and scale INTO it -- they never push the page.
      Every link in this chain needs min-height:0, or an intrinsically-sized <img> wins and

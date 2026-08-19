@@ -308,7 +308,8 @@
 <style>
   .base{display:flex;gap:28px;padding-bottom:18px;border-bottom:1px solid #292e36}
   .toggle{display:flex;flex-direction:row;align-items:center;gap:9px;color:#aeb4bd;font-size:12px}
-  .toggle input{width:18px;height:18px}
+  /* No width/height override here -- see the note in ControlNetEditor: it
+     would collapse style.css's 36x20 pill into a bare circle. */
   .adder{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;margin-top:18px}
   .adder .hint{grid-column:1/-1;margin:0;color:#68717d;font-size:10px}
   .add{height:38px;border:1px solid #4d5d2a;background:#d8ff55;color:#111;font-weight:700;padding:10px 20px;border-radius:8px;cursor:pointer}

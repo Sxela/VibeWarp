@@ -12,7 +12,7 @@ from vibewarp.ipadapter_catalog import specs_for_version as ipadapter_specs_for_
 from vibewarp import system_settings
 from vibewarp.preview import (describe_run, image_path, list_runs, resume_status,
                               run_dir, runs_root, set_run_label, settings_file,
-                              video_file)
+                              thumbnail_path, video_file, warm_thumbnails)
 from vibewarp.video.input import first_visible_frame, fit_dimensions, frame_at, probe_video
 from vibewarp.web_jobs import JobManager, TERMINAL_STATES
 
@@ -78,7 +78,7 @@ def _ipadapter_files(model_dir: str) -> list:
 
 def create_app(job_manager: JobManager | None = None, initial_config: RunConfig | None = None):
     try:
-        from fastapi import FastAPI, HTTPException, Request
+        from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
         from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
         from fastapi.staticfiles import StaticFiles
     except ImportError as exc:
@@ -297,9 +297,16 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         return {"adapters": adapters, "files": found}
 
     @app.get("/api/preview/runs")
-    def preview_runs(output_dir: str = "images_out", batch_name: str = "warpfusion"):
-        return {"runs": list_runs(output_dir, batch_name),
-                "root": runs_root(output_dir, batch_name)}
+    def preview_runs(background: BackgroundTasks,
+                     output_dir: str = "images_out",
+                     batch_name: str = "warpfusion"):
+        runs = list_runs(output_dir, batch_name)
+        # Build any gallery thumbnails this history is still missing, AFTER the
+        # response goes out. Existing runs have none, so the first browse would
+        # otherwise pay the decode per card as it scrolls. Re-listing once warm
+        # costs two stat calls per run, so this is effectively a one-off.
+        background.add_task(warm_thumbnails, output_dir, batch_name, runs)
+        return {"runs": runs, "root": runs_root(output_dir, batch_name)}
 
     @app.get("/api/preview/runs/{run_id}")
     def preview_run(run_id: str, output_dir: str = "images_out",
@@ -350,6 +357,16 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
     def preview_image(run_id: str, layer: str, frame: int,
                       output_dir: str = "images_out", batch_name: str = "warpfusion"):
         path = image_path(output_dir, batch_name, run_id, layer, frame)
+        if path is None:
+            raise HTTPException(404, detail="No image for that layer/frame")
+        return FileResponse(path, media_type=mimetypes.guess_type(path)[0])
+
+    @app.get("/api/preview/runs/{run_id}/thumbnail")
+    def preview_thumbnail(run_id: str, layer: str, frame: int,
+                          output_dir: str = "images_out",
+                          batch_name: str = "warpfusion"):
+        """Small cached copy for the run gallery — see preview.thumbnail_path."""
+        path = thumbnail_path(output_dir, batch_name, run_id, layer, frame)
         if path is None:
             raise HTTPException(404, detail="No image for that layer/frame")
         return FileResponse(path, media_type=mimetypes.guess_type(path)[0])

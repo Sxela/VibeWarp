@@ -1,5 +1,7 @@
 """Preview/debug tab: run discovery, layer discovery, frame alignment."""
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -51,14 +53,16 @@ class TestRunDiscovery:
         assert all(r["frames"] == 3 for r in runs)
 
     def test_numeric_runs_do_not_sort_lexicographically(self, tmp_path):
-        import os
         import time
         for run_id in ("2", "10"):
             build_run(tmp_path, run_id)
-        # Same mtime -> the numeric tiebreak must put 10 above 2.
+        # Same mtime -> the numeric tiebreak must put 10 above 2. The date comes
+        # from the newest OUTPUT FRAME, so the tie has to be forced there;
+        # stamping the directory would not affect the sort at all.
         now = time.time()
         for run_id in ("2", "10"):
-            os.utime(tmp_path / "warpfusion" / run_id, (now, now))
+            frame = tmp_path / "warpfusion" / run_id / f"warpfusion({run_id})_{2:06d}.png"
+            os.utime(frame, (now, now))
         runs = list_runs(str(tmp_path), "warpfusion")
         assert [r["id"] for r in runs][0] == "10"
 
@@ -379,3 +383,243 @@ class TestPreviewEndpoints:
         assert calls[0]["resume_from"] == 3
         assert calls[0]["existing_run_dir"] == str(
             (tmp_path / "warpfusion" / "7").resolve())
+
+
+class TestGalleryThumbnails:
+    """The run gallery draws each run at 102px, but renders are routinely over
+    a megabyte — 300MB to paint one list of 222 runs here. Thumbnails are a
+    cache: correctness never depends on them existing."""
+
+    def build_real_run(self, tmp_path, run_id="0", batch="warpfusion",
+                       size=(900, 600)):
+        """Like build_run, but the output frame is a decodable image."""
+        from PIL import Image
+
+        run = tmp_path / batch / run_id
+        run.mkdir(parents=True)
+        Image.new("RGB", size, (200, 40, 90)).save(
+            run / f"{batch}({run_id})_{0:06d}.png")
+        return str(tmp_path)
+
+    def test_builds_a_smaller_cached_copy(self, tmp_path):
+        from vibewarp.preview import THUMBNAIL_MAX, image_path, thumbnail_path
+        from PIL import Image
+
+        root = self.build_real_run(tmp_path)
+        thumb = thumbnail_path(root, "warpfusion", "0", "output", 0)
+        source = image_path(root, "warpfusion", "0", "output", 0)
+
+        assert thumb != source
+        assert os.path.basename(os.path.dirname(thumb)) == ".thumbs"
+        assert os.path.getsize(thumb) < os.path.getsize(source)
+        with Image.open(thumb) as made:
+            assert max(made.size) <= THUMBNAIL_MAX
+            # Aspect ratio preserved, not squashed into a square.
+            assert made.size[0] > made.size[1]
+
+    def test_second_call_reuses_the_cache(self, tmp_path):
+        from vibewarp.preview import thumbnail_path
+
+        root = self.build_real_run(tmp_path)
+        first = thumbnail_path(root, "warpfusion", "0", "output", 0)
+        stamp = os.path.getmtime(first)
+        again = thumbnail_path(root, "warpfusion", "0", "output", 0)
+        assert again == first
+        assert os.path.getmtime(again) == stamp   # not rebuilt
+
+    def test_rebuilds_when_the_render_is_newer(self, tmp_path):
+        from vibewarp.preview import image_path, thumbnail_path
+        from PIL import Image
+
+        root = self.build_real_run(tmp_path)
+        thumb = thumbnail_path(root, "warpfusion", "0", "output", 0)
+        stamp = os.path.getmtime(thumb)
+
+        # Re-render that frame at a different size, stamped into the future so
+        # the check is not at the mercy of filesystem timestamp resolution.
+        source = image_path(root, "warpfusion", "0", "output", 0)
+        Image.new("RGB", (400, 400), (10, 200, 10)).save(source)
+        os.utime(source, (stamp + 10, stamp + 10))
+
+        rebuilt = thumbnail_path(root, "warpfusion", "0", "output", 0)
+        assert rebuilt == thumb
+        assert os.path.getmtime(rebuilt) > stamp
+
+    def test_unreadable_image_falls_back_to_the_original(self, tmp_path):
+        """build_run writes placeholder bytes, not real PNGs. A gallery that
+        cannot thumbnail must still show something."""
+        from vibewarp.preview import image_path, thumbnail_path
+
+        root = build_run(tmp_path, "0")
+        thumb = thumbnail_path(root, "warpfusion", "0", "output", 0)
+        assert thumb == image_path(root, "warpfusion", "0", "output", 0)
+
+    def test_missing_frame_is_still_none(self, tmp_path):
+        from vibewarp.preview import thumbnail_path
+
+        root = self.build_real_run(tmp_path)
+        assert thumbnail_path(root, "warpfusion", "0", "output", 99) is None
+        assert thumbnail_path(root, "warpfusion", "nope", "output", 0) is None
+
+    def test_colon_bearing_layer_ids_produce_legal_filenames(self, tmp_path):
+        """Debug layers are named "debug:stem"; ':' is illegal on Windows."""
+        from vibewarp.preview import _thumbnail_cache_file
+
+        made = _thumbnail_cache_file("run", "debug:diffusion_input", 7)
+        assert ":" not in os.path.basename(made)
+        assert os.path.basename(made) == "debug_diffusion_input_000007.jpg"
+
+    def test_cache_dir_is_invisible_to_the_scanners(self, tmp_path):
+        """.thumbs lives inside the run: it must not become a layer, a frame,
+        or a candidate video."""
+        from vibewarp.preview import describe_run, list_runs, thumbnail_path
+
+        root = build_run(tmp_path, "0")
+        before = describe_run(root, "warpfusion", "0")
+        before_runs = list_runs(root, "warpfusion")
+
+        # Force a cache directory into the run even though the images are fake.
+        os.makedirs(os.path.join(root, "warpfusion", "0", ".thumbs"))
+        with open(os.path.join(root, "warpfusion", "0", ".thumbs",
+                               "output_000000.jpg"), "wb") as handle:
+            handle.write(b"thumb")
+
+        after = describe_run(root, "warpfusion", "0")
+        assert [l["id"] for l in after["layers"]] == [l["id"] for l in before["layers"]]
+        assert after["frames"] == before["frames"]
+        assert after["video_available"] == before["video_available"]
+        assert [r["frames"] for r in list_runs(root, "warpfusion")] == \
+            [r["frames"] for r in before_runs]
+
+    def test_warm_thumbnails_builds_once_then_no_ops(self, tmp_path):
+        from vibewarp.preview import list_runs, warm_thumbnails
+
+        root = self.build_real_run(tmp_path, "0")
+        self.build_real_run(tmp_path, "1")
+        runs = list_runs(root, "warpfusion")
+
+        assert warm_thumbnails(root, "warpfusion", runs) == 2
+        assert warm_thumbnails(root, "warpfusion", runs) == 0
+
+    def test_warm_thumbnails_skips_runs_with_no_output(self, tmp_path):
+        from vibewarp.preview import warm_thumbnails
+
+        root = self.build_real_run(tmp_path)
+        assert warm_thumbnails(root, "warpfusion", [
+            {"id": "0", "last_frame": None},
+            {"id": "does-not-exist", "last_frame": 0},
+        ]) == 0
+
+    def test_endpoint_serves_a_thumbnail(self, tmp_path):
+        root = self.build_real_run(tmp_path)
+        params = {"output_dir": root, "batch_name": "warpfusion"}
+        api = client()
+
+        full = api.get("/api/preview/runs/0/image",
+                       params={**params, "layer": "output", "frame": 0})
+        small = api.get("/api/preview/runs/0/thumbnail",
+                        params={**params, "layer": "output", "frame": 0})
+        assert small.status_code == 200
+        assert len(small.content) < len(full.content)
+
+        missing = api.get("/api/preview/runs/0/thumbnail",
+                          params={**params, "layer": "output", "frame": 99})
+        assert missing.status_code == 404
+
+
+class TestSortingIgnoresSidecarWrites:
+    """History is sorted by date. That date must track when a run last
+    RENDERED, not when its directory was last touched — writing a label or a
+    cached thumbnail into a run touches the directory, and deriving the date
+    from it silently reorders the whole history."""
+
+    def test_touching_the_directory_does_not_change_the_date(self, tmp_path):
+        from vibewarp.preview import list_runs
+
+        root = build_run(tmp_path, "0")
+        before = list_runs(root, "warpfusion")[0]["modified"]
+
+        # Whatever writing a sidecar does to the directory, the run's date is
+        # pinned to its frames. Bumped explicitly so the test does not depend
+        # on how a given filesystem timestamps directory writes.
+        run = os.path.join(root, "warpfusion", "0")
+        os.utime(run, (before + 10_000, before + 10_000))
+
+        assert list_runs(root, "warpfusion")[0]["modified"] == before
+
+    def test_building_a_thumbnail_does_not_reorder_history(self, tmp_path):
+        from PIL import Image
+
+        from vibewarp.preview import list_runs, warm_thumbnails
+
+        # Three runs, oldest to newest by frame time.
+        for run_id in ("0", "1", "2"):
+            run = tmp_path / "warpfusion" / run_id
+            run.mkdir(parents=True)
+            frame = run / f"warpfusion({run_id})_{0:06d}.png"
+            Image.new("RGB", (120, 90), (9, 9, 9)).save(frame)
+            os.utime(frame, (1_700_000_000 + int(run_id) * 100,) * 2)
+
+        root = str(tmp_path)
+        before = [r["id"] for r in list_runs(root, "warpfusion")]
+        assert before == ["2", "1", "0"]
+
+        assert warm_thumbnails(root, "warpfusion", list_runs(root, "warpfusion")) == 3
+        assert [r["id"] for r in list_runs(root, "warpfusion")] == before
+
+    def test_renaming_a_run_does_not_reorder_history(self, tmp_path):
+        from vibewarp.preview import list_runs, set_run_label
+
+        build_run(tmp_path, "0")
+        build_run(tmp_path, "1")
+        root = str(tmp_path)
+        for run_id in ("0", "1"):
+            frame = os.path.join(root, "warpfusion", run_id,
+                                 f"warpfusion({run_id})_{2:06d}.png")
+            os.utime(frame, (1_700_000_000 + int(run_id) * 100,) * 2)
+
+        before = [r["id"] for r in list_runs(root, "warpfusion")]
+        set_run_label(root, "warpfusion", "0", "renamed")
+        assert [r["id"] for r in list_runs(root, "warpfusion")] == before
+
+    def test_a_new_frame_does_update_the_date(self, tmp_path):
+        """The flip side: real render progress must still float a run up."""
+        from vibewarp.preview import list_runs
+
+        build_run(tmp_path, "0")
+        root = str(tmp_path)
+        before = list_runs(root, "warpfusion")[0]["modified"]
+
+        newest = os.path.join(root, "warpfusion", "0",
+                              f"warpfusion(0)_{3:06d}.png")
+        with open(newest, "wb") as handle:
+            handle.write(b"out")
+        os.utime(newest, (before + 500, before + 500))
+
+        assert list_runs(root, "warpfusion")[0]["modified"] == before + 500
+
+
+class TestVideoCacheBusting:
+    def test_rebuilt_video_gets_a_new_cache_key(self, tmp_path):
+        """Rebuilding a video renders no new frame, so 'modified' does not move
+        — the player needs its own key or it replays the previous cut."""
+        from vibewarp.preview import list_runs
+
+        build_run(tmp_path, "0")
+        root = str(tmp_path)
+        video = tmp_path / "warpfusion" / "0" / "warpfusion.mp4"
+        video.write_bytes(b"first cut")
+
+        before = list_runs(root, "warpfusion")[0]
+        video.write_bytes(b"second cut")
+        os.utime(video, (before["video_modified"] + 60,) * 2)
+        after = list_runs(root, "warpfusion")[0]
+
+        assert after["modified"] == before["modified"]      # no new frames
+        assert after["video_modified"] > before["video_modified"]
+
+    def test_no_video_means_no_key(self, tmp_path):
+        from vibewarp.preview import list_runs
+
+        build_run(tmp_path, "0")
+        assert list_runs(str(tmp_path), "warpfusion")[0]["video_modified"] is None

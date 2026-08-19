@@ -228,7 +228,9 @@
   .wide{grid-column:1/-1}
   .toggle{flex-direction:row;align-items:center;gap:10px;padding-top:22px}
   .toggle.bare{padding:0}
-  .toggle input{width:18px;height:18px}
+  /* Do NOT set width/height on .toggle input here. style.css styles it as a
+     36x20 pill with an :after knob; a scoped override outranks that and
+     collapses the track into a bare circle. */
   small{color:#68717d}
 
   .adder{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;margin-top:22px}

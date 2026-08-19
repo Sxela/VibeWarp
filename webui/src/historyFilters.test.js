@@ -4,7 +4,33 @@ import {
   frameAfterRunLoad,
   latestRenderedFrame,
   normalizeMinimumFrames,
+  renderedFrames,
 } from './historyFilters.js';
+
+describe('renderedFrames', () => {
+  const detail = {
+    frames: [0, 1, 2, 3, 4, 5],   // union of all layers == the whole range
+    layers: [
+      { id: 'init', frames: [0, 1, 2, 3, 4, 5] },
+      { id: 'output', frames: [0, 1] },
+    ],
+  };
+
+  it('reports what rendered, not the range the inits cover', () => {
+    expect(renderedFrames(detail)).toEqual([0, 1]);
+  });
+
+  it('is empty before the first frame finishes', () => {
+    expect(renderedFrames({ frames: [0, 1, 2], layers: [{ id: 'init', frames: [0, 1, 2] }] }))
+      .toEqual([]);
+    expect(renderedFrames(null)).toEqual([]);
+    expect(renderedFrames({})).toEqual([]);
+  });
+
+  it('agrees with latestRenderedFrame', () => {
+    expect(latestRenderedFrame(detail)).toBe(renderedFrames(detail).at(-1));
+  });
+});
 
 describe('History rendered-frame filtering', () => {
   const runs = [
