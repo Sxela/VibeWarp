@@ -211,6 +211,7 @@ def test_vibewarp_snapshot_loads_new_feature_groups(tmp_path):
         "mask_use_background_mask": True,
         "captions_make_captions": True,
         "scene_analyze_video": True,
+        "contact_sheet_mode": "reinject",
         "lora_merge_precision": "fp32",
     }
     path = tmp_path / "snapshot.txt"
@@ -220,4 +221,5 @@ def test_vibewarp_snapshot_loads_new_feature_groups(tmp_path):
     assert config.mask.use_background_mask is True
     assert config.captions.make_captions is True
     assert config.scene.analyze_video is True
+    assert config.contact_sheet.mode == "reinject"
     assert config.lora_merge_precision == "fp32"

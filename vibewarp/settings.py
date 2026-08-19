@@ -100,7 +100,8 @@ def load_settings(settings_path: str) -> Dict[str, Any]:
 
 _VIBEWARP_SECTIONS = [
     # Longer prefixes must come before shorter ones that share a stem
-    'reconstruction_noise', 'video_assembly', 'animatediff', 'ipadapter',
+    'reconstruction_noise', 'video_assembly', 'contact_sheet',
+    'animatediff', 'ipadapter',
     'diffusion', 'brightness', 'captions', 'scene', 'freeu',
     'color', 'warp', 'flow', 'video', 'mask', 'vae', 'hidream', 'flux', 'qwen',
     'mage',

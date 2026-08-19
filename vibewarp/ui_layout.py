@@ -61,6 +61,7 @@ SECTION_MODEL_FAMILIES = {
     'hidream': ('hidream',),
     'qwen': ('qwen',),
     'mage': ('mage',),
+    'contact_sheet': ('flux', 'hidream', 'qwen', 'mage'),
 }
 FIELD_MODEL_FAMILIES = {
     # External edit renderers still use this seed as their base starting noise.
@@ -179,6 +180,10 @@ _assign('render', 'Reference Images', 'qwen.references')
 _assign('render', 'Qwen Image Edit',
         'qwen.use_lightning_lora', 'qwen.lora_strength',
         'qwen.guidance_scale', 'qwen.steps', 'qwen.fixed_seed')
+_assign('render', 'Temporal Contact Sheet',
+        'contact_sheet.mode', 'contact_sheet.layout',
+        'contact_sheet.gutter', 'contact_sheet.instruction',
+        'contact_sheet.save_debug')
 _assign('render', 'Reference Images', 'mage.references')
 _assign('render', 'Mage-Flow Edit',
         'mage.guidance_scale', 'mage.steps', 'mage.fixed_seed')

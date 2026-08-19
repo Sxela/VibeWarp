@@ -437,6 +437,9 @@ def hack_blk(block, function, type):
 def set_model_attn2_replace(model, function, flag, id):
     from ldm.modules.attention import CrossAttention
     block = get_block(model, flag)[id][1].transformer_blocks[0].attn2
+    # Position within its own block list, NOT a layer index. It is not unique
+    # across input/output and it is not what the weight presets are keyed by --
+    # patch_forward takes the real transformer index. Kept for debugging only.
     block.id = id
     hack_blk(block, function, CrossAttention)
     return
@@ -446,7 +449,7 @@ def set_model_patch_replace(model, function, flag, id, trans_id):
     from sgm.modules.attention import CrossAttention
     blk = get_block(model, flag)
     block = blk[id][1].transformer_blocks[trans_id].attn2
-    block.id = id
+    block.id = id  # debugging only -- see the note in set_model_attn2_replace
     hack_blk(block, function, CrossAttention)
     return
 
@@ -593,29 +596,63 @@ class PlugableIPAdapter(torch.nn.Module):
         self.uncond_image_emb = self.uncond_image_emb.to(device, dtype=self.dtype)
 
         # From https://github.com/laksjdjf/IPAdapter-ComfyUI
+        #
+        # TWO different layer orderings are in play here and conflating them is
+        # a bug:
+        #
+        #   number  indexes the adapter checkpoint's to_kvs layers, which are
+        #           stored input -> output -> middle.
+        #   t_idx   indexes the SpatialTransformer MODULES in UNet execution
+        #           order, input -> middle -> output. This is ComfyUI's
+        #           `transformer_index`, and it is the numbering every
+        #           layer-weight preset below refers to ("style transfer" == 6
+        #           on SDXL is up_blocks.0.attentions.1, InstantStyle's style
+        #           layer; "composition" == 3 is down_blocks.2.attentions.1).
+        #
+        # sd-webui-controlnet keeps the same split, passing both to its own
+        # patch_forward(i, transformer_id.transformer_index). On SDXL every
+        # inner transformer block of one SpatialTransformer shares that
+        # module's t_idx, which is why there are 11 t_idx values but 70 hooks.
         if not self.sdxl:
+            input_ids = [1, 2, 4, 5, 7, 8]  # input_blocks with cross attention
+            output_ids = [3, 4, 5, 6, 7, 8, 9, 10, 11]  # ditto, output_blocks
+            middle_t_idx = len(input_ids)          # 6
+            first_output_t_idx = middle_t_idx + 1  # 7
             number = 0  # index of to_kvs
-            for id in [1, 2, 4, 5, 7, 8]:  # id of input_blocks that have cross attention
-                set_model_attn2_replace(model, self.patch_forward(number), "input", id)
+            for t_idx, id in enumerate(input_ids):
+                set_model_attn2_replace(
+                    model, self.patch_forward(number, t_idx), "input", id)
                 number += 1
-            for id in [3, 4, 5, 6, 7, 8, 9, 10, 11]:  # id of output_blocks that have cross attention
-                set_model_attn2_replace(model, self.patch_forward(number), "output", id)
+            for offset, id in enumerate(output_ids):
+                set_model_attn2_replace(
+                    model, self.patch_forward(number, first_output_t_idx + offset),
+                    "output", id)
                 number += 1
-            set_model_attn2_replace(model, self.patch_forward(number), "middle", 0)
+            set_model_attn2_replace(
+                model, self.patch_forward(number, middle_t_idx), "middle", 0)
         else:
+            input_ids = [4, 5, 7, 8]  # id of input_blocks with cross attention
+            middle_t_idx = len(input_ids)          # 4
+            first_output_t_idx = middle_t_idx + 1  # 5
             number = 0
-            for id in [4, 5, 7, 8]:  # id of input_blocks that have cross attention
+            for t_idx, id in enumerate(input_ids):
                 block_indices = range(2) if id in [4, 5] else range(10)  # transformer_depth
                 for index in block_indices:
-                    set_model_patch_replace(model, self.patch_forward(number), "input", id, index)
+                    set_model_patch_replace(
+                        model, self.patch_forward(number, t_idx),
+                        "input", id, index)
                     number += 1
             for id in range(6):  # id of output_blocks that have cross attention
                 block_indices = range(2) if id in [3, 4, 5] else range(10)  # transformer_depth
                 for index in block_indices:
-                    set_model_patch_replace(model, self.patch_forward(number), "output", id, index)
+                    set_model_patch_replace(
+                        model, self.patch_forward(number, first_output_t_idx + id),
+                        "output", id, index)
                     number += 1
             for index in range(10):
-                set_model_patch_replace(model, self.patch_forward(number), "middle", 0, index)
+                set_model_patch_replace(
+                    model, self.patch_forward(number, middle_t_idx),
+                    "middle", 0, index)
                 number += 1
 
 
@@ -657,10 +694,11 @@ class PlugableIPAdapter(torch.nn.Module):
             else:
                 weight = { 0:weight, 1:weight, 2:weight, 3:weight, 4:weight*0.25, 5:weight, 9:weight, 10:weight, 11:weight, 12:weight, 13:weight, 14:weight, 15:weight }
         elif weight_type == "composition precise":
-            # Current ComfyUI_IPAdapter_plus preset: keep the
-            # composition-bearing blocks at full strength while retaining a
-            # 10% signal in the other selected blocks to reduce style leakage
-            # without making composition guidance brittle.
+            # Current ComfyUI_IPAdapter_plus preset. This layer map is only
+            # half of it: the attention patch below also inverts every
+            # NON-composition layer (cond -> uncond) so the unwanted signal is
+            # actively suppressed rather than merely attenuated. This mirrors
+            # "style transfer precise", which inverts the composition layer.
             weight = composition_precise_weights(weight, is_sdxl)
 
         print('Using weight type: ', weight_type, ' ', weight)
@@ -677,7 +715,10 @@ class PlugableIPAdapter(torch.nn.Module):
             return ip
 
     @torch.no_grad()
-    def patch_forward(self, number: int):
+    def patch_forward(self, number: int, t_idx: int):
+        """``number`` selects the to_kvs checkpoint layer; ``t_idx`` is the
+        execution-order transformer index the weight presets are keyed by.
+        See the ordering note in ``hook``."""
         @torch.no_grad()
         def forward(attn_blk, x, q):
             batch_size, sequence_length, inner_dim = x.shape
@@ -686,8 +727,7 @@ class PlugableIPAdapter(torch.nn.Module):
 
             #ipadapter plus stuff
             block_type = attn_blk.type 
-            layers = 11 if '101_to_k_ip' in self.ipadapter.ip_layers.to_kvs else 16 
-            t_idx = attn_blk.id
+            layers = 11 if '101_to_k_ip' in self.ipadapter.ip_layers.to_kvs else 16
             module_key = number * 2 + 1
             weight_type = self.weight_type
             cond =  self.image_emb
@@ -724,6 +764,13 @@ class PlugableIPAdapter(torch.nn.Module):
                         uncond = cond
                         cond = cond * 0
                     elif layers == 16 and (t_idx == 4 or t_idx == 5):
+                        uncond = cond
+                        cond = cond * 0
+                elif weight_type == "composition precise":
+                    if layers == 11 and t_idx != 3:
+                        uncond = cond
+                        cond = cond * 0
+                    elif layers == 16 and (t_idx != 4 and t_idx != 5):
                         uncond = cond
                         cond = cond * 0
 

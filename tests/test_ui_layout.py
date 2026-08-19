@@ -117,6 +117,8 @@ def test_schema_carries_model_family_compatibility():
     assert props['flux']['properties']['steps']['model_families'] == ['flux']
     assert props['hidream']['properties']['steps']['model_families'] == ['hidream']
     assert props['mage']['properties']['steps']['model_families'] == ['mage']
+    assert props['contact_sheet']['properties']['mode']['model_families'] == [
+        'flux', 'hidream', 'qwen', 'mage']
     assert props['reference_label_opacity']['model_families'] == [
         'flux', 'hidream', 'qwen', 'mage']
     assert props['negative_prompts']['model_families'] == [
@@ -142,6 +144,8 @@ def test_sd_only_and_edit_only_sections_are_declared_consistently():
     assert model_families('flux', 'steps') == ('flux',)
     assert model_families('hidream', 'steps') == ('hidream',)
     assert model_families('mage', 'steps') == ('mage',)
+    assert model_families('contact_sheet', 'mode') == (
+        'flux', 'hidream', 'qwen', 'mage')
     assert model_family_for_version('legacy_control_multi') == 'sd'
     assert model_family_for_version('future_hidream_edit') == 'hidream'
 

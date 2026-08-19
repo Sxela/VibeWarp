@@ -1,0 +1,61 @@
+job: extension
+config:
+  name: "__RUN_NAME__"
+  process:
+    - type: diffusion_trainer
+      training_folder: "__TRAINING_DIR__"
+      device: cuda:0
+      network:
+        type: lora
+        linear: 16
+        linear_alpha: 16
+      save:
+        dtype: float16
+        save_every: 500
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: "__DATASET_DIR__/train/target"
+          control_path:
+            - "__DATASET_DIR__/train/raw_current"
+            - "__DATASET_DIR__/train/edited_prev2"
+            - "__DATASET_DIR__/train/edited_prev1"
+          caption_ext: txt
+          caption_dropout_rate: 0.0
+          resolution: [512, 768, 1024]
+      train:
+        batch_size: 1
+        gradient_accumulation: 4
+        steps: 10000
+        cache_text_embeddings: true
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        optimizer: adamw8bit
+        lr: 0.0001
+        timestep_type: weighted
+        dtype: bf16
+        skip_first_sample: true
+        disable_sampling: true
+      model:
+        name_or_path: "__MODEL_DIR__"
+        arch: "qwen_image_edit_plus:2511"
+        quantize: true
+        qtype: "uint3|__ARA_PATH__"
+        quantize_te: true
+        qtype_te: qfloat8
+        low_vram: true
+      sample:
+        sampler: flowmatch
+        sample_every: 500
+        width: 1024
+        height: 1024
+        samples: []
+        neg: ""
+        seed: 42
+        walk_seed: true
+        guidance_scale: 4
+        sample_steps: 40
+      meta:
+        name: "[name]"
+        version: "1.0"

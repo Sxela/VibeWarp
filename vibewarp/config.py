@@ -507,6 +507,16 @@ class EditReferenceConfig:
     image_path: str = ''
 
 
+@dataclass
+class ContactSheetConfig:
+    """Experimental joint-frame rendering for ComfyUI image-edit models."""
+    mode: str = 'off'
+    layout: str = 'adaptive'
+    gutter: int = 4
+    instruction: str = ''
+    save_debug: bool = True
+
+
 def _default_edit_references() -> List[EditReferenceConfig]:
     # Slot 1 is mandatory. Slot 2 is the visible no-op that lets the UI grow
     # the ordered list one card at a time.
@@ -767,6 +777,7 @@ class RunConfig:
     animatediff: AnimateDiffConfig = field(default_factory=AnimateDiffConfig)
     ipadapter: IPAdapterConfig = field(default_factory=IPAdapterConfig)
     reconstruction_noise: ReconstructionNoiseConfig = field(default_factory=ReconstructionNoiseConfig)
+    contact_sheet: ContactSheetConfig = field(default_factory=ContactSheetConfig)
     flux: FluxConfig = field(default_factory=FluxConfig)
     hidream: HiDreamConfig = field(default_factory=HiDreamConfig)
     qwen: QwenEditConfig = field(default_factory=QwenEditConfig)

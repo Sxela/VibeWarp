@@ -10,6 +10,7 @@ Key simplification vs notebook:
 """
 
 import gc
+import json
 import os
 import re
 import time
@@ -1795,16 +1796,7 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
     if not edit_config.fixed_seed and frame_num > 0:
         seed += frame_num
 
-    # Prompts (with {caption} substitution, matching the SD path). LORA tags are
-    # meaningless for Flux, so we do not strip/apply them here.
-    schedule_frame = _schedule_frame_number(frame_num, config)
-    text_prompt = _get_prompt_for_frame(schedule_frame, config.text_prompts)
-    neg_prompt = _get_prompt_for_frame(
-        schedule_frame, config.negative_prompts)
-    from vibewarp.core.captioning import get_caption, apply_caption
-    _captions_folder = (ctx.video_frames_folder + 'Captions'
-                        if ctx.video_frames_folder else '')
-    text_prompt = apply_caption(text_prompt, get_caption(frame_num, _captions_folder))
+    text_prompt, neg_prompt = _resolve_edit_prompts(ctx, frame_num)
 
     # Edit target: the warped previous render (or raw frame 0). Falls back to the
     # raw current video frame if init_image was never set.
@@ -1906,6 +1898,337 @@ def _get_prompt_for_frame(frame_num: int, prompts: Dict[int, str]) -> str:
         else:
             break
     return prompts.get(active_key, "")
+
+
+def _resolve_edit_prompts(
+    ctx: RenderContext, frame_num: int
+) -> Tuple[str, str]:
+    """Resolve one edit frame's positive/negative text, including captions."""
+    config = ctx.config
+    schedule_frame = _schedule_frame_number(frame_num, config)
+    text_prompt = _get_prompt_for_frame(schedule_frame, config.text_prompts)
+    neg_prompt = _get_prompt_for_frame(
+        schedule_frame, config.negative_prompts)
+    from vibewarp.core.captioning import get_caption, apply_caption
+    captions_folder = (
+        ctx.video_frames_folder + 'Captions'
+        if ctx.video_frames_folder else '')
+    text_prompt = apply_caption(
+        text_prompt, get_caption(frame_num, captions_folder))
+    return text_prompt, neg_prompt
+
+
+_RAW_SHEET_INSTRUCTION = (
+    'Each occupied panel is a different consecutive raw video frame. Apply the '
+    'requested visual transformation separately to every occupied panel. Keep '
+    'identity, materials, palette, lighting, and fine details consistent, but '
+    'preserve the distinct pose, action, camera view, geometry, and composition '
+    'of each source panel. Do not make the panels identical.'
+)
+
+def _sheet_position(layout: Any, index: int) -> str:
+    """Human-readable cell position for layout-aware edit instructions."""
+    row, column = divmod(index, layout.columns)
+    if layout.rows == 1 and layout.columns == 1:
+        return 'only cell'
+    if layout.rows == 1:
+        labels = ('left', 'right') if layout.columns == 2 else (
+            'left', 'center', 'right')
+        return labels[column]
+    if layout.columns == 1:
+        labels = ('top', 'bottom') if layout.rows == 2 else (
+            'top', 'middle', 'bottom')
+        return labels[row]
+    vertical = 'top' if row == 0 else 'bottom'
+    horizontal = 'left' if column == 0 else 'right'
+    return f'{vertical}-{horizontal}'
+
+
+def _reinject_sheet_instruction(cells: list[Any]) -> str:
+    """Describe rolling stylized anchors without inviting panel duplication."""
+    anchor_panels = [
+        str(index + 1) for index, cell in enumerate(cells)
+        if cell.role == 'anchor'
+    ]
+    target_panels = [
+        str(index + 1) for index, cell in enumerate(cells)
+        if cell.accept
+    ]
+    if len(anchor_panels) == 1:
+        anchors = (
+            f'Panel {anchor_panels[0]} is an already-stylized preceding video '
+            'frame and is a temporal style and identity reference only.')
+    else:
+        anchors = (
+            f'Panels {" and ".join(anchor_panels)} are two already-stylized '
+            'consecutive preceding video frames in chronological order. They are '
+            'temporal style and identity references only; use the change between '
+            'them to understand the ongoing motion.')
+    targets = (
+        f'Panel {target_panels[0]} is the different raw next video frame and is '
+        'the only panel to transform in place.')
+    return (
+        f'{anchors} Keep each reference unchanged in its own panel. {targets} '
+        'Transfer only persistent identity, visual style, materials, palette, '
+        'lighting, and detail treatment from the reference sequence. Preserve '
+        'the target panel\'s own pose, action, camera view, geometry, and '
+        'composition. Never paste or repeat either reference frame in the target.'
+    )
+
+
+def _contact_sheet_instruction(
+    cells: list[Any],
+    layout: Any,
+    custom_instruction: str = '',
+) -> str:
+    """Build an explicit in-place edit instruction for one sheet geometry."""
+    occupied = [
+        f'panel {index + 1} ({_sheet_position(layout, index)})'
+        for index in range(len(cells))
+    ]
+    unused = [
+        f'panel {index + 1} ({_sheet_position(layout, index)})'
+        for index in range(len(cells), len(layout.boxes))
+    ]
+    geometry = (
+        f'Edit this {layout.rows}x{layout.columns} contact sheet in place. '
+        f'The occupied cells are {", ".join(occupied)}. Keep the grid, gutters, '
+        'panel count, boundaries, and panel positions exactly unchanged. Never '
+        'duplicate, replace, merge, extend, or rearrange one panel into another.'
+    )
+    if unused:
+        geometry += (
+            f' {", ".join(unused)} is unused neutral-gray padding: leave it flat '
+            'gray with no subject, scene, texture, or stylization.'
+        )
+    role_instruction = custom_instruction.strip() or (
+        _reinject_sheet_instruction(cells)
+        if any(cell.role == 'anchor' for cell in cells)
+        else _RAW_SHEET_INSTRUCTION)
+    return f'{geometry}\n\n{role_instruction}'
+
+
+def _contact_sheet_groups(
+    ctx: RenderContext,
+    sequence_start: int,
+    end_frame: int,
+) -> list[list[Any]]:
+    """Plan deterministic raw/reinjected groups, splitting on prompt changes."""
+    from vibewarp.core.contact_sheet import SheetCell
+
+    mode = ctx.config.contact_sheet.mode
+    if mode not in ('raw_triplets', 'reinject'):
+        raise ValueError(f'Unsupported contact-sheet mode: {mode!r}')
+
+    groups: list[list[SheetCell]] = []
+    cursor = sequence_start
+    first_group = True
+    while cursor < end_frame:
+        target_limit = 3 if mode == 'raw_triplets' or first_group else 1
+        prompt_key = _resolve_edit_prompts(ctx, cursor)
+        targets = []
+        while (cursor < end_frame and len(targets) < target_limit
+               and _resolve_edit_prompts(ctx, cursor) == prompt_key):
+            targets.append(SheetCell(cursor, 'raw', True))
+            cursor += 1
+        if not targets:
+            raise RuntimeError('Contact-sheet planner made no progress')
+        if mode == 'reinject' and not first_group:
+            target_frame = targets[0].frame_num
+            anchor_start = max(sequence_start, target_frame - 2)
+            anchors = [
+                SheetCell(frame_num, 'anchor', False)
+                for frame_num in range(anchor_start, target_frame)
+            ]
+            groups.append([*anchors, *targets])
+        else:
+            groups.append(targets)
+        first_group = False
+    return groups
+
+
+def _load_contact_sheet_cell(
+    ctx: RenderContext,
+    cell: Any,
+    fmt: str,
+) -> Image.Image:
+    """Load and prepare one raw or persisted anchor cell."""
+    config = ctx.config
+    if cell.role == 'anchor':
+        path = os.path.join(
+            ctx.batch_folder,
+            f'{config.batch_name}(0)_{cell.frame_num:06d}.{fmt}',
+        )
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f'Contact-sheet anchor is missing: {path}')
+        with Image.open(path) as opened:
+            return opened.convert('RGB').resize(
+                (config.video.width, config.video.height),
+                Image.Resampling.LANCZOS)
+
+    path = os.path.join(
+        ctx.video_frames_folder, f'{cell.frame_num + 1:06d}.jpg')
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f'Contact-sheet source frame is missing: {path}')
+    with Image.open(path) as opened:
+        image = opened.convert('RGB').resize(
+            (config.video.width, config.video.height),
+            Image.Resampling.LANCZOS)
+    if config.mask.use_background_mask:
+        image = _apply_render_bg_mask(
+            image, cell.frame_num, config, ctx.video_frames_folder)
+    return image
+
+
+def run_frames_contact_sheet(
+    ctx: RenderContext,
+    *,
+    sequence_start: int,
+    start_frame: int,
+    end_frame: int,
+    fmt: str,
+    state: FrameState,
+) -> List[str]:
+    """Render edit-model frames as raw or boundary-reinjected sheets."""
+    from vibewarp.core.edit import render_edit_frame as run_edit_backend
+    from vibewarp.core.contact_sheet import (
+        PREFERRED_KONTEXT_RESOLUTIONS,
+        assemble_contact_sheet, choose_sheet_layout, sheet_manifest,
+        split_contact_sheet)
+    from vibewarp.core.model_loader import (
+        is_flux_model, is_hidream_model, is_mage_flow_edit_model,
+        is_qwen_edit_model)
+
+    config = ctx.config
+    sheet_config = config.contact_sheet
+    if is_flux_model(config.model_version):
+        family, edit_config = 'flux', config.flux
+    elif is_hidream_model(config.model_version):
+        family, edit_config = 'hidream', config.hidream
+    elif is_qwen_edit_model(config.model_version):
+        family, edit_config = 'qwen', config.qwen
+    elif is_mage_flow_edit_model(config.model_version):
+        family, edit_config = 'mage', config.mage
+    else:
+        raise ValueError('Contact sheets require an image-edit model')
+    preferred_resolutions = PREFERRED_KONTEXT_RESOLUTIONS
+    if family == 'hidream':
+        from vibewarp.core.hidream_comfy import HIDREAM_TRAINED_RESOLUTIONS
+        preferred_resolutions = HIDREAM_TRAINED_RESOLUTIONS
+    debug_dir = os.path.join(ctx.batch_folder, 'debug')
+    os.makedirs(ctx.batch_folder, exist_ok=True)
+    if sheet_config.save_debug:
+        os.makedirs(debug_dir, exist_ok=True)
+
+    groups = _contact_sheet_groups(ctx, sequence_start, end_frame)
+    groups = [
+        group for group in groups
+        if any(cell.accept and cell.frame_num >= start_frame for cell in group)
+    ]
+    output_paths: List[str] = []
+    total_frames = end_frame - start_frame
+    pbar = tqdm(total=total_frames, desc='Contact sheets')
+
+    for group in groups:
+        raise_if_cancelled()
+        target_cells = [cell for cell in group if cell.accept]
+        first_target = target_cells[0].frame_num
+        images = [_load_contact_sheet_cell(ctx, cell, fmt) for cell in group]
+        layout = choose_sheet_layout(
+            (config.video.width, config.video.height),
+            len(images), sheet_config.layout,
+            sheet_config.gutter, preferred_resolutions)
+        sheet = assemble_contact_sheet(images, layout)
+        manifest = sheet_manifest(layout, group)
+        manifest['mode'] = sheet_config.mode
+        manifest['backend'] = family
+
+        instruction = _contact_sheet_instruction(
+            group, layout, sheet_config.instruction)
+        text_prompt, neg_prompt = _resolve_edit_prompts(ctx, first_target)
+        if text_prompt:
+            target_label = (
+                'the target panel only'
+                if any(cell.role == 'anchor' for cell in group)
+                else 'each occupied panel')
+            prompt = (
+                f'{instruction}\n\nRequested visual transformation for '
+                f'{target_label}: {text_prompt}')
+        else:
+            prompt = instruction
+
+        # The first accepted target is unique even when a prompt boundary makes
+        # the initial raw group shorter than three frames. An anchor frame can
+        # otherwise equal the preceding raw group's first target and overwrite
+        # its debug artifacts.
+        debug_key = first_target
+        if sheet_config.save_debug:
+            sheet.save(os.path.join(
+                debug_dir, f'{family}_sheet_input_{debug_key:06d}.png'))
+            with open(os.path.join(
+                    debug_dir, f'{family}_sheet_manifest_{debug_key:06d}.json'),
+                    'w', encoding='utf-8') as handle:
+                json.dump(manifest, handle, indent=2)
+
+        sched = get_frame_schedule(first_target, config)
+        seed = sched['seed']
+        if not edit_config.fixed_seed and first_target > 0:
+            seed += first_target
+        with _phase(ctx, 'run_sd_total'):
+            output_sheet = run_edit_backend(
+                ctx.edit_backend if ctx.edit_backend is not None else ctx.flux_pipe,
+                config,
+                edit_image=sheet,
+                reference_images=[sheet],
+                prompt=prompt,
+                negative_prompt=neg_prompt,
+                seed=seed,
+                width=layout.canvas_size[0],
+                height=layout.canvas_size[1],
+                debug_dir=None,
+                frame_num=debug_key,
+            )
+        tiles = split_contact_sheet(output_sheet, layout, len(group))
+        if sheet_config.save_debug:
+            output_sheet.save(os.path.join(
+                debug_dir, f'{family}_sheet_output_{debug_key:06d}.png'))
+
+        for cell, tile in zip(group, tiles):
+            if not cell.accept:
+                if sheet_config.save_debug:
+                    tile.save(os.path.join(
+                        debug_dir,
+                        f'{family}_sheet_echo_{cell.frame_num:06d}.png'))
+                continue
+            if cell.frame_num < start_frame:
+                continue
+            raise_if_cancelled()
+            image = tile.resize(
+                (config.video.width, config.video.height),
+                Image.Resampling.LANCZOS)
+            if cell.frame_num > sequence_start and state.prev_frame is not None:
+                with _phase(ctx, 'colormatch_after'):
+                    image = _apply_post_colormatch(
+                        image, state.prev_frame.convert('RGB').copy(), config)
+            state.frame_num = cell.frame_num
+            state.prev_frame = image
+            filename = f'{config.batch_name}(0)_{cell.frame_num:06d}.{fmt}'
+            filepath = os.path.join(ctx.batch_folder, filename)
+            image.save(filepath)
+            output_paths.append(filepath)
+            if ctx.save_frame_fn:
+                ctx.save_frame_fn(image, cell.frame_num)
+            if ctx.progress_fn:
+                ctx.progress_fn(len(output_paths), total_frames)
+            pbar.update(1)
+
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    pbar.close()
+    return output_paths
 
 
 # ---- Frame loop ----
@@ -2179,6 +2502,18 @@ def run_frames(
                 f"{previous_path}")
         with Image.open(previous_path) as previous:
             state.prev_frame = previous.convert('RGB').copy()
+
+    from vibewarp.core.model_loader import is_edit_model
+    if (is_edit_model(config.model_version)
+            and config.contact_sheet.mode != 'off'):
+        return run_frames_contact_sheet(
+            ctx,
+            sequence_start=sequence_start,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            fmt=fmt,
+            state=state,
+        )
 
     # Pre-cache all unique prompt embeddings (CLIP on GPU once, then offload)
     _precache_conditioning(ctx, start_frame, end_frame)

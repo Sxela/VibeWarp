@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Union, get_args, get_origin, get_type_hints
 
 from vibewarp.config import (
     FLUX_MODEL_DEFAULTS, MAGE_MODEL_DEFAULTS, QWEN_MODEL_DEFAULTS, ColorConfig,
-    EditReferenceConfig, FluxConfig, HiDreamConfig, MageFlowEditConfig,
+    ContactSheetConfig, EditReferenceConfig, FluxConfig, HiDreamConfig, MageFlowEditConfig,
     QwenEditConfig, RunConfig,
     flux_model_files,
     mage_model_defaults,
@@ -51,6 +51,8 @@ FIELD_CHOICES = {
     "HiDreamConfig.patch_seam_blend": ["median", "average", "window"],
     "QwenEditConfig.sampler": ["euler", "dpmpp_2m", "dpmpp_2m_sde"],
     "QwenEditConfig.scheduler": ["simple", "normal", "sgm_uniform"],
+    "ContactSheetConfig.mode": ["off", "raw_triplets", "reinject"],
+    "ContactSheetConfig.layout": ["adaptive", "row", "column", "grid"],
     "MageFlowEditConfig.sampler": ["euler", "dpmpp_2m", "dpmpp_2m_sde"],
     "MageFlowEditConfig.scheduler": ["simple", "normal", "sgm_uniform"],
     "RunConfig.lora_merge_precision": ["fp16", "fp32"],
@@ -555,6 +557,25 @@ def validate_config(
                 error("qwen.guidance_scale", "Qwen guidance cannot be negative")
             if config.qwen.lora_strength < 0:
                 error("qwen.lora_strength", "Qwen LoRA strength cannot be negative")
+    if config.contact_sheet.mode not in FIELD_CHOICES["ContactSheetConfig.mode"]:
+        error("contact_sheet.mode", "Unknown contact-sheet mode")
+    if config.contact_sheet.layout not in FIELD_CHOICES["ContactSheetConfig.layout"]:
+        error("contact_sheet.layout", "Unknown contact-sheet layout")
+    if config.contact_sheet.gutter < 0:
+        error("contact_sheet.gutter", "Contact-sheet gutter cannot be negative")
+    if config.contact_sheet.mode != 'off':
+        if family not in ('flux', 'hidream', 'qwen', 'mage'):
+            error("contact_sheet.mode",
+                  "Contact sheets require a ComfyUI image-edit model")
+        elif family == 'flux' and config.flux.backend != 'comfy':
+            error("contact_sheet.mode",
+                  "Contact sheets currently require the ComfyUI Flux backend")
+        else:
+            refs = getattr(config, family).references
+            if any(ref.source != 'none' for ref in refs[1:]):
+                error(
+                    f"{family}.references",
+                    "Contact-sheet mode does not yet support optional references")
     return errors
 
 

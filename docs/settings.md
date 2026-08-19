@@ -171,11 +171,40 @@ changing either behavior. `average` is the lightest multi-image choice;
 attention context.
 
 The weight-type selector includes the current ComfyUI IPAdapter Plus
-`composition precise` preset for both SD1.5 and SDXL. It keeps the
-composition-bearing attention blocks at full weight and applies a 10% signal
-to the other selected blocks, reducing style leakage while retaining the
-reference layout. This is a layer-weight preset; it is independent of the
-adapter checkpoint and the multi-image combine method.
+`composition precise` preset for both SD1.5 and SDXL. Like its mirror
+`style transfer precise`, it works in two stages. First a layer-weight map:
+on SDXL the style and composition blocks (6 and 3) stay at full weight and
+every other block drops to 10%; on SD1.5 only blocks 6-8 drop to 10%, block 4
+sits at 25%, and the rest stay at full weight. Second, and more importantly,
+the attention patch inverts every layer that is *not* composition-bearing —
+its conditioning moves into the unconditional slot, so the unwanted signal is
+actively suppressed rather than merely turned down. `style transfer precise`
+inverts the complement (the composition blocks) to the same end.
+
+These are layer-weight presets; they are independent of the adapter
+checkpoint and the multi-image combine method. Upstream also exposes
+`composition_boost` / `style_boost` to decouple the two weights — VibeWarp
+applies a single weight to both, which matches upstream's behaviour when no
+boost is set.
+
+**Layer numbering.** Every preset above is keyed by the index of the
+SpatialTransformer module in UNet *execution* order — input blocks, then the
+middle block, then output blocks (ComfyUI calls this `transformer_index`).
+That is deliberately **not** the order the adapter checkpoint stores its
+`to_kvs` layers in, which is input, output, middle; VibeWarp tracks both
+separately. SD1.5 therefore numbers 0-15 as six input blocks, the middle
+block at 6, then nine output blocks; SDXL numbers 0-10 as four input blocks,
+the middle block at 4, then six output blocks, with every inner transformer
+block of one module sharing that module's index.
+
+The numbering is what makes the presets mean anything: SDXL layer 6 is
+`up_blocks.0.attentions.1` and layer 3 is `down_blocks.2.attentions.1`, the
+style and spatial-layout layers identified by
+[InstantStyle](https://github.com/InstantStyle/InstantStyle). Releases up to
+and including v0.6.0 keyed the presets by raw block id instead, which
+collided input against output blocks and left indices 12-15 unreachable, so
+every preset targeted the wrong layers to some degree. Renders using a
+layer-weight preset from those versions will not reproduce exactly.
 
 FaceID variants and the IP-Adapter + AnimateDiff batch combination are not yet
 parity-complete. Regular and Plus adapters on the non-AnimateDiff path are
