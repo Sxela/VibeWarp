@@ -1,5 +1,10 @@
 <script>
-  import { diffSettings, formatSettingValue } from './settingsDiff.js';
+  import {
+    annotateUnsaved,
+    diffSettings,
+    formatSettingValue,
+    unsavedOnlyRows,
+  } from './settingsDiff.js';
   import {
     filterRunsByMinimumFrames,
     frameAfterRunLoad,
@@ -96,8 +101,13 @@
     let key = ids.join(':');
     diffLoading = true; diffError = '';
     try {
+      // overlay_system=false: with the overlay on, BOTH runs are stamped with
+      // this machine's current system tier, so any difference in multiscale,
+      // the tiled sampler, caching and so on silently reads as "no change" —
+      // even though those visibly alter the render.
       let responses = await Promise.all(ids.map(id =>
-        fetch(`/api/preview/runs/${id}/settings?${params}`, {method: 'POST'})));
+        fetch(`/api/preview/runs/${id}/settings?${params}&overlay_system=false`,
+              {method: 'POST'})));
       let bodies = await Promise.all(responses.map(response => response.json()));
       if (compareIds.join(':') !== key) return;
       let failed = responses.findIndex(response => !response.ok);
@@ -106,7 +116,13 @@
         diffError = detail?.[0]?.message || detail || `${runName(ids[failed])} has no readable settings`;
         return;
       }
-      diffRows = diffSettings(bodies[0].config, bodies[1].config);
+      diffRows = [
+        ...annotateUnsaved(
+          diffSettings(bodies[0].config, bodies[1].config),
+          bodies[0].saved, bodies[1].saved),
+        ...unsavedOnlyRows(bodies[0].saved, bodies[1].saved,
+                           diffSettings(bodies[0].config, bodies[1].config)),
+      ];
     } catch {
       if (compareIds.join(':') === key) diffError = 'Could not load settings for comparison';
     } finally {
@@ -536,7 +552,15 @@
           <table>
             <thead><tr><th>Setting</th><th><i>A</i> {runName(compareIds[0])}</th><th><i>B</i> {runName(compareIds[1])}</th></tr></thead>
             <tbody>{#each diffRows as row (row.path)}
-              <tr><th>{row.path}</th><td><code>{formatSettingValue(row.left)}</code></td><td><code>{formatSettingValue(row.right)}</code></td></tr>
+              <tr>
+                <th>{row.path}</th>
+                <td>{#if row.leftSaved === false}<em class="unsaved"
+                       title="This run's settings file has no such key — it predates the setting, or never wrote it"
+                       >not saved</em>{:else}<code>{formatSettingValue(row.left)}</code>{/if}</td>
+                <td>{#if row.rightSaved === false}<em class="unsaved"
+                       title="This run's settings file has no such key — it predates the setting, or never wrote it"
+                       >not saved</em>{:else}<code>{formatSettingValue(row.right)}</code>{/if}</td>
+              </tr>
             {/each}</tbody>
           </table>
         {/if}
@@ -546,6 +570,7 @@
 {/if}
 
 <style>
+  .unsaved{color:#68717d;font-style:italic;font-size:11px}
   /* NOT `.preview`: style.css already owns that class for the render monitor's thumbnail,
      and its `max-height:320px` was clamping this whole shell to 320px -- the layout cut off
      mid-screen, the image was cropped and the chips were pushed out of view.

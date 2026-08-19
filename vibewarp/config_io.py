@@ -237,17 +237,25 @@ def config_from_json(path: str | Path) -> RunConfig:
         return config_from_dict(json.load(handle))
 
 
-def config_from_settings(path: str | Path, models_root: str | None = None) -> RunConfig:
-    """Load nested JSON, VibeWarp saved settings, or WarpFusion settings."""
+def settings_as_dict(path: str | Path, models_root: str | None = None) -> dict:
+    """The nested settings a file actually specifies, BEFORE defaults fill in.
+
+    Comparing two runs needs this: once defaults are applied, a setting a run
+    never saved is indistinguishable from one saved at its default value, so a
+    run that predates a feature looks like it opted out of it.
+    """
     from vibewarp.settings import is_vibewarp_settings, load_settings, load_vibewarp_settings, load_warpfusion_settings
     raw = load_settings(str(path))
     if any(isinstance(raw.get(key), dict) for key in ("diffusion", "video", "flow")):
-        data = raw
-    elif is_vibewarp_settings(raw):
-        data = load_vibewarp_settings(str(path))
-    else:
-        data = load_warpfusion_settings(str(path), models_root=models_root)
-    return config_from_dict(data)
+        return raw
+    if is_vibewarp_settings(raw):
+        return load_vibewarp_settings(str(path))
+    return load_warpfusion_settings(str(path), models_root=models_root)
+
+
+def config_from_settings(path: str | Path, models_root: str | None = None) -> RunConfig:
+    """Load nested JSON, VibeWarp saved settings, or WarpFusion settings."""
+    return config_from_dict(settings_as_dict(path, models_root=models_root))
 
 
 def config_to_dict(config: RunConfig) -> dict:

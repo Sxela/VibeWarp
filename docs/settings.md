@@ -201,10 +201,26 @@ The numbering is what makes the presets mean anything: SDXL layer 6 is
 `up_blocks.0.attentions.1` and layer 3 is `down_blocks.2.attentions.1`, the
 style and spatial-layout layers identified by
 [InstantStyle](https://github.com/InstantStyle/InstantStyle). Releases up to
-and including v0.6.0 keyed the presets by raw block id instead, which
+and including v0.7.0 keyed the presets by raw block id instead, which
 collided input against output blocks and left indices 12-15 unreachable, so
-every preset targeted the wrong layers to some degree. Renders using a
-layer-weight preset from those versions will not reproduce exactly.
+every preset targeted the wrong layers to some degree.
+
+Separately, `weak input`, `weak middle`, `weak output` and `strong middle` did
+nothing at all up to v0.7.1. Each scales one class of block by 0.2, but the
+check read an attribute that held the attention *class* rather than the block
+flag, so no branch ever matched and all four behaved exactly like `linear`.
+They work now: `weak *` attenuates its own block class, and `strong middle`
+attenuates input and output so the middle block dominates.
+
+Set `ipadapter.legacy_layer_indexing` to reproduce renders made with those
+versions. It restores the old numbering exactly, keeps the four block-type
+presets inert as they were, and is off by default. It
+matters for every `weight_type` that consults the index, which is more than it
+looks: the `ease in`/`ease out`/`ease in-out`/`reverse in-out` family scales by
+the index directly and changes on nearly every layer, and all the
+style/composition presets move too. Two cases are unaffected either way —
+`linear`, which resolves to one scalar and never reads the index, and
+`strong style and composition`, whose map is uniform across all 16 layers.
 
 FaceID variants and the IP-Adapter + AnimateDiff batch combination are not yet
 parity-complete. Regular and Plus adapters on the non-AnimateDiff path are

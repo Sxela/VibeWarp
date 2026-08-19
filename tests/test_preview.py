@@ -623,3 +623,70 @@ class TestVideoCacheBusting:
 
         build_run(tmp_path, "0")
         assert list_runs(str(tmp_path), "warpfusion")[0]["video_modified"] is None
+
+
+class TestSettingsComparison:
+    """Comparing two runs must report what each RAN with. The system-tier
+    overlay exists so loading an old run cannot repoint this machine's model
+    paths — but applied to a comparison it stamps both sides with the current
+    machine's values, so real differences read as 'no change'. Multiscale and
+    the tiled sampler live in that tier and visibly alter the render."""
+
+    def write_run(self, tmp_path, run_id, **diffusion):
+        import json
+        run = tmp_path / "warpfusion" / run_id
+        (run / "settings").mkdir(parents=True)
+        (run / f"warpfusion({run_id})_{0:06d}.png").write_bytes(b"out")
+        payload = {"diffusion": {"steps": 20, **diffusion}}
+        (run / "settings" / f"warpfusion({run_id})_settings.txt").write_text(
+            json.dumps(payload))
+        return str(tmp_path)
+
+    def test_overlay_hides_system_tier_differences(self, tmp_path, monkeypatch):
+        from vibewarp import system_settings
+
+        self.write_run(tmp_path, "1", sampler_tile_size=768)
+        root = self.write_run(tmp_path, "2", sampler_tile_size=512)
+        monkeypatch.setattr(
+            system_settings, "load",
+            lambda: {"diffusion": {"sampler_tile_size": 640}})
+
+        api = client()
+        params = {"output_dir": root, "batch_name": "warpfusion"}
+
+        def tile(run_id, overlay):
+            body = api.post(f"/api/preview/runs/{run_id}/settings",
+                            params={**params, "overlay_system": overlay}).json()
+            return body["config"]["diffusion"]["sampler_tile_size"]
+
+        # With the overlay both runs report this machine's 640 -- the bug.
+        assert tile("1", True) == tile("2", True) == 640
+        # Without it, each run reports what it actually rendered with.
+        assert tile("1", False) == 768
+        assert tile("2", False) == 512
+
+    def test_saved_reports_only_what_the_file_specified(self, tmp_path):
+        root = self.write_run(tmp_path, "1", sampler_tile_size=768)
+        api = client()
+        body = api.post("/api/preview/runs/1/settings",
+                        params={"output_dir": root, "batch_name": "warpfusion",
+                                "overlay_system": False}).json()
+
+        assert body["saved"]["diffusion"]["sampler_tile_size"] == 768
+        # Never written to this file, so it must not appear as if it were
+        # chosen; the loaded config still carries its default.
+        assert "sampler_scale_schedule" not in body["saved"]["diffusion"]
+        assert "sampler_scale_schedule" in body["config"]["diffusion"]
+
+    def test_settings_as_dict_does_not_invent_defaults(self, tmp_path):
+        from vibewarp.config_io import config_from_settings, settings_as_dict
+
+        root = self.write_run(tmp_path, "1", sampler_tile_size=768)
+        path = os.path.join(root, "warpfusion", "1", "settings",
+                            "warpfusion(1)_settings.txt")
+        saved = settings_as_dict(path)
+        config = config_from_settings(path)
+
+        assert saved["diffusion"] == {"steps": 20, "sampler_tile_size": 768}
+        assert config.diffusion.sampler_tile_size == 768   # defaults filled in
+        assert config.diffusion.sampler_scale_schedule    # present on the config

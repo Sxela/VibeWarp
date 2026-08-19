@@ -497,6 +497,14 @@ class IPAdapterConfig:
     cache_embeddings: bool = True  # notebook: cache_ipadapter
     cache_size: int = 10  # notebook: ipadapter_embeds_cache_size
     flip_uc: bool = False  # notebook: ip_flip_uc — flip the uncond mask in hooks
+    # Address the layer-weight presets the way VibeWarp did before 0.7.1: by a
+    # block's index within its own list rather than by execution order. That
+    # numbering is wrong (it collides input against output blocks and never
+    # reaches the last few entries) and matches no other implementation, so it
+    # exists only to reproduce renders made with an older version. It affects
+    # every weight_type that consults the index — the ease/reverse family and
+    # all the style/composition presets — but not 'linear'.
+    legacy_layer_indexing: bool = False
 
 
 @dataclass

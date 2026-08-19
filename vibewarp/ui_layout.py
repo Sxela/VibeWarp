@@ -100,6 +100,8 @@ LABELS: Dict[str, str] = {
     'diffusion.unet_cache_interval': 'DeepCache interval',
     'diffusion.unet_cache_threshold': 'First Block similarity threshold',
     'diffusion.compile_unet': 'Compile U-Net, ControlNets, and VAE',
+    'ipadapter.legacy_layer_indexing':
+        'Legacy layer addressing (pre-0.7.1 renders)',
     'controlnet.pose_include_body': 'Detect body',
     'controlnet.pose_include_hand': 'Detect hands',
     'controlnet.pose_include_face': 'Detect face',
@@ -164,7 +166,8 @@ _assign('render', 'ControlNet',
         'controlnet.enabled', 'controlnet.models', 'controlnet.mode',
         'controlnet.cond_image_src', 'controlnet.normalize_weights')
 _assign('render', 'IP-Adapter',
-        'ipadapter.enabled', 'ipadapter.models', 'ipadapter.flip_uc')
+        'ipadapter.enabled', 'ipadapter.models', 'ipadapter.flip_uc',
+        'ipadapter.legacy_layer_indexing')
 # Flux 2 Klein Edit (diffusers). Only active when model_version='flux2_klein_edit';
 # the fields live on the Render tab so the edit knobs sit next to the prompts they
 # drive. model_repo is a machine path and goes to System > Paths (below).

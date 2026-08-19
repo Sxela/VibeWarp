@@ -413,6 +413,7 @@ def hook_ipadapter(
     is_v2: bool = False,
     combine_embeds: str = 'concat',
     flip_uc: bool = False,
+    legacy_layer_indexing: bool = False,
 ) -> None:
     """Hook an IP-Adapter into the SD model's UNet cross-attention blocks.
 
@@ -446,6 +447,7 @@ def hook_ipadapter(
         combine_embeds=combine_embeds,
         embeds_scaling=embeds_scaling,
         flip_uc=flip_uc,
+        legacy_layer_indexing=legacy_layer_indexing,
     )
 
     # Store reference for cleanup

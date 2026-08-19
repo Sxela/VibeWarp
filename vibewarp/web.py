@@ -6,7 +6,7 @@ from threading import Timer
 from urllib.parse import urlsplit
 from PIL import Image
 from vibewarp.config import RunConfig, flux_model_files, qwen_model_files
-from vibewarp.config_io import ConfigError, apply_path_defaults, config_from_dict, config_from_settings, config_schema, strip_path_quotes, validate_config
+from vibewarp.config_io import ConfigError, apply_path_defaults, config_from_dict, config_from_settings, config_schema, settings_as_dict, strip_path_quotes, validate_config
 from vibewarp.controlnet_catalog import CONTROLNET_MODES, MODE_PRESETS, specs_for_version
 from vibewarp.ipadapter_catalog import specs_for_version as ipadapter_specs_for_version
 from vibewarp import system_settings
@@ -332,12 +332,19 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
 
     @app.post("/api/preview/runs/{run_id}/settings")
     def preview_run_settings(run_id: str, output_dir: str = "images_out",
-                             batch_name: str = "warpfusion"):
+                             batch_name: str = "warpfusion",
+                             overlay_system: bool = True):
         """Load an old run's saved settings back into the form.
 
         Goes through the same loader as an imported settings file, so a run's config comes
         back exactly as if you had exported and re-imported it -- including the system-tier
         overlay, so pulling in an old run cannot repoint this machine's model paths.
+
+        `overlay_system=false` skips that overlay and reports what the run
+        actually saved. Comparing two runs MUST use it: the overlay stamps both
+        with this machine's current system tier, which silently hides any
+        difference in the settings it covers -- and some of those, multiscale
+        and the tiled sampler especially, visibly change the render.
         """
         run = run_dir(output_dir, batch_name, run_id)
         if run is None:
@@ -348,9 +355,15 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
                 "path": "run", "message": f"Run {run_id} saved no settings"}])
         try:
             config = config_from_settings(path)
+            saved = settings_as_dict(path)
         except (ConfigError, ValueError, json.JSONDecodeError, TypeError) as exc:
             raise HTTPException(422, detail=[{"path": "run", "message": str(exc)}])
-        return {"config": system_settings.overlay(asdict(_ui_config(config))),
+        payload = asdict(_ui_config(config))
+        if overlay_system:
+            payload = system_settings.overlay(payload)
+        # `saved` carries only what the file specified, so a comparison can tell
+        # "ran with the default" apart from "predates this setting entirely".
+        return {"config": payload, "saved": saved,
                 "source": os.path.basename(path)}
 
     @app.get("/api/preview/runs/{run_id}/image")

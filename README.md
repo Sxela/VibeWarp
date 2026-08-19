@@ -33,7 +33,9 @@ form to iterate on it. Press play on the frame stepper to loop the rendered fram
 place — judge motion without assembling a video first, including part-way through a
 render. Cancelled runs keep their completed frames: resume from the first missing frame,
 assemble a partial video at any time, and play assembled videos in place.
-Ctrl/Cmd-click any two runs to compare every changed saved setting side by side.
+Ctrl/Cmd-click any two runs to compare every changed saved setting side by side —
+including settings one run predates entirely, which show as **not saved** rather than
+silently reading as agreement.
 
 ![The history view: past runs on the left, and one frame compared across its layers](docs/assets/ui-history.jpg)
 

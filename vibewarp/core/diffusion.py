@@ -1345,6 +1345,7 @@ def _update_ipadapter_for_frame(ctx: RenderContext, state: FrameState) -> None:
             is_v2='v2' in os.path.basename(adapter_path).lower(),
             combine_embeds=combine_method,
             flip_uc=config.ipadapter.flip_uc,
+            legacy_layer_indexing=config.ipadapter.legacy_layer_indexing,
         )
         print(
             f"  Applied IP-Adapter {ipa_key}: frame={frame_num}, "

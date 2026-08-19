@@ -429,7 +429,10 @@ def hack_blk(block, function, type):
         all_hacks[block] = block.forward
         block.forward = attn_forward_hacked.__get__(block, type)
 
-    block.type = type
+    # NOT `block.type = type`: that shadowed nn.Module.type(), and the forward
+    # then compared the attention CLASS against 'input'/'middle'/'output', so
+    # the four block-type presets silently did nothing. The flag now travels as
+    # `ip_block_type`, set by the callers below, which actually know it.
     block.ipadapter_hacks.append(function)
     return
 
@@ -441,6 +444,7 @@ def set_model_attn2_replace(model, function, flag, id):
     # across input/output and it is not what the weight presets are keyed by --
     # patch_forward takes the real transformer index. Kept for debugging only.
     block.id = id
+    block.ip_block_type = flag   # 'input' | 'middle' | 'output'
     hack_blk(block, function, CrossAttention)
     return
 
@@ -450,6 +454,7 @@ def set_model_patch_replace(model, function, flag, id, trans_id):
     blk = get_block(model, flag)
     block = blk[id][1].transformer_blocks[trans_id].attn2
     block.id = id  # debugging only -- see the note in set_model_attn2_replace
+    block.ip_block_type = flag   # 'input' | 'middle' | 'output'
     hack_blk(block, function, CrossAttention)
     return
 
@@ -561,7 +566,8 @@ class PlugableIPAdapter(torch.nn.Module):
                       weight_type="linear",
                       combine_embeds="concat",
                       embeds_scaling='V only',
-                      flip_uc=False):
+                      flip_uc=False,
+                      legacy_layer_indexing=False):
         global current_model
         current_model = model
 
@@ -613,6 +619,15 @@ class PlugableIPAdapter(torch.nn.Module):
         # patch_forward(i, transformer_id.transformer_index). On SDXL every
         # inner transformer block of one SpatialTransformer shares that
         # module's t_idx, which is why there are 11 t_idx values but 70 hooks.
+        #
+        # legacy_layer_indexing restores what every VibeWarp release before
+        # 0.7.1 did: address the presets by the block's index within its own
+        # list. That numbering collides input against output and never reaches
+        # the highest few entries, so it does not match ComfyUI or any other
+        # implementation — it exists purely to reproduce older renders.
+        def addressing(execution_index: int, block_id: int) -> int:
+            return block_id if legacy_layer_indexing else execution_index
+
         if not self.sdxl:
             input_ids = [1, 2, 4, 5, 7, 8]  # input_blocks with cross attention
             output_ids = [3, 4, 5, 6, 7, 8, 9, 10, 11]  # ditto, output_blocks
@@ -621,15 +636,19 @@ class PlugableIPAdapter(torch.nn.Module):
             number = 0  # index of to_kvs
             for t_idx, id in enumerate(input_ids):
                 set_model_attn2_replace(
-                    model, self.patch_forward(number, t_idx), "input", id)
+                    model, self.patch_forward(number, addressing(t_idx, id)),
+                    "input", id)
                 number += 1
             for offset, id in enumerate(output_ids):
                 set_model_attn2_replace(
-                    model, self.patch_forward(number, first_output_t_idx + offset),
+                    model,
+                    self.patch_forward(
+                        number, addressing(first_output_t_idx + offset, id)),
                     "output", id)
                 number += 1
             set_model_attn2_replace(
-                model, self.patch_forward(number, middle_t_idx), "middle", 0)
+                model, self.patch_forward(number, addressing(middle_t_idx, 0)),
+                "middle", 0)
         else:
             input_ids = [4, 5, 7, 8]  # id of input_blocks with cross attention
             middle_t_idx = len(input_ids)          # 4
@@ -639,19 +658,21 @@ class PlugableIPAdapter(torch.nn.Module):
                 block_indices = range(2) if id in [4, 5] else range(10)  # transformer_depth
                 for index in block_indices:
                     set_model_patch_replace(
-                        model, self.patch_forward(number, t_idx),
+                        model, self.patch_forward(number, addressing(t_idx, id)),
                         "input", id, index)
                     number += 1
             for id in range(6):  # id of output_blocks that have cross attention
                 block_indices = range(2) if id in [3, 4, 5] else range(10)  # transformer_depth
                 for index in block_indices:
                     set_model_patch_replace(
-                        model, self.patch_forward(number, first_output_t_idx + id),
+                        model,
+                        self.patch_forward(
+                            number, addressing(first_output_t_idx + id, id)),
                         "output", id, index)
                     number += 1
             for index in range(10):
                 set_model_patch_replace(
-                    model, self.patch_forward(number, middle_t_idx),
+                    model, self.patch_forward(number, addressing(middle_t_idx, 0)),
                     "middle", 0, index)
                 number += 1
 
@@ -661,6 +682,7 @@ class PlugableIPAdapter(torch.nn.Module):
         self.weight_type = weight_type
         self.combine_embeds = combine_embeds
         self.embeds_scaling = embeds_scaling
+        self.legacy_layer_indexing = legacy_layer_indexing
 
         if isinstance(weight, list):
             weight = weight[0]
@@ -726,7 +748,13 @@ class PlugableIPAdapter(torch.nn.Module):
             head_dim = inner_dim // h
 
             #ipadapter plus stuff
-            block_type = attn_blk.type 
+            block_type = getattr(attn_blk, 'ip_block_type', None)
+            if self.legacy_layer_indexing:
+                # Before 0.7.1 this held the attention class, so it never
+                # matched a block-type preset and 'weak input' / 'weak middle' /
+                # 'weak output' / 'strong middle' were all no-ops. Reproducing
+                # an old render means reproducing that.
+                block_type = None
             layers = 11 if '101_to_k_ip' in self.ipadapter.ip_layers.to_kvs else 16
             module_key = number * 2 + 1
             weight_type = self.weight_type

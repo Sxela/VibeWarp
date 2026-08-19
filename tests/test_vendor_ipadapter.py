@@ -496,3 +496,141 @@ class TestHookForwardUnhook:
             gated = attn(x, context=ctx)
             plain = sdpa_reference(attn, x, ctx)
         assert torch.allclose(gated, plain, atol=1e-5)
+
+
+class TestLegacyLayerAddressing(TestHookForwardUnhook):
+    """Every release before 0.7.1 addressed the layer-weight presets by a
+    block's index within its own list. That numbering collides input against
+    output blocks and never reaches the last few entries, so it matches no
+    other implementation — but renders were made with it, and reproducing them
+    needs it back."""
+
+    def _hook_legacy(self, unet, adapter, weight_type):
+        adapter.hook(
+            model=unet,
+            clip_vision_output={'image_embeds': torch.randn(1, CLIP_DIM)},
+            weight=1.0, start=0.0, end=1.0, weight_type=weight_type,
+            embeds_scaling='V only', legacy_layer_indexing=True)
+
+    def test_legacy_targets_the_old_blocks(self):
+        """`composition` is {4: w*0.25, 5: w}. Under execution order that is
+        the two deepest input blocks; under block ids it hit input 4/5 AND
+        output 4/5, because those ids collide."""
+        torch.manual_seed(20)
+        adapter = PlugableIPAdapter(make_sd15_adapter_state())
+        unet = make_fake_unet()
+        x = torch.randn(2, 8, INNER)
+        ctx = torch.randn(2, 77, CROSS_DIM)
+
+        self._hook_legacy(unet, adapter, 'composition')
+        unet.uc_mask_shape = torch.tensor([0.0, 1.0])
+        assert self._active_blocks(unet, x, ctx) == [
+            'input[4]', 'input[5]', 'output[4]', 'output[5]']
+
+    def test_default_stays_on_the_corrected_addressing(self):
+        torch.manual_seed(21)
+        adapter = PlugableIPAdapter(make_sd15_adapter_state())
+        unet = make_fake_unet()
+        x = torch.randn(2, 8, INNER)
+        ctx = torch.randn(2, 77, CROSS_DIM)
+
+        self._hook(unet, adapter, weight=1.0, weight_type='composition')
+        unet.uc_mask_shape = torch.tensor([0.0, 1.0])
+        assert self._active_blocks(unet, x, ctx) == ['input[7]', 'input[8]']
+
+    def test_linear_is_identical_either_way(self):
+        """'linear' resolves to a scalar and never consults the index, so the
+        legacy switch must be a no-op for it — the common case is unaffected."""
+        torch.manual_seed(22)
+        x = torch.randn(2, 8, INNER)
+        ctx = torch.randn(2, 77, CROSS_DIM)
+        outputs = []
+        for legacy in (False, True):
+            clear_all_ip_adapter()
+            torch.manual_seed(99)
+            adapter = PlugableIPAdapter(make_sd15_adapter_state())
+            unet = make_fake_unet()
+            adapter.hook(
+                model=unet,
+                clip_vision_output={'image_embeds': torch.zeros(1, CLIP_DIM)},
+                weight=1.0, start=0.0, end=1.0, weight_type='linear',
+                embeds_scaling='V only', legacy_layer_indexing=legacy)
+            unet.uc_mask_shape = torch.tensor([0.0, 1.0])
+            attn = unet.input_blocks[1][1].transformer_blocks[0].attn2
+            with torch.no_grad():
+                outputs.append(attn(x, context=ctx))
+        assert torch.allclose(outputs[0], outputs[1], atol=1e-6)
+
+
+class TestBlockTypePresets:
+    """weak input/middle/output and strong middle scale one class of block by
+    0.2. They were dead: the forward compared `attn_blk.type` -- which held the
+    attention CLASS, because setting it also shadowed nn.Module.type() --
+    against 'input'/'middle'/'output', so no branch ever matched and all four
+    presets behaved exactly like 'linear'."""
+
+    def teardown_method(self):
+        clear_all_ip_adapter()
+
+    def contributions(self, weight_type, legacy=False):
+        """IP contribution per block class, relative to the plain attention."""
+        clear_all_ip_adapter()
+        torch.manual_seed(5)
+        adapter = PlugableIPAdapter(make_sd15_adapter_state())
+        unet = make_fake_unet()
+        adapter.hook(
+            model=unet,
+            clip_vision_output={'image_embeds': torch.randn(1, CLIP_DIM)},
+            weight=1.0, start=0.0, end=1.0, weight_type=weight_type,
+            embeds_scaling='V only', legacy_layer_indexing=legacy)
+        unet.uc_mask_shape = torch.tensor([0.0, 1.0])
+
+        x = torch.randn(2, 8, INNER)
+        ctx = torch.randn(2, 77, CROSS_DIM)
+        out = {}
+        for label, attn in (
+                ('input', unet.input_blocks[1][1].transformer_blocks[0].attn2),
+                ('middle', unet.middle_block[1].transformer_blocks[0].attn2),
+                ('output', unet.output_blocks[3][1].transformer_blocks[0].attn2)):
+            with torch.no_grad():
+                delta = attn(x, context=ctx) - sdpa_reference(attn, x, ctx)
+            out[label] = delta.abs().sum().item()
+        return out
+
+    def ratios(self, weight_type, legacy=False):
+        base = self.contributions('linear', legacy=legacy)
+        got = self.contributions(weight_type, legacy=legacy)
+        return {k: round(got[k] / base[k], 2) for k in got}
+
+    @pytest.mark.parametrize('weight_type,expected', [
+        ('weak input', {'input': 0.2, 'middle': 1.0, 'output': 1.0}),
+        ('weak middle', {'input': 1.0, 'middle': 0.2, 'output': 1.0}),
+        ('weak output', {'input': 1.0, 'middle': 1.0, 'output': 0.2}),
+        # Everything BUT the middle is weakened, leaving it dominant.
+        ('strong middle', {'input': 0.2, 'middle': 1.0, 'output': 0.2}),
+    ])
+    def test_weakens_only_its_own_block_class(self, weight_type, expected):
+        assert self.ratios(weight_type) == expected
+
+    @pytest.mark.parametrize('weight_type', [
+        'weak input', 'weak middle', 'weak output', 'strong middle'])
+    def test_legacy_keeps_them_inert(self, weight_type):
+        """Old renders were made with these doing nothing, so reproducing one
+        has to keep them doing nothing."""
+        assert self.ratios(weight_type, legacy=True) == {
+            'input': 1.0, 'middle': 1.0, 'output': 1.0}
+
+    def test_block_type_no_longer_shadows_module_type(self):
+        """`block.type = CrossAttention` clobbered nn.Module.type(), so casting
+        a hooked block raised TypeError."""
+        adapter = PlugableIPAdapter(make_sd15_adapter_state())
+        unet = make_fake_unet()
+        adapter.hook(
+            model=unet,
+            clip_vision_output={'image_embeds': torch.randn(1, CLIP_DIM)},
+            weight=1.0, start=0.0, end=1.0, weight_type='linear',
+            embeds_scaling='V only')
+        attn = unet.input_blocks[1][1].transformer_blocks[0].attn2
+        assert callable(attn.type)
+        assert attn.type(torch.float32) is attn      # nn.Module.type()
+        assert attn.ip_block_type == 'input'
