@@ -4,7 +4,6 @@ import json
 import os
 from typing import Optional, Tuple
 
-from huggingface_hub import hf_hub_download
 
 from vibewarp.controlnet_catalog import CONTROLNET_CATALOG, controlnet_filenames
 
@@ -50,28 +49,10 @@ def _parse_hf_url(url: str) -> Optional[Tuple[str, str, str]]:
 def _hf_download(repo_id: str, filename: str, local_dir: str, save_as: str = None,
                  repo_type: str = "model") -> str:
     """Download a file from HuggingFace; skip if already present. Returns local path."""
-    dest_name = save_as or os.path.basename(filename)
-    dest_path = os.path.join(local_dir, dest_name)
-    if os.path.exists(dest_path):
-        size_mb = os.path.getsize(dest_path) / 1024 / 1024
-        print(f"  already exists ({size_mb:.0f} MB): {dest_path}", flush=True)
-        return dest_path
-
-    print(f"  downloading {repo_id}/{filename} -> {dest_path}", flush=True)
-    tmp_path = hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-        local_dir=local_dir,
-        local_dir_use_symlinks=False,
-        repo_type=repo_type,
-    )
-    tmp_path = os.path.realpath(tmp_path)
-    flat_dest = os.path.join(local_dir, os.path.basename(tmp_path))
-    if flat_dest != dest_path:
-        os.rename(flat_dest, dest_path)
-    size_mb = os.path.getsize(dest_path) / 1024 / 1024
-    print(f"  saved ({size_mb:.0f} MB): {dest_path}", flush=True)
-    return dest_path
+    from huggingface_hub import hf_hub_url
+    from vibewarp.acquisition import acquire
+    dest_path = os.path.join(local_dir, save_as or os.path.basename(filename))
+    return acquire(hf_hub_url(repo_id, filename, repo_type=repo_type), dest_path)
 
 
 def cn_keys_from_settings(settings_path: str) -> list:

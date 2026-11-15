@@ -7,6 +7,12 @@ import { derive, fitDimensions, framesInRange, renderableFrames } from './videoM
 // test_web_api.py pins the same numbers on the Python side.
 
 describe('fitDimensions', () => {
+  it('rounds Disco source and manual sizes upward to 64',()=>{
+    expect(fitDimensions(1280,720,768,64,true)).toEqual({width:768,height:448});
+    expect(fitDimensions(1920,1080,1000,64,true)).toEqual({width:1024,height:576});
+    expect(derive({width:1920,height:1080,frames:10},0,1,[0,0],64,true,{width:513,height:431}).render)
+      .toEqual({width:576,height:448});
+  });
   it('caps the long edge and snaps to a multiple of 8', () => {
     expect(fitDimensions(1280, 720, 768)).toEqual({width: 768, height: 432});
   });
@@ -60,6 +66,12 @@ describe('framesInRange', () => {
 
 describe('derive', () => {
   const source = {width: 1280, height: 720, frames: 1147, fps: 29.99};
+
+  it('supports a single imported frame without changing the all-frames sentinel',()=>{
+    expect(derive(source,768,1,[0]).renderCount).toBe(1);
+    expect(derive(source,768,1,[0,10]).renderCount).toBe(11);
+    expect(derive(source,768,1,[0,0]).renderCount).toBe(source.frames);
+  });
 
   it('reports the size and count the render will actually produce', () => {
     const out = derive(source, 768, 1, [0, 0]);

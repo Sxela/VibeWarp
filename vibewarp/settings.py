@@ -104,10 +104,10 @@ _VIBEWARP_SECTIONS = [
     'animatediff', 'ipadapter',
     'diffusion', 'brightness', 'captions', 'scene', 'freeu',
     'color', 'warp', 'flow', 'video', 'mask', 'vae', 'hidream', 'flux', 'qwen',
-    'mage',
+    'mage', 'disco', 'turbo',
 ]
 _VIBEWARP_TOP_LEVEL = {
-    'sd_checkpoint_path', 'model_path', 'model_version', 'batch_name',
+    'sd_checkpoint_path', 'model_path', 'comfy_models_dir', 'model_version', 'batch_name',
     'output_dir', 'text_prompts', 'negative_prompts',
     'reference_label_opacity',
     'lora_dir', 'lora_merge_precision', 'frame_range',
@@ -322,6 +322,9 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
         Dict in VibeWarp config format (nested sub-config dicts).
     """
     raw = load_settings(settings_path)
+    if 'diffusion_model' in raw or raw.get('lora_guided_warp'):
+        from vibewarp.disco_settings import import_disco_notebook
+        return import_disco_notebook(raw, models_root)
 
     # Resolve model paths against a list of candidate model roots, searched
     # in order:
@@ -612,6 +615,7 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
             'guidance_mode': raw.get('guidance_mode', 'prev warped + cc'),
             'init_scale': _extract_scalar(raw.get('init_scale_schedule'), 0.0),
             'init_latent_scale': _extract_scalar(raw.get('latent_scale_schedule'), 0.0),
+            'temporal_guidance_cc_trusted_only': raw.get('temporal_guidance_cc_trusted_only', False),
             'clamp_grad': raw.get('clamp_grad', True),
             'clamp_max': float(raw.get('clamp_max', 2.0)),
             'guidance_add_noise': raw.get('add_noise_to_latent', True),
@@ -766,8 +770,13 @@ def load_warpfusion_settings(settings_path: str, models_root: Optional[str] = No
         },
         'mask': {
             'use_background_mask': raw.get('use_background_mask', False),
+            # The notebook extracts init_video masks itself; RVM is VibeWarp's equivalent.
+            'mask_source': ('mask video' if raw.get('mask_source') == 'mask_video'
+                            and raw.get('mask_video_path') else 'RVM matting'),
+            'mask_path': (raw.get('mask_video_path') or '') if raw.get('mask_source') == 'mask_video' else '',
             'invert_mask': raw.get('invert_mask', False),
             'apply_mask_after_warp': raw.get('apply_mask_after_warp', True),
+            'render_mask_stage': raw.get('render_mask_stage', 'before diffusion'),
             'background': raw.get('background', 'init_video'),
             'background_source': raw.get('background_source', 'red'),
             'mask_clip_low': int(raw.get('mask_clip_low', 0)),

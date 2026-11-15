@@ -42,8 +42,12 @@ def test_schema_marks_booleans_and_limited_values_for_ui_controls():
         "default", "fixed", "reconstructed"
     ]
     assert schema["diffusion"]["properties"]["guidance_mode"]["choices"] == [
-        "prev stylized", "prev warped", "prev warped + cc"
+        "prev stylized", "prev warped", "prev warped + cc", "raw frame"
     ]
+    assert schema['diffusion']['properties']['guidance_mode']['model_families'] == ['sd', 'disco']
+    for name in ('init_scale', 'image_scale'):
+        assert schema['disco']['properties'][name]['tier'] == 'hidden'
+        assert schema['disco']['properties'][name+'_schedule']['tier'] == 'render'
     assert "sample_lcm" in schema["diffusion"]["properties"]["sampler"]["choices"]
     assert schema["diffusion"]["properties"]["sampler_tile_size"]["choices"] == [
         256, 512, 768, 1024
@@ -56,7 +60,7 @@ def test_schema_marks_booleans_and_limited_values_for_ui_controls():
 
 
 def test_validation_reports_inputs_and_resolution():
-    config = RunConfig()
+    config = RunConfig(model_version='control_multi_sdxl')
     config.video.width = 513
     errors = validate_config(config)
     paths = {error["path"] for error in errors}

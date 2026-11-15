@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import io
 import os
+import re
 import sys
 import threading
 import traceback
@@ -16,6 +17,9 @@ from typing import Callable, Dict, List, Optional
 
 from vibewarp.config import RunConfig
 from vibewarp.cancellation import cancellation_scope
+from vibewarp.acquisition import download_scope, install_download_hooks
+from vibewarp.render_events import render_event_scope
+from vibewarp.log_progress import _ANSI, render_eta
 from vibewarp.utils.misc import release_vram
 
 
@@ -36,6 +40,9 @@ class Job:
     frame: int = 0
     total_frames: int = 0
     progress: float = 0.0
+    eta_seconds: Optional[float] = None
+    eta_updated_at: Optional[str] = None
+    downloads: Dict[str, dict] = field(default_factory=dict)
     created_at: str = field(default_factory=_now)
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
@@ -51,6 +58,12 @@ class Job:
     revision: int = 0
     operation: str = "render"
     resume_from: int = 0
+    preview_frame: int = 0
+    preview_reference_path: str = ''
+    # Progress-bar description -> absolute log position of that bar's line, so a
+    # carriage-return redraw replaces it in place (see _LineWriter).
+    _progress_lines: Dict[Optional[str], int] = field(default_factory=dict, repr=False)
+    _log_count: int = field(default=0, repr=False)
     condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
 
     def snapshot(self, *, include_config: bool = False) -> dict:
@@ -59,6 +72,9 @@ class Job:
             "id": self.id, "state": self.state, "stage": self.stage,
             "message": self.message, "frame": self.frame,
             "total_frames": self.total_frames, "progress": self.progress,
+            "eta_seconds": self.eta_seconds if self.state == 'running' and self.stage != 'cleanup' and not self.cancel_requested else None,
+            "eta_updated_at": self.eta_updated_at,
+            "downloads": list(self.downloads.values()),
             "created_at": self.created_at, "started_at": self.started_at,
             "finished_at": self.finished_at, "cancel_requested": self.cancel_requested,
             "error": self.error, "traceback": self.traceback,
@@ -75,23 +91,66 @@ class Job:
         return data
 
 
+CR, LF = '\r', '\n'
+_PROGRESS_TAIL = re.compile(r'\s*(?:\d+(?:\.\d+)?%|\d+/\d+).*$')
+
+
+def progress_key(line: str) -> str:
+    """Which progress bar a carriage-return update belongs to: its description.
+
+    'Rendering frames: 3/101 [...]' -> 'Rendering frames:'; a bar with no
+    description (' 40%|####  | 20/50 ...') -> ''.
+    """
+    return _PROGRESS_TAIL.sub('', line).strip()
+
+
 class _LineWriter(io.TextIOBase):
-    def __init__(self, callback: Callable[[str], None]):
+    """Splits stream writes into log lines.
+
+    A segment that is written with or ends in a carriage return is a progress-bar
+    redraw (tqdm). Those go to `progress_callback`, which is expected to replace the
+    bar's previous line rather than add another, so a 50-step sampler does not push
+    the real log out of the 500-line window.
+    """
+
+    def __init__(self, callback: Callable[[str], None],
+                 progress_callback: Optional[Callable[[str], None]] = None):
         self.callback = callback
+        self.progress_callback = progress_callback or callback
         self.buffer = ""
+        self._after_cr = False
+
+    def _emit(self, line: str, progress: bool) -> None:
+        line = line.rstrip()
+        # tqdm prefixes redraws with an erase-line escape; that alone is not a line.
+        if _ANSI.sub('', line).strip():
+            (self.progress_callback if progress else self.callback)(line)
 
     def write(self, text: str) -> int:
         self.buffer += text
-        while "\n" in self.buffer:
-            line, self.buffer = self.buffer.split("\n", 1)
-            if line.rstrip():
-                self.callback(line.rstrip())
+        while True:
+            # Hold a trailing CR back: it may be the first half of a split CRLF.
+            cut = next((i for i, char in enumerate(self.buffer)
+                        if char == LF or (char == CR and i + 1 < len(self.buffer))), None)
+            if cut is None:
+                break
+            line, char = self.buffer[:cut], self.buffer[cut]
+            if char == CR and self.buffer[cut + 1] == LF:
+                char, cut = LF, cut + 1
+            self.buffer = self.buffer[cut + 1:]
+            if char == CR:
+                self._emit(line, True)
+                self._after_cr = True
+            else:
+                # A bar's final redraw ends in LF but still follows a CR.
+                self._emit(line, self._after_cr)
+                self._after_cr = False
         return len(text)
 
     def flush(self) -> None:
-        if self.buffer.rstrip():
-            self.callback(self.buffer.rstrip())
+        self._emit(self.buffer, self._after_cr or self.buffer.endswith(CR))
         self.buffer = ""
+        self._after_cr = False
 
 
 class JobManager:
@@ -99,6 +158,7 @@ class JobManager:
 
     def __init__(self, runner: Optional[Callable] = None, history_limit: int = 20):
         self._runner = runner
+        self.download_manager = None
         self._history_limit = history_limit
         self._jobs: Dict[str, Job] = {}
         self._queue: List[str] = []
@@ -135,6 +195,11 @@ class JobManager:
             message="Waiting to assemble video",
         )
         return self._enqueue(job)
+
+    def submit_raw_preview(self, config: RunConfig, frame: int, reference_path: str = '') -> Job:
+        return self._enqueue(Job(id=uuid.uuid4().hex,config=copy.deepcopy(config),
+            operation='raw_preview',preview_frame=frame,preview_reference_path=reference_path,
+            message='Waiting to preview raw frame preparation'))
 
     def _enqueue(self, job: Job) -> Job:
         with self._wake:
@@ -184,13 +249,29 @@ class JobManager:
             job.revision += 1
             job.condition.notify_all()
 
-    def _log(self, job: Job, line: str) -> None:
+    def _log(self, job: Job, line: str, *, progress: bool = False) -> None:
         with self._lock:
             marker = "Run directory:"
             if marker in line:
                 job.run_dir = os.path.abspath(line.partition(marker)[2].strip())
-            job.logs.append(line)
-            job.logs[:] = job.logs[-500:]
+            outer, remaining = render_eta(line)
+            if outer:
+                job.eta_seconds = remaining
+                job.eta_updated_at = _now()
+            key = progress_key(line) if progress else None
+            # Absolute position (lines ever logged) survives the 500-line trim below.
+            dropped = job._log_count - len(job.logs)
+            position = job._progress_lines.get(key) if progress else None
+            if position is not None and position - dropped >= 0:
+                job.logs[position - dropped] = line
+            else:
+                job.logs.append(line)
+                job._log_count += 1
+                if progress:
+                    job._progress_lines[key] = job._log_count - 1
+                excess = len(job.logs) - 500
+                if excess > 0:
+                    del job.logs[:excess]
             self._touch(job)
 
     def _work(self) -> None:
@@ -203,6 +284,7 @@ class JobManager:
                     continue
                 job.state, job.stage = "running", "starting"
                 job.message = (
+                    'Preparing raw video frame' if job.operation == 'raw_preview' else
                     "Starting video assembly" if job.operation == "video"
                     else "Starting resumed render" if job.operation == "resume"
                     else "Starting render")
@@ -212,6 +294,25 @@ class JobManager:
             self._prune()
 
     def _run(self, job: Job) -> None:
+        terminal_state = 'failed'
+        def step_progress(event):
+            with self._lock:
+                job.stage = 'sampling'
+                job.message = f"Frame {event['frame']+1}: denoising {event['step']}/{event['total_steps']}"
+                if event.get('preview'):
+                    job.preview_path = event['preview']
+                self._touch(job)
+
+        def download_progress(event):
+            if self.download_manager is not None:
+                self.download_manager.runtime_progress(event, job.id)
+            with self._lock:
+                job.downloads[event.path] = event.to_dict()
+                if event.status not in ('ready', 'paused'):
+                    job.stage = 'downloading'
+                    job.message = f'Preparing {event.name}'
+                self._touch(job)
+
         def update_preview(frame: int) -> None:
             if not job.run_dir:
                 return
@@ -240,11 +341,16 @@ class JobManager:
                 update_preview(source_frame - 1)
                 self._touch(job)
 
-        writer = _LineWriter(lambda line: self._log(job, line))
+        writer = _LineWriter(lambda line: self._log(job, line),
+                             lambda line: self._log(job, line, progress=True))
         try:
             with redirect_stdout(writer), redirect_stderr(writer):
-                with cancellation_scope(lambda: job.cancel_requested):
-                    if job.operation == "video":
+                with cancellation_scope(lambda: job.cancel_requested), download_scope(download_progress), render_event_scope(step_progress):
+                    install_download_hooks()
+                    if job.operation == 'raw_preview':
+                        from vibewarp.video.raw_processing import preview_frame
+                        paths = [preview_frame(job.config,job.preview_frame,job.preview_reference_path)]
+                    elif job.operation == "video":
                         from vibewarp.pipeline import assemble_video
                         with self._lock:
                             job.stage = "assembling"
@@ -254,6 +360,9 @@ class JobManager:
                     else:
                         runner = self._runner
                         if runner is None:
+                            if self.download_manager is not None:
+                                self.download_manager.wait_for_render(
+                                    job.config, f'render:{job.id}', download_progress)
                             from vibewarp.pipeline import run
                             runner = run
                         kwargs = {"progress_fn": progress}
@@ -268,14 +377,17 @@ class JobManager:
                 job.artifacts = [os.path.abspath(path) for path in (paths or [])]
                 if job.artifacts:
                     job.preview_path = job.artifacts[-1]
-                job.state = job.stage = "completed"
+                terminal_state = 'completed'
+                job.stage = 'cleanup'
                 job.progress = 100.0
                 job.message = (
+                    'Raw frame preview is ready' if job.operation == 'raw_preview' else
                     "Video is ready" if job.operation == "video" else
                     f"Completed with {len(job.artifacts)} rendered frames")
         except KeyboardInterrupt:
             with self._lock:
-                job.state = job.stage = "cancelled"
+                terminal_state = 'cancelled'
+                job.stage = 'cleanup'
                 job.message = "Render cancelled"
         except BaseException as exc:
             # Flush whatever the pipeline had buffered FIRST, so the traceback lands after
@@ -283,7 +395,8 @@ class JobManager:
             writer.flush()
             report = traceback.format_exc()
             with self._lock:
-                job.state = job.stage = "failed"
+                terminal_state = 'failed'
+                job.stage = 'cleanup'
                 job.error = str(exc)
                 job.message = f"Render failed: {exc}"
                 job.traceback = report
@@ -297,8 +410,32 @@ class JobManager:
             print(report, file=sys.__stderr__, flush=True)
         finally:
             writer.flush()
-            release_vram()
+            # Publish failures/cancellation before touching a potentially broken
+            # CUDA context; cleanup must never strand a job as "running".
+            if terminal_state in ('failed','cancelled'):
+                with self._lock:
+                    job.state = job.stage = terminal_state
+                    job.finished_at = _now()
+                    self._touch(job)
+            if self.download_manager is not None:
+                try:
+                    self.download_manager.finish_runtime(job.id, terminal_state)
+                except Exception as exc:
+                    self._log(job,f'Download cleanup failed: {exc}')
+            try:
+                if terminal_state in ('failed','cancelled'):
+                    release_vram(synchronize=False)
+                else:
+                    release_vram()
+            except Exception as exc:
+                self._log(job,f'GPU cleanup failed: {exc}')
+                if terminal_state == 'completed':
+                    terminal_state = 'failed'
+                    job.error = str(exc)
+                    job.message = f'GPU cleanup failed: {exc}'
+                    job.traceback = traceback.format_exc()
             with self._lock:
+                job.state = job.stage = terminal_state
                 job.finished_at = _now()
                 self._touch(job)
 

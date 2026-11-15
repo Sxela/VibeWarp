@@ -7,6 +7,8 @@
 # fails if it differs from what was committed, so it must not be line-ending-normalised —
 # otherwise a Windows checkout would show a diff against a Linux build for no real reason.
 vibewarp/web_static/** -text linguist-generated=true
+# Minified vendor JS contains intentional whitespace inside multiline literals.
+vibewarp/web_static/assets/*.js -whitespace
 
 # Vite copies webui/index.html into that bundle VERBATIM, so this file's line endings end
 # up inside the committed build. Left to the platform default it is CRLF on Windows and LF

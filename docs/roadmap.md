@@ -63,7 +63,9 @@ that hid five bugs in AnimateDiff before it was finally compared.
 - **FreeU · IP-Adapter · background masking · captions · content-aware scheduling ·
   softcap · tiled VAE · colormatch · temporalnet CN · reference CN · `fixed_code` noise ·
   `pingpong_noise` · `batched_adiff_rec_noise` · `rec_sliding_ctx`** — no parity test
-  exists for any of these.
+  exists for any of these. Background masking also *deliberately* differs from the
+  notebook (one mask per image at a chosen stage, instead of the notebook's warp-time mask
+  plus a second init mask), so masked notebook settings cannot reach pixel parity.
 - **Flux 2 Klein Edit** (`model_version="flux2_klein_edit"`) — an edit model on
   its own render path, reusing the warp loop but none of the k-diffusion stack.
   The Comfy server backend and native reference-latent graph are CPU-tested and
@@ -190,7 +192,7 @@ translation, add it to `VERIFIED_KEYS` too.
 
 Parity is the current priority, but not the only way to help.
 
-- **Frontend tests.** The UI has 30 component tests (`cd webui && npm test`) and plenty of
+- **Frontend tests.** The UI has 193 frontend tests (`cd webui && npm test`) and plenty of
   room for more. Component behaviour the Python suite cannot see needs a component test —
   the two bugs that prompted the suite (a prompt editor writing a list into a
   `Dict[int, str]`, and dead mode buttons) were both invisible to the backend.
@@ -198,8 +200,9 @@ Parity is the current priority, but not the only way to help.
   what the notebook does. Cost is quadratic: softedge is ~470 ms/frame at 1920px versus
   ~58 ms at 512. Per-net `detect_resolution` already exists as a setting; a considered
   default (and a quality comparison to justify it) would be a real win.
-- **Error surfacing.** Validation errors deep-link to the offending field, except inside
-  the ControlNet editor, which has no anchors yet.
+- **Error surfacing.** Validation errors open the relevant workflow and collapsed group.
+  ControlNet/IP-Adapter errors reach the custom editor; individual nested controls could
+  still use more precise anchors.
 - **Documentation.** [architecture.md](architecture.md) has the pipeline diagrams;
   [settings.md](settings.md) maps every WarpFusion setting to its VibeWarp equivalent.
 

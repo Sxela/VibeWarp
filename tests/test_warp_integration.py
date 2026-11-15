@@ -63,6 +63,16 @@ def ctx_with_raft(tmp_path, video_frames_dir):
 
 
 class TestWarpBetweenFrames:
+    @pytest.mark.parametrize('legacy_after_warp',[False,True])
+    @pytest.mark.parametrize('stage',['before diffusion','after diffusion'])
+    def test_render_mask_never_composites_inside_warp(self,ctx_with_raft,monkeypatch,legacy_after_warp,stage):
+        ctx_with_raft.config.mask.use_background_mask=True
+        ctx_with_raft.config.mask.apply_mask_after_warp=legacy_after_warp
+        ctx_with_raft.config.mask.render_mask_stage=stage
+        monkeypatch.setattr('vibewarp.core.diffusion._apply_render_bg_mask',lambda *a,**kw:pytest.fail('Render mask must not run inside warp'))
+        result=warp_between_frames(ctx_with_raft,Image.new('RGB',(80,64),'red'),0,return_warped=True)
+        assert all(isinstance(image,Image.Image) for image in result)
+
     def test_returns_pil_image(self, ctx_with_raft):
         prev_frame = Image.fromarray(
             np.random.randint(0, 255, (64, 80, 3), dtype=np.uint8)

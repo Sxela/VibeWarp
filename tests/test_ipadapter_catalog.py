@@ -81,7 +81,7 @@ def test_validation_rejects_missing_enabled_adapter(tmp_path):
     config.controlnet.model_dir = str(tmp_path)
     config.ipadapter.enabled = True
     config.ipadapter.models = {
-        "ipadapter_sd15": IPAdapterEntry(),
+        "ipadapter_sd15": IPAdapterEntry(path='custom-missing.safetensors'),
     }
 
     errors = validate_config(config, require_inputs=False, check_paths=True)

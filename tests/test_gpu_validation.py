@@ -1,5 +1,5 @@
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import numpy as np
 import pytest
@@ -125,9 +125,17 @@ def test_public_manifests_are_valid_and_sanitized():
 
     assert validation['jobs']
     assert parity['tests']
-    published = json.dumps([validation, parity])
-    assert r'C:\code\warp' not in published
-    assert r'C:\models' not in published
+    def check_portable(value):
+        if isinstance(value, dict):
+            for item in value.values():
+                check_portable(item)
+        elif isinstance(value, list):
+            for item in value:
+                check_portable(item)
+        elif isinstance(value, str):
+            assert not PureWindowsPath(value).anchor, value
+            assert not PurePosixPath(value).is_absolute(), value
+    check_portable([validation, parity])
 
 
 def test_load_base_config_accepts_vibewarp_saved_settings(tmp_path):

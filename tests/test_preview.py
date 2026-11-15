@@ -139,6 +139,32 @@ class TestRunDiscovery:
 
 
 class TestLayers:
+    def test_missing_layers_are_configured_artifacts_not_rendered_images(self, tmp_path):
+        import json
+        run = tmp_path / 'warpfusion' / '0'
+        (run / 'settings').mkdir(parents=True)
+        settings = run / 'settings' / 'config.json'
+        settings.write_text(json.dumps({
+            'model_version': 'control_multi_v15',
+            'flow': {'flow_warp': True, 'check_consistency': True},
+            'controlnet': {'enabled': True, 'models': {
+                'control_sd15_depth': {'weight': 1},
+                'control_sd15_canny': {'weight': 0}}},
+            'ipadapter': {'enabled': True, 'models': {'custom adapter': {
+                'weight': 1, 'source_images': [{'source': 'none'}, {'source': 'previous'}]}}},
+        }))
+        described = describe_run(str(tmp_path), 'warpfusion', '0')
+        assert described['layers'] == []
+        missing = {layer['id']: layer for layer in described['missing_layers']}
+        assert missing['debug:consistency_mask']['short_label'] == 'CC mask'
+        assert missing['debug:control_sd15_depth_detected']['short_label'] == 'Depth map'
+        assert 'debug:control_sd15_canny_detected' not in missing
+        assert 'debug:ipa_custom_adapter_source_1' in missing
+        assert all(not layer['frames'] and layer['expected'] for layer in missing.values())
+        assert image_path(str(tmp_path), 'warpfusion', '0', 'debug:control_sd15_depth_detected', 0) is None
+        settings.write_text(json.dumps({'model_version': 'disco_512', 'flow': {'flow_warp': False}}))
+        assert describe_run(str(tmp_path), 'warpfusion', '0')['missing_layers'] == []
+
     def test_finds_every_layer(self, tmp_path):
         root = build_run(tmp_path)
         described = describe_run(root, "warpfusion", "0")
@@ -293,6 +319,25 @@ class TestSandboxing:
 
 
 class TestPreviewEndpoints:
+    @pytest.mark.parametrize(('layer', 'filename'), [('init', '000001.jpg'), ('output', 'warpfusion(7)_000000.png')])
+    def test_frame_download_preserves_its_real_filename_and_extension(self, tmp_path, layer, filename):
+        build_run(tmp_path, '7')
+        response = client().get('/api/preview/runs/7/image', params={
+            'output_dir': str(tmp_path), 'batch_name': 'warpfusion',
+            'layer': layer, 'frame': 0, 'download': True})
+        assert response.status_code == 200
+        from urllib.parse import unquote
+        disposition = unquote(response.headers['content-disposition'])
+        assert disposition.startswith('attachment; filename')
+        assert disposition.rstrip('"').endswith(filename)
+
+    def test_video_download_is_an_attachment(self, tmp_path):
+        build_run(tmp_path, '7')
+        (tmp_path / 'warpfusion' / '7' / 'warpfusion.mp4').write_bytes(b'mp4')
+        response = client().get('/api/preview/runs/7/video', params={
+            'output_dir': str(tmp_path), 'batch_name': 'warpfusion', 'download': True})
+        assert response.headers['content-disposition'] == 'attachment; filename="warpfusion.mp4"'
+
     def test_runs_endpoint(self, tmp_path):
         build_run(tmp_path, "7")
         body = client().get("/api/preview/runs", params={
@@ -443,7 +488,12 @@ class TestGalleryThumbnails:
 
         rebuilt = thumbnail_path(root, "warpfusion", "0", "output", 0)
         assert rebuilt == thumb
-        assert os.path.getmtime(rebuilt) > stamp
+        # Fast rebuilds can share the old mtime on Windows. Verify that the
+        # cached image actually changed from landscape/red to square/green.
+        with Image.open(rebuilt) as image:
+            assert image.width == image.height
+            red, green, _ = image.getpixel((0, 0))
+            assert green > red
 
     def test_unreadable_image_falls_back_to_the_original(self, tmp_path):
         """build_run writes placeholder bytes, not real PNGs. A gallery that

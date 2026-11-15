@@ -1,0 +1,3 @@
+Source: https://github.com/Sxela/guided-diffusion-sxela
+Revision: 97304f0be3cac2fd63060aba0bbcea5177ef2244
+Vendored inference modules; local changes recorded in git.

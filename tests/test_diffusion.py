@@ -336,6 +336,35 @@ class TestRunSdImg2Img:
             return torch.zeros_like(x)
         return sampler
 
+    @pytest.mark.parametrize('mode',['default','fixed'])
+    @pytest.mark.parametrize('skip',[0,2])
+    def test_fixed_seed_randomness_changes_initial_noise_reproducibly(self,tmp_path,mode,skip):
+        img_path=str(tmp_path/'init.png')
+        Image.new('RGB',(64,64),'black').save(img_path)
+        def draw(frame,strength,fixed=True,wiggle=0,direction=None):
+            ctx=_make_run_sd_ctx(steps=4);calls=[]
+            ctx.config.diffusion.fixed_seed=fixed
+            ctx.config.diffusion.fixed_seed_randomness=strength
+            ctx.config.diffusion.fixed_seed_wiggle=wiggle
+            ctx.config.diffusion.fixed_seed_wiggle_direction=direction or [0,0]
+            ctx.config.diffusion.noise_mode=mode
+            ctx.sampler_fn=self._captured_sampler(calls)
+            run_sd(ctx,init_image_path=img_path if skip else None,skip_timesteps=skip,
+                H=64,W=64,text_prompt='test',neg_prompt='',steps=4,seed=123,cfg_scale=7.5,
+                state=FrameState(frame_num=frame))
+            return calls[-1]['x']
+        base=draw(1,0);mixed=draw(1,.5)
+        assert not torch.equal(base,mixed)
+        assert torch.equal(mixed,draw(1,.5))
+        assert not torch.equal(mixed,draw(2,.5))
+        assert torch.equal(draw(0,0),draw(0,1))
+        assert torch.equal(base,draw(1,.5,False))
+        assert not torch.equal(base,draw(1,0,wiggle=2))
+        assert torch.equal(draw(1,0,wiggle=2),draw(1,0,wiggle=2))
+        assert torch.equal(base,draw(1,0,False,wiggle=2))
+        rolled=draw(3,0,wiggle=2,direction=[1,0])
+        assert torch.equal(rolled,torch.roll(base,(0,6),(-2,-1)))
+
     def test_sampler_context_is_conditional_on_active_guidance(self, tmp_path):
         img_path = str(tmp_path / 'init.png')
         Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(img_path)

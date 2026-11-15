@@ -200,4 +200,49 @@ def test_vram_is_released_after_every_job(monkeypatch):
                 break
             time.sleep(0.02)
 
+    deadline=time.time()+2
+    while len(calls)<2 and time.time()<deadline:time.sleep(0.01)
     assert len(calls) == 2, 'VRAM must be released after a failed job too'
+
+
+def test_oom_becomes_terminal_before_cleanup_and_worker_survives_cleanup_error(monkeypatch):
+    import torch
+    from vibewarp import web_jobs
+    cleanup_started=Event();allow_cleanup=Event();calls=[];runs=[]
+    def cleanup(**kwargs):
+        calls.append(kwargs)
+        if len(calls)==1:
+            cleanup_started.set();allow_cleanup.wait(3)
+            raise torch.cuda.OutOfMemoryError('cleanup OOM')
+    def runner(config,**kwargs):
+        runs.append(1)
+        if len(runs)==1:raise torch.cuda.OutOfMemoryError('original cutout OOM')
+        return []
+    monkeypatch.setattr(web_jobs,'release_vram',cleanup)
+    manager=web_jobs.JobManager(runner=runner)
+    first=manager.submit(RunConfig())
+    try:
+        assert cleanup_started.wait(3)
+        assert first.state=='failed' and first.finished_at
+        assert first.error=='original cutout OOM'
+        assert calls[0]=={'synchronize':False}
+        second=manager.submit(RunConfig())
+    finally:
+        allow_cleanup.set()
+    assert wait_terminal(second,5).state=='completed'
+    assert first.error=='original cutout OOM'
+    assert any('GPU cleanup failed' in line for line in first.logs)
+
+
+def test_cleanup_exception_after_success_fails_job_without_killing_worker(monkeypatch):
+    from vibewarp import web_jobs
+    calls=[]
+    def cleanup(**kwargs):
+        calls.append(1)
+        if len(calls)==1:raise RuntimeError('broken CUDA context')
+    monkeypatch.setattr(web_jobs,'release_vram',cleanup)
+    manager=web_jobs.JobManager(runner=lambda *a,**kw:[])
+    first=manager.submit(RunConfig());second=manager.submit(RunConfig())
+    assert wait_terminal(first,5).state=='failed'
+    assert first.error=='broken CUDA context'
+    assert wait_terminal(second,5).state=='completed'

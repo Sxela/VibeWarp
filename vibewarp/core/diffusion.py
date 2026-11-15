@@ -70,6 +70,7 @@ class RenderContext:
     # Flux edit pipeline (diffusers) — set for model_version='flux2_klein_edit'
     # instead of sd_model/model_wrap. See core/flux.py.
     edit_backend: Any = None
+    disco_backend: Any = None
     flux_pipe: Any = None
 
     # Sampler function (from k_diffusion.sampling)
@@ -79,6 +80,7 @@ class RenderContext:
     batch_folder: str = ''
     video_frames_folder: str = ''
     flow_folder: str = ''
+    raw_video_cache: Any = None
 
     # Callbacks
     save_frame_fn: Optional[Callable] = None
@@ -455,13 +457,17 @@ def make_temporal_guidance_model_fn(
     add_noise: bool,
     guidance_start_code: Optional[torch.Tensor],
     source_label: str,
+    trusted_mask=None,
+    spatial_lpips_cache=None,
 ) -> Callable:
     """Add WarpFusion pixel/latent loss gradients to a denoiser prediction."""
     step = 0
     lpips_model = None
+    trust_cache = {}
 
     def model_fn(x, sigma, **kwargs):
         nonlocal step, lpips_model
+        from vibewarp.core.trusted_guidance import resize_trust, masked_spherical_loss, masked_lpips_loss
         # We only differentiate the loss from the clean-latent prediction. A
         # backward graph through the UNet is unnecessary and much more costly.
         with torch.no_grad():
@@ -469,6 +475,14 @@ def make_temporal_guidance_model_fn(
 
         with torch.enable_grad():
             guided = denoised.detach().requires_grad_(True)
+            key = (guided.device, guided.shape[0], *guided.shape[-2:])
+            if trusted_mask is not None and key not in trust_cache:
+                trust_cache[key] = resize_trust(trusted_mask, guided)
+                print(f'  Trusted temporal guidance: mean trust={float(trust_cache[key].mean()):.4f}, latent grid={tuple(guided.shape[-2:])}')
+            trust = trust_cache.get(key)
+            masked = trust is not None and not bool((trust == 1).all())
+            if masked and not bool(trust.any()):
+                return denoised
             loss = guided.new_zeros(())
             latent_loss = None
             pixel_loss = None
@@ -482,22 +496,34 @@ def make_temporal_guidance_model_fn(
                              else torch.randn_like(latent_target))
                     latent_target = latent_target + noise * sigma_value
                 from vibewarp.core.losses import spherical_dist_loss
-                latent_loss = spherical_dist_loss(
-                    guided.float(), latent_target.float()).sum()
+                latent_loss = masked_spherical_loss(guided, latent_target, trust)
                 loss = loss + latent_loss * init_latent_scale
 
             if init_scale > 0 and target_image is not None:
                 if lpips_model is None:
                     from vibewarp.core.scene_detect import init_lpips
-                    lpips_model = init_lpips(str(guided.device))
+                    if masked:
+                        cache = spatial_lpips_cache if spatial_lpips_cache is not None else {}
+                        key = str(guided.device)
+                        if key not in cache:
+                            import lpips
+                            devices = [guided.device.index] if guided.is_cuda else []
+                            with torch.random.fork_rng(devices=devices):
+                                cache[key] = lpips.LPIPS(net='vgg',spatial=True).eval().requires_grad_(False).to(guided.device)
+                        lpips_model = cache[key]
+                    else:
+                        lpips_model = init_lpips(str(guided.device))
                     for parameter in lpips_model.parameters():
                         parameter.requires_grad_(False)
                 decoded = _differentiable_decode_half(sd_model, guided)
-                pixel_loss = lpips_model(
-                    decoded.float(), target_image[:, :, ::2, ::2].float()).sum()
+                pixel_target = target_image[:, :, ::2, ::2].float()
+                pixel_loss = (masked_lpips_loss(decoded, pixel_target, trust, lpips_model) if masked
+                    else lpips_model(decoded.float(), pixel_target).sum())
                 loss = loss + pixel_loss * init_scale
 
             grad = -torch.autograd.grad(loss, guided)[0]
+            if masked:
+                grad = grad*trust
             if not bool(torch.isfinite(grad).all()):
                 raise RuntimeError(
                     f"Temporal guidance produced a non-finite gradient at step {step}")
@@ -636,6 +662,9 @@ def run_sd(
         guidance_image_path is not None
         and (init_scale > 0 or init_latent_scale > 0)
     )
+    if (guidance_enabled and ctx.config.diffusion.temporal_guidance_cc_trusted_only
+            and getattr(ctx, '_temporal_consistency_mask', None) is None):
+        print('  Trusted temporal guidance unavailable: no current-frame CC mask; using unmasked guidance')
 
     # Encode the normal img2img init and the independent temporal guidance
     # target. Pixel guidance retains the VAE on GPU for per-step decoding.
@@ -729,6 +758,9 @@ def run_sd(
             add_noise=ctx.config.diffusion.guidance_add_noise,
             guidance_start_code=guidance_start_code,
             source_label=ctx.config.diffusion.guidance_mode,
+            trusted_mask=(getattr(ctx, '_temporal_consistency_mask', None)
+                if ctx.config.diffusion.temporal_guidance_cc_trusted_only else None),
+            spatial_lpips_cache=ctx.__dict__.setdefault('_temporal_spatial_lpips', {}),
         )
     # Notebook order: compute and apply cond_fn first, then clamp the guided
     # clean-latent prediction with the static/dynamic threshold wrapper.
@@ -736,6 +768,11 @@ def run_sd(
 
     noise_mode = ctx.config.diffusion.noise_mode
     code_randomness = ctx.config.diffusion.code_randomness
+    def fixed_seed_noise(noise):
+        if ctx.config.diffusion.fixed_seed and (ctx.config.diffusion.fixed_seed_randomness or ctx.config.diffusion.fixed_seed_wiggle):
+            from vibewarp.core.noise_variation import vary_fixed_noise
+            return vary_fixed_noise(noise,ctx.config.diffusion.fixed_seed_randomness,seed,state.frame_num,wiggle=ctx.config.diffusion.fixed_seed_wiggle,direction=ctx.config.diffusion.fixed_seed_wiggle_direction)
+        return noise
 
     # Keep the fast/strict inference path unless this frame has a real target
     # and a nonzero guidance scale. Only active gradient guidance needs a
@@ -778,10 +815,11 @@ def run_sd(
                 denom = (code_randomness ** 2 + (1 - code_randomness) ** 2) ** 0.5
                 combined = ((1 - code_randomness) * state.start_code.float()
                             + code_randomness * rand_code) / denom
+                combined = fixed_seed_noise(combined)
                 noise = combined - (x0_f / sigmas[0])
                 noise = noise * sigmas[steps - t_enc - 1]
             else:
-                noise = torch.randn_like(x0_f) * sigmas[steps - t_enc - 1]
+                noise = fixed_seed_noise(torch.randn_like(x0_f)) * sigmas[steps - t_enc - 1]
 
             if os.environ.get('VIBEWARP_DEBUG_DIFFUSION'):
                 print(f"[diag] img2img t_enc={t_enc} noise8="
@@ -814,9 +852,10 @@ def run_sd(
                 denom = (code_randomness ** 2 + (1 - code_randomness) ** 2) ** 0.5
                 combined = ((1 - code_randomness) * state.start_code.float()
                             + code_randomness * rand_code) / denom
+                combined = fixed_seed_noise(combined)
                 x = combined * sigmas[0]
             else:
-                x = torch.randn([1, *shape], device='cuda') * sigmas[0]
+                x = fixed_seed_noise(torch.randn([1, *shape], device='cuda')) * sigmas[0]
             if os.environ.get('VIBEWARP_DEBUG_DIFFUSION'):
                 print(f"[diag] sigmas n={len(sigmas)} first={sigmas[0].item():.4f} "
                       f"last={sigmas[-1].item():.4f} sched={[round(s.item(),3) for s in sigmas]}")
@@ -867,18 +906,19 @@ def _apply_render_bg_mask(
     config,
     video_frames_folder: str,
 ) -> Image.Image:
-    """Render-time background masking (notebook `apply_mask`, image mode).
+    """Composite `image` onto the configured background with the run's mask.
 
-    Composites `image` onto the configured background using the alpha mask at
-    `{video_frames_folder}_alpha/{mask_frame_num+1:06d}.jpg`. Warns and
-    returns the image unchanged when the alpha file is missing.
+    The mask is `{video_frames_folder}_alpha/{mask_frame_num+1:06d}.png` (or `.jpg`),
+    which the pipeline materializes from the selected mask source (RVM, mask video, or
+    image folder) before rendering — see vibewarp.video.masks. Assembly reads the same
+    file. Warns and returns the image unchanged when the mask is missing.
     """
+    from vibewarp.video.masks import mask_file, run_mask_folder
     mc = config.mask
-    alpha_path = os.path.join(
-        video_frames_folder + '_alpha', f'{mask_frame_num + 1:06d}.jpg')
-    if not os.path.exists(alpha_path):
-        print(f"  WARNING: use_background_mask is on but alpha mask not found: "
-              f"{alpha_path} — frame left unmasked")
+    folder = run_mask_folder(video_frames_folder)
+    if mask_file(folder, mask_frame_num) is None:
+        print(f"  WARNING: use_background_mask is on but no mask for frame "
+              f"{mask_frame_num + 1} in {folder} — frame left unmasked")
         return image
     from vibewarp.video.output import apply_video_mask
     return apply_video_mask(
@@ -886,6 +926,24 @@ def _apply_render_bg_mask(
         video_frames_folder, invert=mc.invert_mask,
         clip_low=mc.mask_clip_low, clip_high=mc.mask_clip_high,
     )
+
+
+def _apply_background_stage(image, ctx, frame_num, stage):
+    """Render masking occurs once at the selected diffusion boundary, never in warp."""
+    if not ctx.config.mask.use_background_mask or ctx.config.mask.render_mask_stage != stage:
+        return image
+    return _apply_render_bg_mask(image,frame_num,ctx.config,ctx.video_frames_folder)
+
+
+def _masked_init_path(ctx, path, frame_num):
+    if not ctx.config.mask.use_background_mask or ctx.config.mask.render_mask_stage != 'before diffusion':
+        return path
+    with Image.open(path) as opened:
+        masked = _apply_background_stage(opened.convert('RGB'),ctx,frame_num,'before diffusion')
+    target = os.path.join(ctx.batch_folder,'temp',f'masked_init_{frame_num:06d}.png')
+    os.makedirs(os.path.dirname(target),exist_ok=True)
+    masked.save(target)
+    return target
 
 
 def warp_between_frames(
@@ -933,7 +991,8 @@ def warp_between_frames(
 
     cc_path = ''
     weights = None
-    if config.flow.check_consistency:
+    check_consistency = (consistency_params or {}).get('check_consistency', config.flow.check_consistency)
+    if check_consistency:
         cc_path = os.path.join(flow_folder, f"{frame_num:06d}.jpg_12-21_cc.jpg")
 
     # Compute or load flow
@@ -977,7 +1036,7 @@ def warp_between_frames(
     cc_dilate = int(cp.get('consistency_dilate', config.flow.consistency_dilate))
     forward_clip = float(cp.get('soften_consistency_mask', config.flow.soften_consistency_mask))
 
-    if cc is not None:
+    if check_consistency and cc is not None:
         # Process 3-channel CC map into B&W weights (matches notebook's load_cc)
         from vibewarp.flow.consistency import load_cc
         weights = load_cc(
@@ -1019,12 +1078,7 @@ def warp_between_frames(
     target_w, target_h = config.video.width, config.video.height
     current_video_frame = Image.open(frame2_path).convert('RGB').resize((target_w, target_h), Image.LANCZOS)
 
-    # Background mask BEFORE warp (notebook: use_background_mask and not
-    # apply_mask_after_warp → mask the raw current video frame).
-    # frame_num here is the previous render frame → current = frame_num + 1.
-    if config.mask.use_background_mask and not config.mask.apply_mask_after_warp:
-        current_video_frame = _apply_render_bg_mask(
-            current_video_frame, frame_num + 1, config, ctx.video_frames_folder)
+    prepares_raw = config.mask.rvm_enabled or config.mask.raw_color_enabled
 
     # Resize flow field to target resolution, scaling displacement values
     # to match. Matches notebook: flow_ratio = flow_wh / target_wh; flow *= ratio
@@ -1044,6 +1098,12 @@ def warp_between_frames(
 
     # Save the exact effective mask used by the blend. Frame N is produced by
     # flow N-1 -> N, hence the +1 relative to this function's frame index.
+    if return_warped:
+        ctx._temporal_consistency_mask = (
+            np.clip(weights[..., :1], 0, 1).copy() if weights is not None else None)
+    if return_warped and config.model_version.startswith('disco_'):
+        ctx._disco_consistency_mask = (
+            np.clip(weights, forward_clip, 1.0).copy() if weights is not None else None)
     if weights is not None and ctx.batch_folder:
         debug_dir = os.path.join(ctx.batch_folder, 'debug')
         os.makedirs(debug_dir, exist_ok=True)
@@ -1053,6 +1113,10 @@ def warp_between_frames(
             np.clip(mask * 255.0, 0, 255).round().astype(np.uint8), mode='L',
         ).save(os.path.join(
             debug_dir, f"consistency_mask_{frame_num + 1:06d}.png"))
+
+    from vibewarp.video.raw_processing import render_raw
+    def prepare_current_raw(raw, warped):
+        return render_raw(raw, ctx, frame_num+1, warped)
 
     warp_result = warp_frame(
         frame1=prev_frame,
@@ -1067,20 +1131,12 @@ def warp_between_frames(
         match_color_fn=match_color_fn,
         adjust_brightness_fn=adjust_brightness_fn,
         return_warped=return_warped,
+        raw_transform=prepare_current_raw if prepares_raw else None,
     )
     if return_warped:
         warped, warped_without_cc = warp_result
     else:
         warped = warp_result
-
-    # Background mask AFTER warp (notebook default: apply_mask_after_warp).
-    if config.mask.use_background_mask and config.mask.apply_mask_after_warp:
-        warped = _apply_render_bg_mask(
-            warped, frame_num + 1, config, ctx.video_frames_folder)
-        if return_warped:
-            warped_without_cc = _apply_render_bg_mask(
-                warped_without_cc, frame_num + 1, config,
-                ctx.video_frames_folder)
 
     return (warped, warped_without_cc) if return_warped else warped
 
@@ -1458,6 +1514,9 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
     # Flux edit models take an entirely separate render path (diffusers DiT),
     # not the CompVis / k-diffusion sampler below.
     from vibewarp.core.model_loader import is_edit_model
+    if config.model_version.startswith('disco_'):
+        from vibewarp.core.disco import render_disco_frame
+        return render_disco_frame(ctx, state)
     if is_edit_model(config.model_version):
         return render_frame_edit(ctx, state)
 
@@ -2077,10 +2136,10 @@ def _load_contact_sheet_cell(
         image = opened.convert('RGB').resize(
             (config.video.width, config.video.height),
             Image.Resampling.LANCZOS)
-    if config.mask.use_background_mask:
-        image = _apply_render_bg_mask(
-            image, cell.frame_num, config, ctx.video_frames_folder)
-    return image
+    if config.mask.rvm_enabled or config.mask.raw_color_enabled:
+        from vibewarp.video.raw_processing import render_raw
+        image = render_raw(image,ctx,cell.frame_num)
+    return _apply_background_stage(image,ctx,cell.frame_num,'before diffusion')
 
 
 def run_frames_contact_sheet(
@@ -2213,6 +2272,7 @@ def run_frames_contact_sheet(
                 with _phase(ctx, 'colormatch_after'):
                     image = _apply_post_colormatch(
                         image, state.prev_frame.convert('RGB').copy(), config)
+            image = _apply_background_stage(image,ctx,cell.frame_num,'after diffusion')
             state.frame_num = cell.frame_num
             state.prev_frame = image
             filename = f'{config.batch_name}(0)_{cell.frame_num:06d}.{fmt}'
@@ -2248,10 +2308,14 @@ def _resolve_frame_range(
 
     `[0, 0]` (the default) still means "every extracted frame" rather than "just frame 0":
     it is the notebook's not-set sentinel and settings files rely on it.
+    A one-item range `[N]` selects exactly frame N, used for old single-frame profiles.
     """
     config = ctx.config
-    if frame_range and len(frame_range) == 2:
-        start_frame, end_frame = frame_range
+    selected = frame_range if frame_range is not None else config.frame_range
+    if selected and len(selected) == 1:
+        return max(selected[0], resume_from), selected[0] + 1
+    if selected and len(selected) == 2:
+        start_frame, end_frame = selected
     else:
         start_frame = 0
         end_frame = config.frame_range[1] if len(config.frame_range) > 1 else 0
@@ -2286,7 +2350,26 @@ def _render_single_frame(
     """
     config = ctx.config
     state.frame_num = frame_num
+    if frame_num == getattr(ctx, '_sequence_start_frame', start_frame) and config.video.first_frame_path:
+        image = Image.open(config.video.first_frame_path).convert('RGB')
+        if image.size != (config.video.width, config.video.height):
+            raise ValueError('First-frame reference must match output dimensions exactly')
+        image = _apply_background_stage(image,ctx,frame_num,'after diffusion')
+        state.prev_frame = image.copy()
+        path = os.path.join(batch_folder, f'{config.batch_name}(0)_{frame_num:06d}.{fmt}')
+        image.save(path)
+        turbo = getattr(ctx, '_turbo', None)
+        if turbo:
+            turbo.feedback = image.copy()
+            turbo.save(frame_num)
+        return image, path
     state.guidance_image = None
+    previous_output = state.prev_frame.copy() if state.prev_frame is not None else None
+    ctx._disco_consistency_mask = None
+    ctx._temporal_consistency_mask = None
+    turbo = getattr(ctx, '_turbo', None)
+    if turbo and turbo.feedback is not None:
+        state.prev_frame = turbo.feedback.copy()
 
     # Set init image from video frames (for img2img after first frame)
     if frame_num > start_frame and ctx.video_frames_folder:
@@ -2298,6 +2381,8 @@ def _render_single_frame(
             # Inter-frame warping: warp prev rendered frame using optical flow
             if config.flow.flow_warp and state.prev_frame is not None:
                 sched_for_warp = get_frame_schedule(frame_num, config)
+                if turbo:
+                    sched_for_warp = turbo.warp_params(frame_num, sched_for_warp)
                 import time as _wtime
                 from vibewarp.core.timing import log_time as _wlog
                 _t_warp = _wtime.time()
@@ -2331,7 +2416,7 @@ def _render_single_frame(
                     state.guidance_image = warped_without_cc_path
                 else:
                     state.guidance_image = warped_path
-                if state.guidance_image is not None:
+                if state.guidance_image is not None and not config.model_version.startswith('disco_'):
                     scales = (
                         f"pixel={config.diffusion.init_scale:g}, "
                         f"latent={config.diffusion.init_latent_scale:g}")
@@ -2349,7 +2434,7 @@ def _render_single_frame(
                 state.guidance_image = (
                     None if is_edit_model(config.model_version)
                     else prev_frame_path)
-                if state.guidance_image is not None and (
+                if state.guidance_image is not None and not config.model_version.startswith('disco_') and (
                         config.diffusion.init_scale > 0
                         or config.diffusion.init_latent_scale > 0):
                     print(
@@ -2363,36 +2448,59 @@ def _render_single_frame(
         )
         if os.path.exists(video_frame_path):
             state.init_image = video_frame_path
+            if config.mask.rvm_enabled or config.mask.raw_color_enabled:
+                from vibewarp.video.raw_processing import prepared_raw_path
+                state.init_image = prepared_raw_path(ctx,frame_num)
         state.guidance_image = None
-        if (config.diffusion.init_scale > 0
-                or config.diffusion.init_latent_scale > 0):
+        if (config.diffusion.guidance_mode != 'raw frame'
+                and not config.model_version.startswith('disco_')
+                and (config.diffusion.init_scale > 0
+                     or config.diffusion.init_latent_scale > 0)):
             print(
                 f"  SD gradient target frame {frame_num}: unavailable "
                 "(no previous rendered frame); guidance skipped")
 
-    # Background-mask the init image right before diffusion (notebook masks
-    # init_image/prevFrameScaled here for ALL frames — on warped frames this
-    # is a second application on top of the warp-time mask, matching the
-    # notebook's behavior; also covers frame 0 and non-warped inits).
-    if config.mask.use_background_mask and state.init_image and ctx.video_frames_folder:
-        masked = _apply_render_bg_mask(
-            Image.open(state.init_image).convert('RGB'),
-            frame_num, config, ctx.video_frames_folder)
-        masked_path = os.path.join(batch_folder, f"_masked_init_{frame_num:06d}.{fmt}")
-        masked.save(masked_path)
-        state.init_image = masked_path
+    # Raw-frame guidance is independent of temporal init preparation and is
+    # available on frame zero too. Other sources retain their existing fallback.
+    from vibewarp.core.model_loader import is_edit_model
+    if config.diffusion.guidance_mode == 'raw frame' and not is_edit_model(config.model_version):
+        raw_guidance = os.path.join(ctx.video_frames_folder, f'{frame_num+1:06d}.jpg')
+        if ctx.video_frames_folder and os.path.isfile(raw_guidance):
+            if config.mask.rvm_enabled or config.mask.raw_color_enabled:
+                from vibewarp.video.raw_processing import prepared_raw_path
+                raw_guidance = prepared_raw_path(ctx,frame_num,previous_output,purpose='guidance')
+            state.guidance_image = raw_guidance
+
+    if state.init_image:
+        state.init_image = _masked_init_path(ctx,state.init_image,frame_num)
 
     # Preserve the actual previous output as the after-diffusion palette
     # reference. render_frame updates state.prev_frame to the new output.
     previous_palette = (
-        state.prev_frame.convert('RGB').copy()
-        if state.prev_frame is not None else None)
+        previous_output.convert('RGB') if previous_output is not None else None)
 
     # Render
     import time as _rtime
     from vibewarp.core.timing import log_time as _rlog
     _t_render = _rtime.time()
-    image = render_frame(ctx, state)
+    if turbo:
+        turbo._frame = frame_num
+        turbo.prepare(ctx, state)
+    ctx._turbo_strength = (
+        config.turbo.intermediate_strength if turbo and turbo.intermediate else None)
+    if turbo and turbo.warp_only:
+        image = turbo.current_init.copy()
+    else:
+        original_strength = config.diffusion.style_strength_schedule
+        try:
+            if turbo and turbo.intermediate:
+                config.diffusion.style_strength_schedule = {0: config.turbo.intermediate_strength}
+            image = render_frame(ctx, state)
+        finally:
+            config.diffusion.style_strength_schedule = original_strength
+    if turbo:
+        image = turbo.finish(image)
+        state.prev_frame = image
     _rlog(f"diffusion render (frame {frame_num})", _rtime.time() - _t_render)
 
     # Let the first rendered frame establish the stylized palette. From the
@@ -2402,13 +2510,24 @@ def _render_single_frame(
     if frame_num > start_frame:
         with _phase(ctx, 'colormatch_after'):
             image = _apply_post_colormatch(image, previous_palette, config)
+            if turbo and turbo.feedback is not None:
+                # Keep unblended feedback (notebook prevFrame.png), but give it
+                # the same after-color correction as the displayed Turbo blend.
+                turbo.feedback = _apply_post_colormatch(turbo.feedback, previous_palette, config)
         state.prev_frame = image
+
+    image = _apply_background_stage(image,ctx,frame_num,'after diffusion')
+    state.prev_frame = image
+    if turbo and turbo.feedback is not None:
+        turbo.feedback = _apply_background_stage(turbo.feedback,ctx,frame_num,'after diffusion')
 
     # Save
     filename = f"{config.batch_name}(0)_{frame_num:06d}.{fmt}"
     filepath = os.path.join(batch_folder, filename)
     os.makedirs(batch_folder, exist_ok=True)
     image.save(filepath)
+    if turbo:
+        turbo.save(frame_num)
 
     return image, filepath
 
@@ -2473,7 +2592,7 @@ def run_frames(
     config = ctx.config
 
     # AnimateDiff batch mode: process frames in overlapping temporal batches
-    if config.animatediff.enabled:
+    if config.animatediff.enabled and not config.model_version.startswith('disco_'):
         return run_frames_animatediff(ctx, frame_range=frame_range, resume_from=resume_from)
 
     sequence_start, end_frame = _resolve_frame_range(ctx, frame_range, 0)
@@ -2488,6 +2607,12 @@ def run_frames(
 
     output_paths = []
     batch_folder = ctx.batch_folder
+
+    if config.turbo.enabled:
+        from vibewarp.core.turbo import TurboState
+        ctx._turbo = TurboState(config, batch_folder, sequence_start)
+        if start_frame > sequence_start:
+            ctx._turbo.restore(start_frame-1)
 
     # A resumed frame is still temporally downstream of the configured first
     # frame. Restore the last completed output so optical-flow/edit-reference
@@ -2580,8 +2705,9 @@ def _adiff_init_path(ctx, frame_num: int, index_in_batch: int,
             ctx.batch_folder,
             f"{ctx.config.batch_name}(0)_{frame_num:06d}.{fmt}")
         if os.path.exists(stylized):
-            return stylized, True
-    return os.path.join(ctx.video_frames_folder, f"{frame_num + 1:06d}.jpg"), False
+            return _masked_init_path(ctx,stylized,frame_num), True
+    from vibewarp.video.raw_processing import prepared_raw_path
+    return _masked_init_path(ctx,prepared_raw_path(ctx,frame_num),frame_num), False
 
 
 def _adiff_prepare_conditioning(ctx, frames: List[int]):
@@ -2853,6 +2979,10 @@ def _adiff_run_batch(
         # NOT what the notebook does (see _adiff_frame_noise) — kept only so existing
         # runs can be reproduced.
         noise = torch.randn(latents.shape, device=latents.device, dtype=latents.dtype)
+    if injected is None and config.diffusion.fixed_seed and (config.diffusion.fixed_seed_randomness or config.diffusion.fixed_seed_wiggle):
+        from vibewarp.core.noise_variation import vary_fixed_noise
+        noise = torch.cat([vary_fixed_noise(row[None],config.diffusion.fixed_seed_randomness,seed,frame,wiggle=config.diffusion.fixed_seed_wiggle,direction=config.diffusion.fixed_seed_wiggle_direction)
+                           for row,frame in zip(noise,frames)])
     if ad.pingpong_noise:
         # Mirror the first half onto the second so the clip loops back on itself.
         half = noise[: count // 2]
@@ -2994,6 +3124,7 @@ def run_frames_animatediff(
             ad.blend_batch_outputs)
 
         for i, (frame_num, image) in enumerate(zip(frames, images)):
+            image = _apply_background_stage(image,ctx,frame_num,'after diffusion')
             filename = f"{config.batch_name}(0)_{frame_num:06d}.{fmt}"
             filepath = os.path.join(ctx.batch_folder, filename)
             image.save(filepath)
@@ -3171,8 +3302,9 @@ def get_frame_schedule(frame_num: int, config: RunConfig) -> dict:
             return interpolate_array(val, steps)
         return float(val)
 
-    steps = int(_resolve(d.steps_schedule, d.steps))
-    style_strength = float(_resolve(d.style_strength_schedule, d.style_strength))
+    sampling = config.disco if config.model_version.startswith('disco_') else d
+    steps = int(_resolve(sampling.steps_schedule, sampling.steps))
+    style_strength = float(_resolve(sampling.style_strength_schedule, sampling.style_strength))
     skip_steps = int(steps - steps * style_strength)
     effective_steps = steps - skip_steps + 1
 

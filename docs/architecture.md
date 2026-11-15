@@ -10,6 +10,36 @@ The expensive video-wide preparation runs once. The frame loop then combines
 the current source frame with the flow-warped previous render, prepares model
 conditioning, runs diffusion, and saves the result for the next iteration.
 
+Render/assembly exceptions propagate to the job manager. Failed and cancelled
+jobs publish their terminal state before cleanup; cleanup failures are logged
+without killing the queue worker. Error/cancel cleanup skips CUDA synchronization.
+Disco checks cancellation while constructing individual cuts and between encoder
+groups, in addition to sampler/frame boundaries. Video assembly errors fail the
+job while leaving completed PNGs available for recovery.
+
+Optional raw preparation (`video/raw_processing.py`) precedes model loading.
+It caches CUDA-decoded source frames by video content/stride, then recurrent
+RVM alpha/checkpoints by model content and downsample ratio. Raw render inputs
+are color-matched and tinted on CUDA in memory before consistency blending;
+the flow branch keeps original pixels. The same kernels prepare AnimateDiff
+raw inputs and contact-sheet raw cells. The queued `raw_preview` job shares the
+single GPU worker but does not invoke diffusion. See [settings](settings.md#raw-video-matting-and-color-preparation)
+for cache boundaries, reference fallbacks and processing order.
+
+Apply masked tint requests this shared RVM cache, and so does background masking when
+its mask source is RVM matting (the alternatives are a user mask video or image folder).
+`video/masks.py` writes every source into the run's `video_frames_alpha/` before
+rendering; render and assembly masking both read that folder. Render masking composites only at
+the selected diffusion boundary: on the completed init image before diffusion,
+or on the output after diffusion. The warp function never applies render masks.
+Contact-sheet cells and AnimateDiff batches use the same stage helpers. The old
+apply_mask_after_warp field remains serializable but no longer controls placement.
+
+The web job log writer splits newline and carriage-return progress updates and
+extracts ETA only from outer render bars. Job snapshots publish the estimate and
+timestamp independently of the bounded log tail. The UI counts down that estimate
+and keeps its resizable log height in browser storage.
+
 ```mermaid
 flowchart TD
     video[Input video] --> extract[Extract frames<br/>video/input.py]
@@ -19,14 +49,15 @@ flowchart TD
     extract --> loop{{Per-frame loop<br/>pipeline.py}}
     cc --> loop
     loop --> warp[Warp previous stylized frame<br/>flow/warp.py + consistency weights]
-    warp --> bg[Optional render-time<br/>background composite]
+    warp --> bg[Optional before-diffusion<br/>background composite]
     bg --> sources[Select conditioning sources<br/>init / stylized / cond video / directory]
     sources --> adapters[ControlNet annotators + IP-Adapter<br/>per-frame conditioning]
     adapters --> run[run_sd<br/>encode init + choose noise mode]
     run --> sample[k-diffusion sampler + CFGDenoiser<br/>ControlNet / IP-Adapter / LoRA / AnimateDiff]
     sample --> decode[VAE decode<br/>tiled optional + softcap]
     decode --> color[Color match + brightness correction<br/>color/]
-    color --> save[Save frame, debug maps,<br/>and settings snapshot]
+    color --> bgout[Optional after-diffusion<br/>background composite]
+    bgout --> save[Save frame, debug maps,<br/>and settings snapshot]
     save --> loop
 
     loop --> assemble[Video assembly<br/>video/output.py]
@@ -93,6 +124,18 @@ config codec used by the CLI, then queues them for the single GPU render
 worker. Job state and logs stream back over server-sent events. Model paths are
 resolved during settings loading/setup; schedules remain declarative until the
 frame loop selects the value for the current frame.
+
+`ui_layout.py` declares workflow locations, readable model choices, and custom-editor
+metadata in addition to the existing storage tiers. Workflow navigation and field search
+consume that schema; the frontend maintains no second field-location list. A server URL
+can appear in Model setup while retaining the `system` tier, so imports and exports still
+preserve machine-local settings. Prompt and numeric schedules use the same schedule editor.
+
+The workspace viewer and history share artifact discovery. Saved artifacts carry their
+available frame numbers; configured diagnostics with no saved images are reported separately
+as `missing_layers`, never as rendered output. Image/video download endpoints set attachment
+filenames from the actual artifacts. Source-frame downloads retain the video's resolution.
+Resizing or editing settings does not alter an active job's submitted configuration.
 
 The schema also declares each field's compatible renderer families. Switching
 between SD, Flux, and HiDream filters the form and search results immediately:

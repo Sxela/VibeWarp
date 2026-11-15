@@ -50,6 +50,31 @@ describe('validation errors', () => {
 });
 
 describe('probing the video', () => {
+  it('uses the selected range even when old browser data contains a retired cap',async()=>{
+    mockProbe();
+    const {container}=render(VideoEditor,{value:{...video,video_init_path:'C:/clip.mp4',max_frames:1},frameRange:[0,10],onchange:vi.fn()});
+    await waitFor(()=>expect(container.querySelector('.meta dl div:last-child dd')).toHaveTextContent('11'));
+    expect(screen.queryByRole('spinbutton',{name:'Frame limit'})).not.toBeInTheDocument();
+  });
+
+  it.each([[1280,720,'512×320'],[1080,1920,'320×512']])(
+    'shows source aspect for Disco with a legacy zero max size (%s×%s)',async(width,height,expected)=>{
+      mockProbe({source:{...PROBE.source,width,height}});
+      const {container}=render(VideoEditor,{
+        value:{...video,video_init_path:'C:/clip.mp4',max_size:0},
+        modelVersion:'disco_512',onchange:vi.fn()
+      });
+      await waitFor(()=>expect(container.textContent).toContain(expected));
+      expect(screen.getByRole('spinbutton',{name:/Max size/})).toHaveValue(512);
+    });
+  it('keeps exact reference preview at its fixed size',async()=>{
+    mockProbe();
+    const {container}=render(VideoEditor,{
+      value:{...video,video_init_path:'C:/clip.mp4',max_size:0},
+      modelVersion:'disco_512',discoReference:true,onchange:vi.fn()
+    });
+    await waitFor(()=>expect(container.textContent).toContain('512×512'));
+  });
   it('reports the source, the REAL render size and the frame count', async () => {
     mockProbe();
     const { container } = render(VideoEditor, {

@@ -4,6 +4,22 @@
 
 Video-to-video style transfer, consolidated from [WarpFusion](https://github.com/Sxela/WarpFusion) v0.37 into a standalone Python package.
 
+Disco notebook imports preserve the six-step quality/turbo execution controls: repeated CLIP passes, grouped cut batches, merged LoRAs, secondary precision, and source-aspect padded canvases with optional export cropping. See [Disco video settings](docs/disco-video-settings-and-trusted-guidance.md) for configuration and parity limits.
+
+All Disco CLIP and SigLIP guidance encoders load in FP16. The secondary model automatically uses native CUDA BF16 where supported, otherwise FP16 (BF16 on CPU). Older precision settings migrate automatically; no FP32 model execution option is exposed.
+
+Disco notebook imports retain Turbo skip fractions and consistency controls.
+Turbo applies intermediate softness to both histories, color-corrects next-frame
+feedback, and blends on CUDA with nearest-even byte rounding. See
+[Turbo settings](docs/settings.md#turbo-intermediate-strength).
+
+**Guidance → Cutouts** includes a working-size cap to reduce cutout
+construction memory (try 1024 px; 0 preserves native behavior). Final cuts still
+use each encoder's required input size. Failed/cancelled jobs become terminal
+before GPU cleanup, and cleanup errors do not stop the job worker.
+
+Disco cutout schedules use executed inference progress (0–100%), restarting after skipped steps. Overview, innercut and grayscale values hold until the next key; charts show that hold through 100%. Older settings migrate once while preserving their configured run's cut selections. Video export cropping and upscaling preserve full-canvas blend feedback, and automatic model preparation preserves explicit relative ControlNet/IP-Adapter paths.
+
 Feeds each frame of a video through Stable Diffusion, warping the previous render forward
 along optical flow so every frame builds on the last instead of being redrawn from scratch.
 The result is painterly and alive — it drifts, dissolves and reconstitutes.
@@ -19,23 +35,62 @@ together — turn them up for stability, down for dissolve.
 A local web UI (Svelte + FastAPI), started with `run-ui.bat` / `run-ui.sh`. There is a full
 CLI too — see the [CLI reference](docs/cli.md).
 
-**Render** — settings grouped by how you actually use them: what you set once per project,
-what you change every run, and what you touch once or never. The input video is probed on
-the spot, so the resolution and frame count shown are what the render will genuinely
-produce, not an estimate.
+The current project name stays centered in the navbar. Click it to edit the
+batch name; Enter or blur saves, Escape cancels. Project settings keeps Import,
+Export and Reset in a separate menu. Compact screens retain a centered title row.
 
-![The render view: project settings, the probed input video, and the live render monitor](docs/assets/ui-render.jpg)
+**Workspace** — a large source/output viewer with a resizable settings inspector.
+The workflow runs from **Source & output** through **Model**, **Prompts & sampling**,
+**Guidance**, **Conditioning**, **Mask & tint**, **Color match**, **Frame consistency**, and **Video export**. **All settings** exposes
+every editable field for the selected model; **System settings** keeps machine paths and
+performance separate. Empty workflows and groups hide as model/settings choices change.
+Advanced controls open automatically when they contain all the settings in a group.
+Download and project-action popovers close as soon as an item is selected.
+The dedicated **Mask & tint** tab offers CUDA Robust Video Matting,
+foreground/background RGB tints with independent opacity, and a one-frame preview.
+Opacity uses 0–1 sliders (1 is fully opaque); previews show validation errors
+and discard the previous image when a new attempt starts.
+Video frames and masks are cached per video, filling missing overlaps across jobs.
+Separate raw-frame PDF/LAB/mean color matching can follow the first stylized frame
+or the previous warped render; output color matching keeps its own settings.
+The **Guidance** workflow separates General, CLIP guidance, Cutouts, and Advanced
+guidance sections. Fixed-seed controls sit beside Seed for every model.
+For native Disco and SD/SDXL, **Fixed noise randomness** adds reproducible
+per-frame variation without reducing Gaussian noise variance. It ranges from
+0 (existing behavior) to 1 (fresh noise after frame zero).
+**Noise wiggle shift px** uses 0 for off. Direction `[0,0]` gives random wiggle;
+other `[x,y]` vectors roll cumulatively in that direction at the chosen speed.
+Use randomness 0 for wraparound translation alone; noise values stay intact.
+Disco's init/image scale schedules, secondary model and frame-guidance mask
+are directly available in **Guidance / General**.
+Frame ranges use extracted-frame indices: with stride 2, range 0–10 extracts
+source frames 0, 2, …, 20, retaining video guidance for all eleven render frames.
+The persistent model picker groups ten variants into **Native
+models** and **ComfyUI-managed models**, with Start/Cancel always in reach. The source
+video is probed before rendering, and phones use Viewer,
+Settings, and Runs views.
 
-**History & Comparison** — every past run, inspectable frame by frame and layer by layer:
+![The workspace with shared prompt schedules and source/output previews](docs/assets/ui-render.jpg)
+
+**Runs & settings** — every past run, inspectable frame by frame and layer by layer:
 the init frame, warped init, processed consistency mask, each ControlNet's source and
-detected map, the diffusion input, and the output. Load any run's settings back into the
-form to iterate on it. Press play on the frame stepper to loop the rendered frames in
+detected map, the diffusion input, and the output. **Load settings** and **Resume**
+are directly available in the run toolbar. Click the run name to rename it.
+The player toolbar switches between **View frames** and **Play video** when a
+video exists. The mode switch stays on the left, playback controls are centered,
+and export actions stay on the right; narrow panels use separate rows.
+Load any run's settings back into the form to iterate on it.
+Press play on the frame stepper to loop the rendered frames in
 place — judge motion without assembling a video first, including part-way through a
 render. Cancelled runs keep their completed frames: resume from the first missing frame,
 assemble a partial video at any time, and play assembled videos in place.
-Ctrl/Cmd-click any two runs to compare every changed saved setting side by side —
+Select **A** and **B** on two runs to compare every changed saved setting side by side —
 including settings one run predates entirely, which show as **not saved** rather than
-silently reading as agreement.
+silently reading as agreement. The Ctrl/Cmd-click shortcut also remains available.
+**Inspect** groups frame layers, CC masks, ControlNet maps, IP-Adapter references, and
+edit-model inputs. Selected layers share one frame control and enlarge on click. Missing
+artifacts are labelled explicitly; phones display one selected layer at a time. The
+timeline includes **Download** for the current image or assembled video and **Make video**.
 
 ![The history view: past runs on the left, and one frame compared across its layers](docs/assets/ui-history.jpg)
 
@@ -44,6 +99,7 @@ silently reading as agreement.
 - [CLI reference](docs/cli.md) — all flags, usage examples, model downloads, Python API, output layout
 - [Settings reference](docs/settings.md) — WarpFusion settings mapping, schedules, consistency masks, video assembly, tiled VAE, noise modes, prompts/LORAs, vendored libraries
 - [Architecture](docs/architecture.md) — render pipeline, settings flow, and dependency diagrams
+- [Disco Diffusion and turbo](docs/disco-diffusion.md) — classic pixel diffusion, guidance encoders, download progress, and flow turbo
 - [GPU validation](docs/gpu-validation.md) — resumable notebook-parity suite and bulk reports
 - [Roadmap and known gaps](docs/roadmap.md) — what is verified against the notebook, what is not, and where to help
 
@@ -54,6 +110,14 @@ silently reading as agreement.
   For a manual install you also need Python 3.11+ and ffmpeg on PATH.
 
 ## Quickstart
+
+Machine paths stay in local, gitignored `system.json`. For a fresh setup, configure
+**System settings** in the UI, or copy [system.example.json](system.example.json)
+to `system.json` and edit it. The template uses `.` for the install root, `models`
+for model storage, and blank optional overrides. Relative paths assume you launch
+from the install folder. Set your own absolute
+paths for models stored elsewhere. Existing installations keep their local paths;
+the example is never applied automatically.
 
 ### 1. Install
 
@@ -186,15 +250,57 @@ WarpFusion notebook settings file:
 vibewarp-ui --settings path/to/settings.txt
 ```
 
-The same files can be selected with **Import settings** after the UI opens.
+The same files can be selected with **Import settings** in the project menu after the UI
+opens. Export and reset are in that menu too. Disco 256 is no longer offered in the UI;
+legacy settings remain readable, with a supported model selection required before rendering.
 
-The **Preview & Debug** tab replays a finished (or in-progress) run frame by
+Prompt and numeric schedules always show their keyframes. Frame 0 is the constant
+case; copy/paste icons transfer JSON without hiding values behind mode switches.
+Nested per-step ramps stay editable as JSON. Explanatory hints are available from
+the keyboard-accessible **?** controls; validation errors stay beside their fields.
+
+The persistent **Workspace / Runs** switch keeps saved runs accessible in narrower
+desktop windows. **Hide settings** gives the images more room. **Source / output**
+compares frames; **Compare settings** compares the saved settings of runs A and B.
+The empty source pane opens and focuses the input video field. Reconnecting to a
+render restores its submitted viewer context while preserving your next-render draft.
+After the render finishes, **View draft** returns the viewer to that draft.
+The Model tab's **Support VibeWarp** category starts expanded, with supporter
+credits and the Patreon link visible.
+
+Drag the top edge of the system log to expand it; its height is remembered.
+The render status shows ETA from the outer render progress log, separately from
+per-frame denoising progress.
+
+In **Mask & tint**, **Apply masked tint** colors raw inputs while **Use
+Background Mask** composites the render image **before diffusion** or **after
+diffusion**. **Mask source** picks RVM matting (generated on the GPU, also when tint
+is off) or your own mask video / image folder; video export masking uses the same
+masks. Render masking is applied once at the selected stage, outside the warp step.
+**Mask & tint** contains only RVM masking and tint controls, plus RVM file overrides.
+Raw-input color matching lives in **Color match**. Consistency masks stay in
+**Frame consistency / Flow & Consistency**, guidance masks in **Guidance / General**,
+Disco inpainting masks in **Prompts & sampling**, and output masks in **Video export**.
+ControlNet/IP-Adapter masks remain in **Conditioning**. See the
+[remaining duplicate editors](docs/settings-duplicates.md).
+The remaining [All-settings-only fields](docs/settings-workflow-audit.md) are
+listed for the next navigation pass.
+
+For Disco 512, enabling quality/turbo LoRAs preserves your secondary-model,
+guidance, prompt, and sampling settings. Choose those settings explicitly;
+the UI no longer changes them when an adapter is enabled.
+
+In **Source & output**, the frame range is the only render limit: 0–10 renders
+11 frames. Old profile frame counts migrate into that range during import;
+they cannot override later range edits. There is no separate frame-limit setting.
+
+The **Inspect** viewer replays a finished (or in-progress) run frame by
 frame, showing the init video frame, the warped init, each ControlNet's source
 image and detected map, the diffusion input, and the rendered output side by
 side on a frame slider — so you can see exactly what a ControlNet was fed and
 what it produced.
 
-Cancelling does not discard rendered frames. In **History & Comparison**, use **Resume**
+Cancelling does not discard rendered frames. In **Runs & settings**, use **Resume**
 to continue the same run with its previous stylized frame restored, or **Make video** to
 encode only the frames completed so far. **Play video** opens the result in the app.
 

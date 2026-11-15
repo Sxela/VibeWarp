@@ -15,10 +15,12 @@ from vibewarp.preview import (describe_run, image_path, list_runs, resume_status
                               thumbnail_path, video_file, warm_thumbnails)
 from vibewarp.video.input import first_visible_frame, fit_dimensions, frame_at, probe_video
 from vibewarp.web_jobs import JobManager, TERMINAL_STATES
+from vibewarp.web_downloads import DownloadManager
 
 STATIC_DIR = Path(__file__).with_name("web_static")
 CHECKPOINT_SUFFIXES = (".pth", ".safetensors", ".ckpt", ".bin")
 manager = JobManager()
+download_manager = DownloadManager()
 
 
 def _comfy_port_status(server_url: str, timeout: float = 0.5) -> dict:
@@ -51,7 +53,8 @@ def _ui_config(config: RunConfig) -> RunConfig:
         setattr(config.flux, key, value)
     for key, value in qwen_model_files(config).items():
         setattr(config.qwen, key, value)
-    if config.video.max_size <= 0:
+    reference = config.model_version.startswith('disco_') and config.disco.sampler == 'distilled' and not config.disco.distilled_guided
+    if config.video.max_size <= 0 and not reference:
         config.video.max_size = max(config.video.width, config.video.height)
     return config
 
@@ -84,6 +87,7 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
     except ImportError as exc:
         raise RuntimeError("The web UI requires `pip install -e .[ui]`") from exc
     jobs = job_manager or manager
+    jobs.download_manager = download_manager
     app = FastAPI(title="VibeWarp", version="1")
 
     def parse(payload: dict, require_inputs: bool = True) -> RunConfig:
@@ -120,6 +124,46 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
             "schema": config_schema(),
             "prefilled": initial_config is not None,
         }
+
+    @app.post('/api/models/required')
+    def list_required_models(payload: dict):
+        from vibewarp.model_assets import required_model_files
+        try:
+            config = apply_path_defaults(config_from_dict(payload))
+            return {'files':required_model_files(config)}
+        except (ConfigError,ValueError,TypeError) as exc:
+            raise HTTPException(422,detail=str(exc))
+
+    @app.post('/api/models/prepare')
+    def prepare_models(payload: dict):
+        return download_manager.prepare(parse(payload, require_inputs=False)).snapshot()
+
+    @app.get('/api/models/downloads')
+    def model_downloads():
+        return download_manager.snapshot()
+
+    @app.post('/api/models/downloads/{item_id}/{action}')
+    def control_download(item_id: str, action: str):
+        try:
+            return download_manager.control(item_id, action)
+        except KeyError:
+            raise HTTPException(404, detail='Unknown model download')
+        except ValueError as exc:
+            raise HTTPException(422, detail=str(exc))
+
+    @app.get('/api/models/prepare/{task_id}')
+    def model_preparation(task_id: str):
+        task = download_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, detail='Unknown model preparation')
+        return task.snapshot()
+
+    @app.post('/api/models/prepare/{task_id}/cancel')
+    def cancel_preparation(task_id: str):
+        task = download_manager.get(task_id)
+        if task is None:
+            raise HTTPException(404, detail='Unknown model preparation')
+        return download_manager.cancel_batch(task_id)
 
     @app.get("/api/fs/exists")
     def path_exists(path: str = ""):
@@ -179,8 +223,25 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
             "max_frame": max(0, renderable - 1),
         }
 
+    @app.post('/api/video/raw-preview', status_code=202)
+    async def raw_video_preview(request: Request):
+        payload = await request.json()
+        config = parse(payload.get('config',{}),require_inputs=False)
+        frame = payload.get('frame',0)
+        if type(frame) is not int or frame < 0:
+            raise HTTPException(422,detail='Preview frame must be a nonnegative integer')
+        if not os.path.isfile(config.video.video_init_path):
+            raise HTTPException(422,detail='Choose an existing input video')
+        from vibewarp.video.raw_processing import enabled as raw_enabled
+        if not raw_enabled(config):
+            raise HTTPException(422,detail='Enable masked tint, render masking or raw color matching first')
+        reference = payload.get('reference_path','')
+        if not isinstance(reference,str) or (reference and not os.path.isfile(reference)):
+            raise HTTPException(422,detail='Preview reference image does not exist')
+        return jobs.submit_raw_preview(config,frame,reference).snapshot()
+
     @app.get("/api/video/thumbnail")
-    def video_thumbnail(path: str = "", frame: int | None = None):
+    def video_thumbnail(path: str = "", frame: int | None = None, download: bool = False):
         """The first frame that is not essentially black.
 
         Clips that open on a fade-in would otherwise show a black thumbnail, which tells
@@ -198,12 +259,15 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
 
         from io import BytesIO
         image = Image.fromarray(pixels)
-        image.thumbnail((480, 480))
+        if not download:
+            image.thumbnail((480, 480))
         buffer = BytesIO()
         image.save(buffer, format="JPEG", quality=82)
         buffer.seek(0)
-        return StreamingResponse(buffer, media_type="image/jpeg",
-                                 headers={"X-Frame-Index": str(index)})
+        headers = {"X-Frame-Index": str(index)}
+        if download:
+            headers['Content-Disposition'] = f'attachment; filename="source-{index:06d}.jpg"'
+        return StreamingResponse(buffer, media_type="image/jpeg", headers=headers)
 
     @app.post('/api/references/upload')
     async def upload_reference(request: Request, filename: str = 'reference.png'):
@@ -368,11 +432,13 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
 
     @app.get("/api/preview/runs/{run_id}/image")
     def preview_image(run_id: str, layer: str, frame: int,
-                      output_dir: str = "images_out", batch_name: str = "warpfusion"):
+                      output_dir: str = "images_out", batch_name: str = "warpfusion",
+                      download: bool = False):
         path = image_path(output_dir, batch_name, run_id, layer, frame)
         if path is None:
             raise HTTPException(404, detail="No image for that layer/frame")
-        return FileResponse(path, media_type=mimetypes.guess_type(path)[0])
+        return FileResponse(path, media_type=mimetypes.guess_type(path)[0],
+                            filename=os.path.basename(path) if download else None)
 
     @app.get("/api/preview/runs/{run_id}/thumbnail")
     def preview_thumbnail(run_id: str, layer: str, frame: int,
@@ -386,12 +452,13 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
 
     @app.get("/api/preview/runs/{run_id}/video")
     def preview_video(run_id: str, output_dir: str = "images_out",
-                      batch_name: str = "warpfusion"):
+                      batch_name: str = "warpfusion", download: bool = False):
         run = run_dir(output_dir, batch_name, run_id)
         path = video_file(run, batch_name) if run else None
         if path is None:
             raise HTTPException(404, detail="This run has no assembled video")
-        return FileResponse(path, media_type="video/mp4")
+        return FileResponse(path, media_type="video/mp4",
+                            filename=os.path.basename(path) if download else None)
 
     @app.post("/api/preview/runs/{run_id}/video", status_code=202)
     def build_preview_video(run_id: str, output_dir: str = "images_out",
@@ -493,12 +560,14 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         return FileResponse(path, media_type=mimetypes.guess_type(path)[0])
 
     @app.get("/api/jobs/{job_id}/preview")
-    def preview(job_id: str):
+    def preview(job_id: str, download: bool = False):
         job = jobs.get(job_id)
         if not job: raise HTTPException(404, detail="Unknown job")
         path = job.preview_path
         if not path or not os.path.isfile(path): raise HTTPException(404, detail="Preview is not ready")
-        return FileResponse(path, media_type=mimetypes.guess_type(path)[0], headers={"Cache-Control": "no-store"})
+        return FileResponse(path, media_type=mimetypes.guess_type(path)[0],
+                            filename=os.path.basename(path) if download else None,
+                            headers={"Cache-Control": "no-store"})
 
     if STATIC_DIR.is_dir():
         if (STATIC_DIR / "assets").is_dir(): app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")

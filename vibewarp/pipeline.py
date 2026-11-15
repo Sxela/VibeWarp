@@ -38,7 +38,7 @@ from vibewarp.core.model_loader import (
 )
 from vibewarp.settings import save_settings, settings_to_dict
 from vibewarp.utils.misc import create_path, seed_everything
-from vibewarp.video.input import extract_frames, resolve_video_dimensions
+from vibewarp.video.input import extract_frames, extraction_selection, resolve_video_dimensions
 from vibewarp.video.output import create_video
 
 
@@ -106,6 +106,12 @@ def load_models(config: RunConfig, device: str = 'cuda') -> dict:
         'controlnets' and 'motion_module' keys.
     """
     from vibewarp.core.model_loader import MODEL_CONFIGS, is_edit_model
+    if config.model_version.startswith('disco_'):
+        if config.disco.sampler == 'distilled' or config.disco.quality_lora_enabled:
+            from vibewarp.core.disco_lora import DistilledDiscoBackend
+            return {'disco_backend':DistilledDiscoBackend(config, device=device)}
+        from vibewarp.core.disco import DiscoBackend
+        return {'disco_backend': DiscoBackend(config, device=device)}
 
     # Flux edit models use the diffusers pipeline, not the CompVis/k-diffusion
     # stack — load it and return before any SD-specific setup runs.
@@ -404,9 +410,18 @@ def run(
     if path_errors:
         details = "; ".join(f"{item['path']}: {item['message']}" for item in path_errors)
         raise ValueError(f"Invalid render configuration: {details}")
-    if config.video.max_size > 0:
-        config.video.width, config.video.height = resolve_video_dimensions(
-            config.video.video_init_path, config.video.max_size)
+    padded_disco = config.model_version.startswith('disco_') and config.disco.pad_to_multiple_64
+    if padded_disco:
+        from vibewarp.video.padding import resolve_padded_geometry
+        visible, canvas = resolve_padded_geometry(config)
+        print(f'  Disco visible content: {visible}; padded canvas: {canvas}')
+    elif config.video.max_size > 0:
+        if config.model_version.startswith('disco_'):
+            config.video.width, config.video.height = resolve_video_dimensions(
+                config.video.video_init_path,config.video.max_size,multiple=64,round_up=True)
+        else:
+            config.video.width, config.video.height = resolve_video_dimensions(
+                config.video.video_init_path, config.video.max_size)
         print(f"  Source aspect resolution: {config.video.width}x{config.video.height} "
               f"(max size {config.video.max_size})")
     # 1. Setup directories
@@ -422,25 +437,37 @@ def run(
 
     # 4. Extract video frames (only for the requested frame range)
     video_frames_folder = dirs['video_frames']
+    extraction_folder = (os.path.join(dirs['batch'], 'video_frames_raw')
+                         if padded_disco else video_frames_folder)
+    from vibewarp.video.raw_processing import enabled as raw_enabled, prepare_run
+    raw_cache = None
     if config.video.video_init_path:
         if not os.path.isfile(config.video.video_init_path):
             raise FileNotFoundError(
                 f"Input video not found: {config.video.video_init_path}")
-        start_f = config.frame_range[0] if config.frame_range and config.frame_range[0] > 0 else 0
-        end_f = config.frame_range[1] if config.frame_range and len(config.frame_range) > 1 and config.frame_range[1] > 0 else 999999999
+        extraction_options = extraction_selection(config.frame_range, config.video.extract_nth_frame)
+        os.makedirs(extraction_folder, exist_ok=True)
         existing_frames = any(
             name.lower().endswith(('.jpg', '.jpeg', '.png'))
-            for name in os.listdir(video_frames_folder))
-        if existing_run_dir and existing_frames:
-            print(f"  Reusing extracted frames: {video_frames_folder}")
+            for name in os.listdir(extraction_folder))
+        if raw_enabled(config):
+            raw_cache = prepare_run(config, extraction_folder)
+        elif existing_run_dir and existing_frames:
+            print(f"  Reusing extracted frames: {extraction_folder}")
         else:
             extract_frames(
                 video_path=config.video.video_init_path,
-                output_dir=video_frames_folder,
+                output_dir=extraction_folder,
                 nth_frame=config.video.extract_nth_frame,
-                start_frame=start_f,
-                end_frame=end_f,
+                **extraction_options,
             )
+        if padded_disco:
+            from vibewarp.video.padding import prepare_padded_frames
+            prepare_padded_frames(extraction_folder, video_frames_folder, visible, canvas)
+        # One mask per frame in <run>/video_frames_alpha, from the selected source;
+        # render and assembly masking both read it.
+        from vibewarp.video.masks import materialize as materialize_masks
+        materialize_masks(config, video_frames_folder, dirs['batch'], raw_cache)
 
     # 4a-0. Content-aware scene analysis (notebook cells 26–28). Needed when
     # schedules are template-driven or captioning uses content-aware keyframes.
@@ -503,6 +530,10 @@ def run(
     except Exception:
         pass
     _t_models = _time.time()
+    from vibewarp.acquisition import install_download_hooks
+    from vibewarp.model_assets import ensure_selected_assets
+    install_download_hooks()
+    ensure_selected_assets(config)
     models = load_models(config)
     _log_time("load_models total", _time.time() - _t_models)
 
@@ -517,12 +548,14 @@ def run(
     # would dereference an sd_model that Flux never loads. Skip it wholesale.
     from vibewarp.core.model_loader import is_edit_model
     is_edit = is_edit_model(config.model_version)
+    is_pixel = config.model_version.startswith('disco_')
+    uses_sd = not (is_edit or is_pixel)
 
     motion_module = None
     ipadapters = {}
     clip_vision_models = {}
     loaded_controlnets = {}
-    if not is_edit:
+    if uses_sd:
         # 5c. Inject AnimateDiff motion modules if loaded
         motion_module = models.get('motion_module')
         if motion_module is not None:
@@ -568,12 +601,13 @@ def run(
         model_wrap=models.get('model_wrap'),
         model_wrap_cfg=models.get('model_wrap_cfg'),
         edit_backend=models.get('edit_backend'),
+        disco_backend=models.get('disco_backend'),
         loaded_controlnets=loaded_controlnets,
         loaded_ipadapters=ipadapters,
         clip_vision_model=clip_vision_models,
         raft_model=raft_model,
         motion_module=motion_module,
-        sampler_fn=None if is_edit else get_sampler_fn(config.diffusion.sampler),
+        sampler_fn=get_sampler_fn(config.diffusion.sampler) if uses_sd else None,
         batch_folder=dirs['batch'],
         video_frames_folder=video_frames_folder,
         flow_folder=flow_folder,
@@ -581,6 +615,7 @@ def run(
     )
 
     # 7. Run frame loop
+    ctx.raw_video_cache = raw_cache
     frame_range = config.frame_range if config.frame_range != [0, 0] else None
     output_paths = run_frames(ctx, frame_range=frame_range, resume_from=resume_from)
 
@@ -590,7 +625,7 @@ def run(
         eject_motion_modules(models['sd_model'], motion_module)
 
     # 7b2. Unpatch tiled VAE if it was applied (never patched on the Flux path)
-    if config.vae.use_tiled_vae and not is_edit:
+    if config.vae.use_tiled_vae and uses_sd:
         from vibewarp.core.vae import unpatch_model_tiled_vae
         unpatch_model_tiled_vae(models['sd_model'])
 
@@ -600,11 +635,16 @@ def run(
         unhook_ipadapter(models['sd_model'])
 
     # 8. Assemble video
+    # The frames are the expensive part and are already on disk; an assembly failure
+    # must not turn a finished render into a failed job. It can be retried from History.
     if output_paths:
         try:
             assemble_video(config, dirs['batch'])
-        except Exception as e:
-            print(f"Video assembly failed: {e}")
+        except Exception as exc:
+            import traceback
+            print(f"WARNING: video assembly failed ({type(exc).__name__}: {exc}); "
+                  "frames are kept and the video can be rebuilt from History.")
+            traceback.print_exc()
 
     # 9. Hand the VRAM back. The server renders jobs back to back in one process, so
     # without this the next job starts against a ceiling set by this one -- and the OOM
@@ -626,7 +666,7 @@ def assemble_video(config: RunConfig, run_dir: str) -> str:
     return create_video(
         frames_dir=run_dir,
         output_path=os.path.join(run_dir, f"{config.batch_name}.mp4"),
-        fps=12.0,
+        fps=resolve_output_fps(config),
         batch_name=config.batch_name,
         img_format=config.video.save_img_format,
         blend_mode=va.blend_mode if config.flow.flow_warp else 'None',
@@ -649,4 +689,16 @@ def assemble_video(config: RunConfig, run_dir: str) -> str:
         video_frames_folder=os.path.join(run_dir, 'video_frames'),
         mask_clip_low=va.mask_clip_low,
         mask_clip_high=va.mask_clip_high,
+        visible_size=((config.video.visible_width, config.video.visible_height)
+                      if va.crop_to_visible else None),
     )
+
+
+def resolve_output_fps(config):
+    if config.video_assembly.fps > 0:
+        return config.video_assembly.fps
+    import cv2
+    capture=cv2.VideoCapture(config.video.video_init_path)
+    fps=capture.get(cv2.CAP_PROP_FPS)
+    capture.release()
+    return fps/max(1,config.video.extract_nth_frame) if fps and fps>0 else 12.

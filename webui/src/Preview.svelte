@@ -1,4 +1,9 @@
 <script>
+  import {tick} from 'svelte';
+  import {closeOnSelection} from './closeOnSelection.js';
+  import LayerViewer from './LayerViewer.svelte';
+  import ImageZoom from './ImageZoom.svelte';
+  import {derive as deriveVideo} from './videoMath.js';
   import {
     annotateUnsaved,
     diffSettings,
@@ -24,7 +29,22 @@
   // This is a MODE, not a settings tab, so it owns the whole window: runs down the left,
   // the viewer in the middle, layer chips pinned to the bottom. Nothing scrolls except the
   // runs list — the images scale into whatever height is left rather than pushing the page.
-  let { config, job, onload, onjob } = $props();
+  let { config, job, onload, onjob, onsource=()=>{}, history=true, view=$bindable('inspect') } = $props();
+  let focusedLayer=$state(null), sourceInfo=$state(null), sourceError=$state(''), showRuns=$state(false);
+  let sourcePath=$derived(config?.video?.video_init_path||'');
+  $effect(()=>{
+    const path=sourcePath;
+    sourceInfo=null;sourceError='';
+    if(!path)return;
+    const controller=new AbortController();
+    fetch(`/api/video/probe?path=${encodeURIComponent(path)}`,{signal:controller.signal})
+      .then(async response=>{const result=await response.json();if(controller.signal.aborted)return;if(!response.ok)throw new Error(result.detail?.[0]?.message||'Could not read the input video');sourceInfo=result.source;})
+      .catch(error=>{if(error.name!=='AbortError')sourceError=error.message;});
+    return()=>controller.abort();
+  });
+  let sourceProbe=$derived(sourceInfo?deriveVideo(sourceInfo,config?.video?.max_size||0,config?.video?.extract_nth_frame||1,config?.frame_range):null);
+  let sourceFirst=$derived(Math.min(sourceProbe?.maxFrame??Infinity,Math.max(0,Number(config?.frame_range?.[0]||0))));
+  let sourceLast=$derived(config?.frame_range?.length===1?sourceFirst:Math.max(sourceFirst,Math.min(sourceProbe?.maxFrame||0,config?.frame_range?.[1]>0?config.frame_range[1]:sourceProbe?.maxFrame||0)));
 
   const STORAGE_KEY = 'vibewarp.preview.layers.v1';
   const MIN_FRAMES_STORAGE_KEY = 'vibewarp.preview.minimumFrames.v1';
@@ -46,12 +66,16 @@
   let action = $state('');
   let cancelling = $state(false);
   let showVideo = $state(false);
+  let renameInput=$state(null);
   let compareIds = $state([]);
   let diffRows = $state([]);
   let diffLoading = $state(false);
   let diffError = $state('');
   let showDiff = $state(false);
   let minimumFrames = $state(loadMinimumFrames());
+  let sourceUrl=$derived(!history&&sourceInfo&&frame>=sourceFirst&&frame<=sourceLast?`/api/video/thumbnail?path=${encodeURIComponent(sourcePath)}&frame=${frame*Math.max(1,config?.video?.extract_nth_frame||1)}`:'');
+  $effect(()=>{if(!history&&sourceInfo&&(frame<sourceFirst||frame>sourceLast))frame=sourceFirst;});
+  let liveUrl=$derived(!history&&job?.preview_available&&frame===job.frame&&(!job.run_id||job.run_id===runId)?`/api/jobs/${job.id}/preview?v=${job.revision}`:'');
 
   // Pull an old run's settings back into the form. The point of keeping history is being
   // able to iterate on a run you liked, not just look at it.
@@ -88,14 +112,16 @@
     return run?.label || `Run #${id}`;
   }
   function toggleRunComparison(id){
-    let next;
-    if (compareIds.includes(id)) next = compareIds.filter(item => item !== id);
-    else if (compareIds.length < 2) next = [...compareIds, id];
-    else next = [compareIds[1], id];
-    compareIds = next;
-    showDiff = next.length === 2;
-    diffRows = []; diffError = '';
-    if (next.length === 2) loadSettingsDiff(next);
+    const existing=compareIds.indexOf(id);
+    assignComparison(id,existing>=0?existing:!compareIds[0]?0:1);
+  }
+  function assignComparison(id, slot){
+    let next=[...compareIds];
+    if(next[1-slot]===id)next[1-slot]=undefined;
+    next[slot]=next[slot]===id?undefined:id;
+    compareIds=next;
+    showDiff=!!next[0]&&!!next[1];diffRows=[];diffError='';
+    if(showDiff)loadSettingsDiff(next);
   }
   async function loadSettingsDiff(ids){
     let key = ids.join(':');
@@ -164,9 +190,12 @@
       cancelling = false;
     }
   }
-  function beginRename(){
+  async function beginRename(){
     draftLabel = current?.label || '';
     renaming = true;
+    await tick();
+    renameInput?.focus();
+    renameInput?.select();
   }
   async function saveLabel(){
     if (!current || savingLabel) return;
@@ -184,7 +213,7 @@
     finally { savingLabel = false; }
   }
   function when(seconds){
-    let d = new Date(seconds * 1000);
+    let d = new Date(typeof seconds==='number'?seconds*1000:seconds);
     let mins = Math.round((Date.now() - d) / 60000);
     if (mins < 1) return 'just now';
     if (mins < 60) return `${mins}m ago`;
@@ -214,8 +243,8 @@
     } catch {}
     let available = filterRunsByMinimumFrames(runs, minimumFrames);
     let availableIds = new Set(available.map(run => run.id));
-    compareIds = compareIds.filter(id => availableIds.has(id));
-    if (compareIds.length < 2) showDiff = false;
+    compareIds = compareIds.map(id => availableIds.has(id)?id:undefined);
+    if (!compareIds[0]||!compareIds[1]) showDiff = false;
     if (!available.length) {
       runId = '';
       detail = null;
@@ -236,13 +265,17 @@
     batch_name: config?.batch_name || 'warpfusion',
   }));
 
+  let listRevision=0, detailRevision=0;
   async function loadRuns(keep = true){
+    const revision=++listRevision;
+    detailRevision+=1;
     loading = true; error = '';
     try {
       let r = await fetch(`/api/preview/runs?${params}`);
       let d = await r.json();
+      if(revision!==listRevision)return;
       runs = d.runs ?? [];
-      if (!runs.length) { detail = null; error = `No runs under ${d.root}`; return; }
+      if (!runs.length) { detail = null; runId='';error = history?`No runs under ${d.root}`:''; return; }
       let available = filterRunsByMinimumFrames(runs, minimumFrames);
       if (!available.length) {
         runId = ''; detail = null;
@@ -250,27 +283,32 @@
         return;
       }
       let switched = !keep || !available.some(run => run.id === runId);
-      if (switched) runId = available[0].id;
+      if (switched) runId = !history&&job?.run_id&&available.some(run=>run.id===job.run_id)?job.run_id:available[0].id;
       await loadRun(!detail);
-    } catch { error = 'Could not list runs'; }
-    finally { loading = false; }
+    } catch { if(revision===listRevision)error = 'Could not list runs'; }
+    finally { if(revision===listRevision)loading = false; }
   }
 
   async function loadRun(selectLatestOutput = false){
     if (!runId) return;
+    const revision=++detailRevision, requestedRun=runId;
     error = '';
     try {
       let previousRun = detail?.run;
       let previousLatest = latestRenderedFrame(detail);
       let r = await fetch(`/api/preview/runs/${runId}?${params}`);
+      if(revision!==detailRevision||requestedRun!==runId)return;
       if (!r.ok) { error = 'Could not read that run'; detail = null; return; }
-      detail = await r.json();
-      if (!detail.frames.length) { error = 'That run has no frames yet'; return; }
+      const next=await r.json();
+      if(revision!==detailRevision||requestedRun!==runId)return;
+      detail = next;
+      syncActiveRunSummary();
+      if (!detail.frames.length) return;
       let latest = latestRenderedFrame(detail);
       // The frame number is global across history runs. Only the initial load
       // selects the latest output; an in-progress run keeps following its own
       // latest frame until the user scrubs away from it.
-      frame = frameAfterRunLoad({
+      const nextFrame = frameAfterRunLoad({
         selectedFrame: frame,
         previousRun,
         nextRun: runId,
@@ -278,17 +316,48 @@
         nextLatest: latest,
         selectLatest: selectLatestOutput,
       });
-    } catch { error = 'Could not read that run'; }
+      if(history||frame!==job?.frame)frame=nextFrame??frame;
+    } catch { if(revision===detailRevision)error = 'Could not read that run'; }
+  }
+
+  // The sidebar card's frame count and thumbnail come from the runs LIST,
+  // which is only refetched when a job reaches a terminal state — so a
+  // rendering run's count sat frozen at whatever it was when the list loaded
+  // until you refreshed. `detail` is already refetched on every frame, so
+  // patch the row from it rather than re-listing every run once per frame.
+  function syncActiveRunSummary(){
+    if (!runId || !detail) return;
+    let rendered = renderedFrames(detail);
+    runs = runs.map(run => run.id === runId
+      ? {...run,
+         frames: rendered.length,
+         last_frame: rendered.length ? rendered.at(-1) : null}
+      : run);
   }
 
   // Initial load, and reload when the output dir / batch name change.
-  $effect(() => { params; compareIds = []; showDiff = false; loadRuns(); });
+  $effect(() => { params; compareIds = []; showDiff = false; detail=null;runs=[];runId='';loadRuns(false); });
+
+  // A run that started after this list loaded has no row to patch. Bring it in
+  // once — not on every frame, which would rescan every run on disk — and only
+  // after the initial listing settles, or the empty list mid-load looks like a
+  // missing run. Latched per run id so a run whose directory does not exist yet
+  // cannot trigger a relist per frame.
+  let relistedFor = $state('');
+  $effect(() => {
+    if (loading || job?.state !== 'running' || !job.run_id) return;
+    if (relistedFor === job.run_id) return;
+    if (runs.some(run => run.id === job.run_id)) return;
+    relistedFor = job.run_id;
+    loadRuns();
+  });
 
   // While a render is running, new frames keep appearing — refresh as it advances.
   let lastJobFrame = $state(-1);
   let lastTerminalJob = $state('');
   $effect(() => {
     if (job?.state === 'running' && job.frame !== lastJobFrame) {
+      if(!history&&(frame===lastJobFrame||lastJobFrame<0))frame=job.frame;
       lastJobFrame = job.frame;
       loadRun();
     }
@@ -299,24 +368,15 @@
       if (job.operation === 'video' && job.state === 'completed') showVideo = true;
     }
   });
+  $effect(()=>{
+    if(!history&&job?.run_id&&runs.some(run=>run.id===job.run_id)&&runId!==job.run_id){runId=job.run_id;loadRun();}
+  });
 
-  let groups = $derived(groupBy(detail?.layers ?? []));
-  function groupBy(layers){
-    let out = new Map();
-    for (let layer of layers) {
-      if (!out.has(layer.group)) out.set(layer.group, []);
-      out.get(layer.group).push(layer);
-    }
-    return [...out];
-  }
-  let shown = $derived((detail?.layers ?? []).filter(l => selected.includes(l.id)));
+  let inspectLayers=$derived([...(detail?.layers||[]),...(detail?.missing_layers||[])]);
   let frames = $derived(detail?.frames ?? []);
-  let minFrame = $derived(frames.length ? frames[0] : 0);
-  let maxFrame = $derived(frames.length ? frames.at(-1) : 0);
+  let minFrame = $derived(!history&&sourceInfo?sourceFirst:frames.length?frames[0]:sourceFirst);
+  let maxFrame = $derived(!history&&sourceInfo?sourceLast:frames.length?frames.at(-1):sourceLast);
 
-  function toggle(id){
-    selected = selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id];
-  }
   // Loop the rendered frames in place, so a run can be judged as motion
   // without assembling a video first. One button toggles play and pause.
   //
@@ -324,8 +384,8 @@
   // inputs already span the whole selected range, so playing it would crawl
   // through frames the run has not rendered yet.
   let playing = $state(false);
-  let playbackFrames = $derived(renderedFrames(detail));
-  let playable = $derived(canPlay(playbackFrames));
+  let playbackFrames = $derived(renderedFrames(detail).filter(index=>index>=minFrame&&index<=maxFrame));
+  let playable = $derived(canPlay(playbackFrames)||(!history&&!playbackFrames.length&&sourceLast>sourceFirst));
 
   function step(delta){
     playing = false;   // a manual move means you want to look at that frame
@@ -339,7 +399,7 @@
   $effect(() => {
     if (!playing || !playable) return;
     const timer = setInterval(
-      () => { frame = nextFrame(frame, playbackFrames); },
+      () => { frame = playbackFrames.length?nextFrame(frame, playbackFrames):frame>=sourceLast?sourceFirst:frame+1; },
       PLAYBACK_INTERVAL_MS);
     return () => clearInterval(timer);
   });
@@ -349,197 +409,114 @@
   $effect(() => { if (!playable) playing = false; });
   $effect(() => { runId; playing = false; });
   function src(layer){
+    if(layer==='init'&&sourceUrl)return sourceUrl;
+    if(layer==='output'&&liveUrl)return liveUrl;
     return `/api/preview/runs/${runId}/image?${params}&layer=${encodeURIComponent(layer)}&frame=${frame}`;
   }
-  const has = (layer) => layer.frames.includes(frame);
+  let downloadableLayer=$derived(view==='source'?'init':view==='output'?'output':view==='inspect'?focusedLayer:detail?.layers?.find(layer=>layer.id==='output')?.frames.includes(frame)||liveUrl?'output':'init');
+  let canDownload=$derived(downloadableLayer==='init'&&sourceUrl||downloadableLayer==='output'&&liveUrl||detail?.layers?.some(layer=>layer.id===downloadableLayer&&layer.frames.includes(frame)));
+  let stripFrames=$derived.by(()=>{
+    if(!history&&sourceInfo){
+      const count=Math.min(12,sourceLast-sourceFirst+1);
+      return Array.from({length:count},(_,index)=>Math.round(sourceFirst+index*(sourceLast-sourceFirst)/Math.max(1,count-1)));
+    }
+    const available=playbackFrames.length?playbackFrames:frames;
+    if(available.length){const count=Math.min(12,available.length);return Array.from({length:count},(_,index)=>available[Math.round(index*(available.length-1)/Math.max(1,count-1))]);}
+    if(!sourceInfo)return [];
+    const count=Math.min(12,sourceLast-sourceFirst+1);
+    return Array.from({length:count},(_,index)=>Math.round(sourceFirst+index*(sourceLast-sourceFirst)/Math.max(1,count-1)));
+  });
+  function stripImage(index){
+    const output=detail?.layers?.find(layer=>layer.id==='output');
+    if(output?.frames.includes(index))return `/api/preview/runs/${runId}/thumbnail?${params}&layer=output&frame=${index}`;
+    if(detail?.layers?.find(layer=>layer.id==='init')?.frames.includes(index))return `/api/preview/runs/${runId}/thumbnail?${params}&layer=init&frame=${index}`;
+    return `/api/video/thumbnail?path=${encodeURIComponent(sourcePath)}&frame=${index*Math.max(1,config?.video?.extract_nth_frame||1)}`;
+  }
 
   function onKey(e){
     if (e.key === 'Escape') { zoom = null; showDiff = false; return; }
-    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    if (['INPUT','SELECT','TEXTAREA','BUTTON','SUMMARY'].includes(e.target.tagName)||e.target.isContentEditable) return;
     if (e.key === 'ArrowLeft') step(-1);
     if (e.key === 'ArrowRight') step(1);
   }
+  function trapDialog(node){
+    const previous=document.activeElement;
+    node.querySelector('button')?.focus();
+    const onTab=event=>{
+      if(event.key!=='Tab')return;
+      const targets=[...node.querySelectorAll('button:not(:disabled),a[href],input,select,textarea,[tabindex="0"]')];
+      const first=targets[0],last=targets.at(-1);
+      if(event.shiftKey&&document.activeElement===first){event.preventDefault();last?.focus();}
+      else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first?.focus();}
+    };
+    node.addEventListener('keydown',onTab);
+    return {destroy(){node.removeEventListener('keydown',onTab);previous?.focus();}};
+  }
 </script>
-
 <svelte:window onkeydown={onKey}/>
-
-<main class="preview-mode">
-  <aside class="runs">
-    <div class="runs-head">
-      <div><p>Runs</p><span>Ctrl/Cmd-click two to diff</span></div>
-      <button class="link" onclick={()=>loadRuns()} disabled={loading}>
-        {loading ? 'Loading…' : 'Refresh'}
-      </button>
-    </div>
-    <label class="frame-filter">
-      <span>Minimum rendered frames</span>
-      <input type="number" min="0" step="1" value={minimumFrames}
-        onchange={(event)=>setMinimumFrames(event.currentTarget.value)}
-        aria-label="Minimum rendered frames"/>
-      <small>{visibleRuns.length} of {runs.length} runs</small>
-    </label>
-    <div class="run-list">
-      {#each visibleRuns as run (run.id)}
-        <button class="run-card" class:on={run.id === runId}
-                class:compared={compareIds.includes(run.id)}
-                onclick={(event)=>pick(run.id,event)} title={run.prompt}>
-          {#if compareIds.includes(run.id)}
-            <i class="compare-badge">{compareIds.indexOf(run.id) === 0 ? 'A' : 'B'}</i>
-          {/if}
-          <div class="thumb">
-            {#if run.last_frame !== null}
-              <!-- Thumbnail, not the full render: these cards are 102px, and
-                   the originals average well over a megabyte each. -->
-              <img src={`/api/preview/runs/${run.id}/thumbnail?${params}&layer=output&frame=${run.last_frame}`}
-                   alt={`Run ${run.id}`} loading="lazy"/>
-            {:else}<span>none</span>{/if}
-          </div>
-          <div class="meta">
-            <b>{run.label || `#${run.id}`}</b>
-            {#if activeJob?.run_id === run.id}
-              <strong class="run-live">{activeJob.message} · {Math.round(activeJob.progress || 0)}%</strong>
-            {/if}
-            <span>{run.label ? `#${run.id} · ` : ''}{run.frames} frame{run.frames === 1 ? '' : 's'} · {when(run.modified)}</span>
-            {#if run.prompt}<em>{run.prompt}</em>{/if}
-          </div>
-        </button>
-      {:else}
-        <p class="none">{runs.length
-          ? `No runs rendered at least ${minimumFrames} frame${minimumFrames===1?'':'s'}.`
-          : `No runs under ${config?.output_dir || 'images_out'}/${config?.batch_name || 'warpfusion'}`}</p>
-      {/each}
-    </div>
-  </aside>
-
-  <section class="viewer">
-    <div class="bar">
-      <div class="stepper">
-        <button onclick={()=>step(-1)} disabled={frame <= minFrame} aria-label="Previous frame">‹</button>
-        <input type="number" min={minFrame} max={maxFrame} bind:value={frame} aria-label="Frame"/>
-        <button onclick={()=>step(1)} disabled={frame >= maxFrame} aria-label="Next frame">›</button>
-        <button class="loop" onclick={()=>playing = !playing} disabled={!playable}
-                aria-pressed={playing}
-                aria-label={playing ? 'Pause playback' : 'Play frames in a loop'}
-                title={playable
-                  ? (playing ? 'Pause' : `Loop the rendered frames at ${PLAYBACK_FPS} fps`)
-                  : 'Needs at least two rendered frames'}>{playing ? '❚❚' : '▶'}</button>
-      </div>
-      <input class="scrub" type="range" min={minFrame} max={maxFrame} step="1"
-             bind:value={frame} disabled={!frames.length} aria-label="Frame"/>
-      <small>{minFrame}–{maxFrame} · ← → to step · click to zoom</small>
-      {#if renaming}
-        <form class="rename" onsubmit={(e)=>{e.preventDefault();saveLabel()}}>
-          <input bind:value={draftLabel} maxlength="80" placeholder={`Run #${runId} label`}
-                 aria-label="Run display label"/>
-          <button type="submit" disabled={savingLabel}>{savingLabel ? 'Saving…' : 'Save'}</button>
-          <button type="button" onclick={()=>renaming=false}>Cancel</button>
-        </form>
-      {:else}
-        <button class="rename-action" onclick={beginRename} disabled={!current}>Rename run</button>
-      {/if}
-      <button class="load" onclick={loadSettings}
-              disabled={!current?.has_settings || loadingSettings}
-              title={current?.has_settings
-                ? `Load run #${runId}'s settings into the render form`
-                : 'This run saved no settings'}>
-        {loadingSettings ? 'Loading…' : 'Load settings'}
-      </button>
-      <button class="history-action" onclick={()=>runAction('resume')}
-              disabled={!current?.resume_available || action || ['queued','running'].includes(job?.state)}
-              title={current?.resume_available
-                ? `Continue at source frame ${current.resume_from + 1}`
-                : 'This run is complete or has no resumable settings'}>
-        {action === 'resume' ? 'Queuing…' : 'Resume'}
-      </button>
-      <button class="history-action" onclick={()=>runAction('video')}
-              disabled={!current?.frames || action || ['queued','running'].includes(job?.state)}>
-        {action === 'video' ? 'Queuing…' : current?.video_available ? 'Rebuild video' : 'Make video'}
-      </button>
-      {#if current?.video_available}
-        <button class="history-action play" class:on={showVideo}
-                onclick={()=>showVideo=!showVideo}>{showVideo ? 'View frames' : 'Play video'}</button>
-      {/if}
-    </div>
-    {#if activeJob}
-      <div class="live-job" role="status" aria-live="polite">
-        <div class="live-copy">
-          <span>{activeJob.operation === 'video' ? 'Video assembly'
-            : activeJob.operation === 'resume' ? 'Resuming render' : 'Rendering'}
-            {activeJob.run_id ? ` run #${activeJob.run_id}` : ''}</span>
-          <b>{activeJob.message || activeJob.stage}</b>
-        </div>
-        <div class="live-meter" aria-label={`Render progress ${Math.round(activeJob.progress || 0)}%`}>
-          <i style={`width:${Math.max(0, Math.min(100, activeJob.progress || 0))}%`}></i>
-        </div>
-        <strong>{Math.round(activeJob.progress || 0)}%</strong>
-        <button class="cancel-job" onclick={cancelActiveJob}
-                disabled={cancelling || activeJob.cancel_requested}>
-          {activeJob.cancel_requested ? 'Cancelling…' : cancelling ? 'Requesting…' : 'Cancel render'}
-        </button>
-      </div>
-    {/if}
-    {#if loaded}<div class="loaded">{loaded}</div>{/if}
-
-    <div class="stage">
-      {#if error}
-        <div class="empty">{error}</div>
-      {:else if showVideo && current?.video_available}
-        <video class="video-player" controls preload="metadata"
-               src={`/api/preview/runs/${runId}/video?${params}&v=${current.video_modified ?? current.modified}`}>
-          <track kind="captions"/>
-        </video>
-      {:else if frames.length && !frames.includes(frame)}
-        <div class="empty">Frame {frame} was not rendered in this run.</div>
-      {:else if !shown.length}
-        <div class="empty">Pick a layer below to compare.</div>
-      {:else}
-        <div class="frames" style={`--cols:${Math.min(shown.length, 3)}`}>
-          {#each shown as layer (layer.id)}
-            <figure>
-              <figcaption>{layer.label}</figcaption>
-              {#if has(layer)}
-                <button class="shot" onclick={()=>zoom = layer.id} aria-label={`Zoom ${layer.label}`}>
-                  <img src={src(layer.id)} alt={`${layer.label}, frame ${frame}`}/>
-                </button>
-              {:else}
-                <div class="missing">Not produced for frame {frame}</div>
-              {/if}
-            </figure>
-          {/each}
-        </div>
-      {/if}
-    </div>
-
-    <!-- Pinned: the chips ARE the controls for this view, so they never scroll away. -->
-    <div class="layers">
-      {#each groups as [group, items]}
-        <div class="group">
-          <span>{group}</span>
-          {#each items as layer}
-            <button class="chip" class:on={selected.includes(layer.id)} onclick={()=>toggle(layer.id)}>
-              {layer.label}
+<div class="preview-mode" class:with-history={history} class:show-runs={showRuns}>
+  {#if history}
+    <aside class="runs" aria-label="Render history">
+      <div class="runs-head"><h2>Render history</h2><button onclick={()=>loadRuns()} disabled={loading}>{loading?'Loading…':'Refresh'}</button></div>
+      <label class="frame-filter"><span>Minimum rendered frames</span><input type="number" min="0" step="1" value={minimumFrames} onchange={(event)=>setMinimumFrames(event.currentTarget.value)} aria-label="Minimum rendered frames"/><small>{visibleRuns.length} of {runs.length} runs</small></label>
+      <div class="run-list">
+        {#each visibleRuns as run (run.id)}
+          <article class="run-card" class:on={run.id===runId}>
+            <button class="run-pick" onclick={(event)=>{pick(run.id,event);showRuns=false;}} title={run.prompt}>
+              <div class="thumb">{#if run.last_frame!==null}<img src={`/api/preview/runs/${run.id}/thumbnail?${params}&layer=output&frame=${run.last_frame}`} alt={`Run ${run.id}`} loading="lazy"/>{:else}<span>No frames</span>{/if}</div>
+              <div class="meta"><b>{run.label||`Run #${run.id}`}</b><span>{run.frames} frame{run.frames===1?'':'s'} · {when(run.modified)}</span>{#if run.prompt}<em>{run.prompt}</em>{/if}{#if activeJob?.run_id===run.id}<strong>{activeJob.message} · {Math.round(activeJob.progress||0)}%</strong>{/if}</div>
             </button>
-          {/each}
+            <div class="run-comparison"><button class:on={compareIds[0]===run.id} aria-pressed={compareIds[0]===run.id} aria-label={`Select ${run.label||`run ${run.id}`} as A`} onclick={()=>assignComparison(run.id,0)}>A {compareIds[0]===run.id?'✓':''}</button><button class:on={compareIds[1]===run.id} aria-pressed={compareIds[1]===run.id} aria-label={`Select ${run.label||`run ${run.id}`} as B`} onclick={()=>assignComparison(run.id,1)}>B {compareIds[1]===run.id?'✓':''}</button></div>
+          </article>
+        {:else}<p class="none">{runs.length?`No runs rendered at least ${minimumFrames} frames.`:`No runs under ${config?.output_dir||'images_out'}/${config?.batch_name||'warpfusion'}`}</p>{/each}
+      </div>
+      <small class="comparison-help">Compare settings: choose runs A and B. The viewer shows the selected run.</small>
+    </aside>
+  {/if}
+  <section class="viewer" aria-label="Frame viewer">
+    {#if history}
+      <div class="run-toolbar">
+        <button class="mobile-runs" onclick={()=>showRuns=!showRuns} aria-expanded={showRuns}>{showRuns?'Back to viewer':'Choose run'}</button>
+        <button class="run-name" onclick={beginRename} disabled={!current} title="Rename run" aria-label={`Rename ${current?.label||`Run #${runId}`}`}>{current?.label|| (runId?`Run #${runId}`:'Render history')}</button>
+        <div class="run-actions" role="group" aria-label="Run actions">
+          <button onclick={loadSettings} disabled={!current?.has_settings||loadingSettings}>{loadingSettings?'Loading…':'Load settings'}</button>
+          <button onclick={()=>runAction('resume')} disabled={!current?.resume_available||!!action||!!activeJob}>{action==='resume'?'Queuing…':'Resume'}</button>
         </div>
-      {/each}
+      </div>
+      {#if renaming}<form class="rename" onsubmit={(event)=>{event.preventDefault();saveLabel();}}><label><span class="visually-hidden">Run display label</span><input bind:this={renameInput} bind:value={draftLabel} maxlength="80" aria-label="Run display label"/></label><button type="submit" disabled={savingLabel}>{savingLabel?'Saving…':'Save'}</button><button type="button" onclick={()=>renaming=false}>Cancel</button></form>{/if}
+    {/if}
+    {#if activeJob&&history}<div class="live-job" role="status"><span>{activeJob.message||activeJob.stage}</span><strong>{Math.round(activeJob.progress||0)}%</strong><button onclick={cancelActiveJob} disabled={cancelling||activeJob.cancel_requested}>{activeJob.cancel_requested?'Cancelling…':'Cancel render'}</button></div>{/if}
+    {#if loaded}<div class="viewer-notice" role="status">{loaded}</div>{/if}
+    {#if error}<div class="viewer-notice error" role="alert">{error}</div>{/if}
+    {#if sourceError&&!history&&!detail}<div class="viewer-notice error" role="status">{sourceError}</div>{/if}
+    {#if showVideo&&current?.video_available}<div class="video-stage"><video controls preload="metadata" src={`/api/preview/runs/${runId}/video?${params}&v=${current.video_modified??current.modified}`}><track kind="captions"/></video></div>
+    {:else}<LayerViewer layers={inspectLayers} {frame} bind:view bind:selected bind:focus={focusedLayer} {sourceUrl} {liveUrl}
+      sourcePending={!history&&!!sourcePath&&!sourceInfo&&!sourceError} sourceEmpty={!history&&!sourcePath} sourceError={!history?sourceError:''}
+      outputPending={!history&&!!activeJob} imageUrl={src} onzoom={(id)=>zoom=id} onchoose={onsource}/>{/if}
+    <div class="timeline">
+      <div class="timeline-controls">
+        <div class="timeline-source">
+        {#if current?.video_available}<fieldset class="player-mode" aria-label="Player mode"><label><input type="radio" name="player-mode" checked={!showVideo} onchange={()=>showVideo=false}/><span>View frames</span></label><label><input type="radio" name="player-mode" checked={showVideo} onchange={()=>{playing=false;showVideo=true;}}/><span>Play video</span></label></fieldset>{/if}
+        <small class="timeline-meta">{sourceInfo&&!history?`${sourceInfo.fps} fps source`:runId?`Run #${runId}`:'Source preview'}</small>
+        </div>
+        <div class="stepper"><button onclick={()=>step(-1)} disabled={frame<=minFrame} aria-label="Previous frame">‹</button><button class="loop" onclick={()=>playing=!playing} disabled={!playable} aria-pressed={playing} aria-label={playing?'Pause playback':'Play frames in a loop'} title={`Loop rendered frames at ${PLAYBACK_FPS} fps`}>{playing?'Pause':'Play'}</button><button onclick={()=>step(1)} disabled={frame>=maxFrame} aria-label="Next frame">›</button><input type="number" min={minFrame} max={maxFrame} bind:value={frame} aria-label="Frame"/><span>/ {!history&&!sourceInfo&&!frames.length?'…':maxFrame}</span></div>
+        {#if canDownload||current?.video_available||current?.frames}<div class="output-actions">
+          <details class="download-menu" use:closeOnSelection><summary aria-disabled={!canDownload&&!current?.video_available}>Download</summary><div>{#if canDownload}<a href={`${src(downloadableLayer)}&download=true`} download>Current frame</a>{/if}{#if current?.video_available}<a href={`/api/preview/runs/${runId}/video?${params}&download=true`} download>Rendered video</a>{/if}{#if !canDownload&&!current?.video_available}<span>No rendered image or video available.</span>{/if}</div></details>
+          {#if current?.frames}<button onclick={()=>runAction('video')} disabled={!current?.has_settings||!!action||!!activeJob}>{action==='video'?'Queuing…':current?.video_available?'Rebuild video':'Make video'}</button>{/if}
+        </div>{/if}
+      </div>
+      <input class="scrub" type="range" min={minFrame} max={maxFrame} step="1" bind:value={frame} disabled={maxFrame<=minFrame} aria-label="Frame"/>
+      <div class="filmstrip" aria-label="Frame thumbnails">{#each stripFrames as index,indexKey (indexKey)}<button class:at-frame={frame===index} onclick={()=>{playing=false;showVideo=false;frame=index;}} aria-label={`Go to frame ${index}`}><img src={stripImage(index)} alt="" loading="lazy"/></button>{/each}</div>
     </div>
   </section>
-</main>
-
-{#if zoom}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="lightbox" onclick={()=>zoom = null}>
-    <img src={src(zoom)} alt={`Frame ${frame}`}/>
-    <button class="close" aria-label="Close zoom">×</button>
-  </div>
-{/if}
-
+</div>
+{#if zoom}<ImageZoom src={src(zoom)} title={`${detail?.layers?.find(layer=>layer.id===zoom)?.label||zoom} · frame ${frame}`} onclose={()=>zoom=null}/>{/if}
 {#if showDiff}
   <div class="diff-backdrop" role="presentation" onclick={(event)=>{if(event.target===event.currentTarget)showDiff=false}}>
-    <div class="diff-dialog" role="dialog" aria-modal="true" aria-label="Run settings difference">
+    <div class="diff-dialog" use:trapDialog role="dialog" aria-modal="true" aria-label="Run settings difference">
       <header>
         <div>
-          <p>Settings diff</p>
+          <p>Compare settings</p>
           <h2><span>A</span> {runName(compareIds[0])} <b>versus</b> <span>B</span> {runName(compareIds[1])}</h2>
         </div>
         <button onclick={()=>showDiff=false} aria-label="Close settings diff">×</button>
@@ -569,169 +546,12 @@
   </div>
 {/if}
 
+
 <style>
-  .unsaved{color:#68717d;font-style:italic;font-size:11px}
-  /* NOT `.preview`: style.css already owns that class for the render monitor's thumbnail,
-     and its `max-height:320px` was clamping this whole shell to 320px -- the layout cut off
-     mid-screen, the image was cropped and the chips were pushed out of view.
-     `min-height`/`padding-bottom` are reset because style.css sets them on every <main>. */
-  .preview-mode{display:grid;grid-template-columns:345px minmax(0,1fr);
-           /* The row MUST be bounded. Left as `auto` it sized itself to the images, which
-              made .viewer taller than the shell and pushed the layer chips below the fold,
-              where overflow:hidden swallowed them. `flex:1` on .stage can only shrink if
-              its parent's height is actually constrained. */
-           grid-template-rows:minmax(0,1fr);
-           height:calc(100vh - 78px - var(--log-height, 282px));
-           max-height:none;min-height:0;padding-bottom:0;overflow:hidden}
-
-  .runs{display:flex;flex-direction:column;min-height:0;height:100%;
-         border-right:1px solid #252930;background:#0e1014}
-  .runs-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:16px 14px 10px}
-  .runs-head p{margin:0;color:#7f8792;font-size:11px;text-transform:uppercase;letter-spacing:.1em}
-  .runs-head span{display:block;margin-top:3px;color:#515966;font-size:9px}
-  .link{border:0;background:none;color:#8ea834;font-size:11px;cursor:pointer;padding:4px}
-  .link:disabled{color:#4b525b;cursor:default}
-  .frame-filter{display:grid;grid-template-columns:minmax(0,1fr) 68px;align-items:center;gap:5px 8px;
-        margin:0 12px 10px;padding:9px 10px;border:1px solid #292e36;border-radius:8px;
-        color:#8b929c;font-size:10px;background:#111419}
-  .frame-filter input{width:100%;min-width:0;border:1px solid #353b44;border-radius:6px;
-        background:#0b0e12;color:#e7eaee;padding:6px 7px;font:11px Consolas,monospace}
-  .frame-filter small{grid-column:1/-1;color:#59616c;font-size:9px}
-  .run-list{flex:1;min-height:0;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:0 12px 16px}
-  .none{color:#656d78;font-size:11px;line-height:1.5;padding:8px 2px}
-  .run-card{flex:0 0 auto;display:flex;align-items:stretch;gap:9px;padding:0;
-            border:1px solid #292e36;border-radius:9px;background:#12151a;overflow:hidden;
-            cursor:pointer;text-align:left;position:relative}
-  .run-card:hover{border-color:#4b525b}
-  .run-card.on{border-color:#d8ff55;box-shadow:0 0 0 1px #d8ff55}
-  .run-card.compared{box-shadow:0 0 0 2px #6ba8ff inset}
-  .compare-badge{position:absolute;z-index:2;top:6px;left:6px;width:22px;height:22px;
-        display:grid;place-items:center;border-radius:50%;background:#6ba8ff;color:#07111f;
-        box-shadow:0 2px 8px #0009;font:700 11px Consolas,monospace;font-style:normal}
-  .thumb{flex:0 0 102px;width:102px;height:102px;display:grid;place-items:center;background:#08090b}
-  .thumb img{width:100%;height:100%;object-fit:cover}
-  .thumb span{color:#4b525b;font-size:9px}
-  .meta{display:flex;flex-direction:column;justify-content:center;gap:3px;
-        padding:9px 10px 9px 0;min-width:0}
-  .meta b{color:#e7eaee;font:600 13px Consolas,monospace}
-  .meta .run-live{color:#d8ff55;font:600 10px Consolas,monospace;
-                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .meta span{color:#8b929c;font-size:11px}
-  .meta em{color:#68717d;font-size:10px;font-style:normal;line-height:1.4;
-           display:-webkit-box;-webkit-line-clamp:3;line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
-
-  .viewer{display:flex;flex-direction:column;min-height:0;height:100%;min-width:0}
-
-  .bar{flex:0 0 auto;display:flex;align-items:center;gap:8px;padding:12px 20px;
-       border-bottom:1px solid #252930;overflow-x:auto}
-  .scrub{flex:1;accent-color:#d8ff55;background:transparent}
-  small{color:#68717d;font-size:11px;white-space:nowrap}
-  .load{flex:0 0 auto;border:1px solid #3a4a26;background:#1a2113;color:#c8d3ad;
-        border-radius:8px;padding:7px 13px;font-size:12px;cursor:pointer;white-space:nowrap}
-  .load:hover:not(:disabled){border-color:#8ea834;background:#20290f;color:#d8ff55}
-  .load:disabled{border-color:#2b3038;background:#12151a;color:#4b525b;cursor:default}
-  .rename-action{flex:0 0 auto;border:1px solid #353a42;background:#171a1f;color:#aeb4bd;
-        border-radius:8px;padding:7px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
-  .rename-action:hover:not(:disabled){border-color:#68717d;background:#20242a;color:#fff}
-  .rename-action:disabled{opacity:.45;cursor:default}
-  .history-action{flex:0 0 auto;border:1px solid #353a42;background:#171a1f;color:#cbd0d6;
-        border-radius:8px;padding:7px 10px;font-size:12px;cursor:pointer;white-space:nowrap}
-  .history-action:hover:not(:disabled){border-color:#8ea834;color:#d8ff55;background:#20290f}
-  .history-action:disabled{opacity:.4;cursor:default}
-  .history-action.play,.history-action.play.on{border-color:#4d5d2a;color:#d8ff55}
-  .live-job{flex:0 0 auto;display:grid;grid-template-columns:minmax(180px,auto) minmax(120px,1fr) 42px auto;
-            align-items:center;gap:12px;padding:9px 20px;background:#12170d;
-            border-bottom:1px solid #35431c}
-  .live-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
-  .live-copy span{color:#8ea834;font:600 9px Consolas,monospace;text-transform:uppercase;
-                  letter-spacing:.08em}
-  .live-copy b{color:#dfe7c8;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .live-meter{height:6px;overflow:hidden;border-radius:999px;background:#252c1b}
-  .live-meter i{display:block;height:100%;border-radius:inherit;background:#d8ff55;
-                transition:width .2s ease}
-  .live-job>strong{color:#d8ff55;font:600 11px Consolas,monospace;text-align:right}
-  .cancel-job{border:1px solid #733d3d;background:#281616;color:#ffb4b4;border-radius:8px;
-              padding:7px 10px;font-size:11px;cursor:pointer;white-space:nowrap}
-  .cancel-job:hover:not(:disabled){border-color:#d66;color:#ffd4d4}
-  .cancel-job:disabled{opacity:.5;cursor:default}
-  .rename{display:flex;align-items:center;gap:5px;min-width:260px}
-  .rename input{min-width:120px;padding:7px 9px;font-size:12px}
-  .rename button{border:1px solid #3a414b;background:#191c21;color:#cbd0d6;border-radius:7px;
-        padding:7px 9px;font-size:11px;cursor:pointer}
-  .rename button[type="submit"]{border-color:#4d5d2a;color:#d8ff55}
-  .rename button:hover:not(:disabled){background:#252a31}
-  .loaded{flex:0 0 auto;padding:8px 20px;background:#1a2113;border-bottom:1px solid #3a4a26;
-          color:#d8ff55;font-size:11px}
-  .stepper{display:flex;gap:5px;align-items:center}
-  .stepper input{width:70px;text-align:center;border:1px solid #303640;background:#0c0f13;
-                 color:#eef0f2;border-radius:7px;padding:6px 8px;font:12px Consolas,monospace}
-  .stepper button{border:1px solid #353a42;background:#191c21;color:#d9dce0;border-radius:7px;
-                  padding:6px 11px;cursor:pointer;line-height:1}
-  .stepper button:disabled{color:#4b525b;cursor:default}
-  /* Distinct from .history-action.play, which shows the assembled video. */
-  .stepper .loop{min-width:34px;font-size:11px}
-  .stepper .loop[aria-pressed="true"]{background:#d8ff55;color:#111;border-color:#d8ff55}
-
-  /* The images take whatever height is left and scale INTO it -- they never push the page.
-     Every link in this chain needs min-height:0, or an intrinsically-sized <img> wins and
-     the container grows to the image's natural height instead of the other way round. */
-  .stage{flex:1;min-height:0;padding:16px 20px;display:flex;overflow:hidden}
-  .video-player{width:100%;height:100%;object-fit:contain;background:#08090b;border-radius:10px}
-  .frames{flex:1;min-height:0;display:grid;
-          grid-template-columns:repeat(var(--cols),minmax(0,1fr));gap:12px}
-  figure{margin:0;display:flex;flex-direction:column;min-height:0;min-width:0;
-         border:1px solid #292e36;border-radius:10px;background:#0e1115;overflow:hidden}
-  figcaption{flex:0 0 auto;padding:8px 11px;background:#12161b;color:#dfe3e8;font-size:11px}
-  .shot{flex:1;min-height:0;padding:0;border:0;background:#08090b;cursor:zoom-in;
-        display:flex;align-items:center;justify-content:center;overflow:hidden}
-  .shot img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
-  .missing{flex:1;display:grid;place-items:center;color:#656d78;font-size:11px}
-  .empty{margin:auto;color:#656d78;font-size:12px;text-align:center}
-
-  .layers{flex:0 0 auto;display:flex;flex-wrap:wrap;gap:10px 16px;padding:14px 20px;
-          border-top:1px solid #252930;background:#0e1014}
-  .group{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-  .group>span{color:#5f6771;font-size:10px;text-transform:uppercase;letter-spacing:.1em}
-  .chip{border:1px solid #303640;background:#12151a;color:#aeb4bd;border-radius:20px;
-        padding:9px 15px;font-size:12px;line-height:1.2;cursor:pointer}
-  .chip:hover{border-color:#4b525b;color:#e7eaee}
-  .chip.on{background:#d8ff55;border-color:#d8ff55;color:#111;font-weight:600}
-
-  /* Click any image for full size; click anywhere (or Esc) to dismiss. */
-  .lightbox{position:fixed;inset:0;z-index:20;background:#05070aee;display:grid;place-items:center;
-            padding:32px;cursor:zoom-out;overflow:auto}
-  .lightbox img{max-width:100%;max-height:100%;object-fit:contain}
-  .close{position:fixed;top:18px;right:24px;width:36px;height:36px;border:1px solid #353a42;
-         border-radius:50%;background:#12151a;color:#d9dce0;font-size:19px;line-height:1;cursor:pointer}
-  .close:hover{background:#c0505a;color:#fff;border-color:#c0505a}
-
-  .diff-backdrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;
-        padding:36px;background:#05070add;backdrop-filter:blur(5px)}
-  .diff-dialog{width:min(1180px,96vw);height:min(780px,90vh);display:flex;flex-direction:column;
-        overflow:hidden;border:1px solid #353b45;border-radius:13px;background:#0d1014;
-        box-shadow:0 24px 80px #000c}
-  .diff-dialog>header{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;
-        gap:20px;padding:17px 20px;border-bottom:1px solid #292e36;background:#12161b}
-  .diff-dialog header p{margin:0 0 5px;color:#69727d;font-size:10px;text-transform:uppercase;letter-spacing:.12em}
-  .diff-dialog h2{margin:0;color:#e8ebef;font-size:15px;font-weight:600}
-  .diff-dialog h2 span,.diff-dialog thead i{display:inline-grid;place-items:center;width:20px;height:20px;
-        margin-right:5px;border-radius:50%;background:#6ba8ff;color:#07111f;
-        font:700 10px Consolas,monospace;font-style:normal}
-  .diff-dialog h2 b{margin:0 9px;color:#65707b;font-size:11px;font-weight:400}
-  .diff-dialog>header>button{width:34px;height:34px;border:1px solid #353b45;border-radius:50%;
-        background:#181c22;color:#cdd2d8;font-size:20px;cursor:pointer}
-  .diff-dialog>header>button:hover{border-color:#c0505a;background:#c0505a;color:#fff}
-  .diff-body{flex:1;min-height:0;overflow:auto}
-  .diff-state{height:100%;display:grid;place-items:center;color:#7e8792;font-size:13px}
-  .diff-state.error{color:#f18b91}
-  .diff-dialog table{width:100%;border-collapse:collapse;table-layout:fixed}
-  .diff-dialog thead{position:sticky;top:0;z-index:1;background:#14181e}
-  .diff-dialog th,.diff-dialog td{padding:10px 13px;border-bottom:1px solid #242a32;
-        text-align:left;vertical-align:top}
-  .diff-dialog thead th{color:#aeb5bf;font-size:11px;font-weight:600}
-  .diff-dialog thead th:first-child,.diff-dialog tbody th{width:28%}
-  .diff-dialog tbody th{color:#8ea834;font:11px/1.45 Consolas,monospace;overflow-wrap:anywhere}
-  .diff-dialog td{width:36%;background:#0a0d11}
-  .diff-dialog td code{display:block;color:#d9dde2;font:11px/1.5 Consolas,monospace;
-        white-space:pre-wrap;overflow-wrap:anywhere}
+  .preview-mode{display:flex;flex:1;min-width:0;min-height:0;height:100%;overflow:hidden;background:#0b1218;color:#e8eef2}.preview-mode.with-history{display:grid;grid-template-columns:228px minmax(0,1fr);grid-template-rows:minmax(0,1fr)}.runs{display:flex;flex-direction:column;min-height:0;min-width:0;background:#111a21;border-right:1px solid #344651}.runs-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:17px 14px 12px}.runs-head h2{font-size:14px;font-weight:600}.runs-head button{font-size:11px;padding:5px 7px;min-height:32px}.frame-filter{display:grid;grid-template-columns:minmax(0,1fr) 57px;align-items:center;gap:7px;font-size:11px;padding:10px;border:1px solid #344651;border-radius:6px;margin:0 12px 13px}.frame-filter input{min-height:32px;padding:5px 6px;font-size:12px}.frame-filter small{grid-column:1/-1;font-size:11px}.run-list{display:flex;flex-direction:column;gap:11px;flex:1;min-height:0;overflow:auto;padding:0 12px 12px}.run-card{border:1px solid #3c5160;border-radius:6px;overflow:hidden;flex-shrink:0;background:#18242d}.run-card.on{border-color:#c4dc6a}.run-pick{display:flex;flex-direction:column;width:100%;background:transparent;border:0;border-radius:0;padding:0;text-align:left;color:#e8eef2;cursor:pointer}.run-pick:hover{background:#22333e}.thumb{position:relative;flex:0 0 105px;min-height:0;overflow:hidden;height:105px;background:#080e13;display:grid;place-items:center;width:100%}.thumb img{position:absolute;inset:0;display:block;width:100%;height:100%;object-fit:cover;object-position:center 45%}.thumb span{font-size:12px;color:#a6b8c6}.meta{display:flex;flex-direction:column;gap:5px;padding:10px 11px}.meta b{font-size:13px;font-weight:500}.meta span{font-size:11px;color:#adbfcc}.meta em{font-size:11px;font-style:normal;color:#b3c3cf;display:-webkit-box;-webkit-line-clamp:2;line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.meta strong{font-size:11px;font-weight:500;color:#d8ff55}.run-comparison{display:flex;gap:6px;padding:0 10px 10px}.run-comparison button{flex:1;font-size:12px;padding:4px 8px;min-height:30px}.run-comparison button.on{background:#2d3b22;color:#e1f3ad;border-color:#adcb55}.comparison-help{font-size:11px;padding:10px 14px;border-top:1px solid #334652}.none{padding:10px;color:#afc1cd;font-size:12px;line-height:1.6}.viewer{display:flex;flex-direction:column;flex:1;min-width:0;min-height:0;height:100%;overflow:hidden}.run-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;border-bottom:1px solid #334652;background:#15222a;padding:8px 16px;min-height:48px;flex-shrink:0}.run-name{flex:1;min-width:0;text-align:left;border:0;background:transparent;padding:6px 0;color:inherit;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.run-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;max-width:100%}.download-menu{position:relative;flex-shrink:0}.download-menu summary{padding:7px 11px;border:1px solid #4b6373;background:#1c2a34;border-radius:5px;font-size:12px;color:#dfe9ee;cursor:pointer;min-height:32px;display:flex;align-items:center;justify-content:center}.download-menu>div{position:absolute;z-index:20;display:flex;flex-direction:column;gap:4px;right:0;background:#1b2a34;border:1px solid #526c7d;border-radius:6px;padding:7px;min-width:175px;box-shadow:0 12px 30px #0008}.download-menu>div{bottom:40px}.run-actions button{min-height:36px;font-size:12px;padding:7px 10px}.download-menu a{padding:8px;color:#e0eecd;text-decoration:none;font-size:12px;border-radius:4px}.download-menu a:hover{background:#324757}.download-menu span{padding:8px;color:#b3c7d4;font-size:12px;line-height:1.5}.download-menu summary[aria-disabled=true]{color:#9caebc}.mobile-runs{display:none}.rename{display:flex;gap:8px;padding:9px 16px;border-bottom:1px solid #3b5261}.rename label{flex:1}.rename input{padding:7px 10px;font-size:13px;min-height:36px}.rename button{font-size:12px;min-height:36px}.live-job{display:flex;align-items:center;gap:12px;padding:9px 16px;background:#24311e;color:#e3edcd;font-size:12px;flex-shrink:0}.live-job>span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.live-job strong{font:12px Consolas,monospace}.live-job button{font-size:11px;min-height:32px;color:#ffc3cb;border-color:#a15b6a;background:#35232d}.viewer-notice{padding:9px 16px;font-size:12px;background:#213223;color:#e0ebcf;flex-shrink:0}.viewer-notice.error{background:#33212a;color:#ffc4cc}.timeline{container-type:inline-size;padding:11px 16px 13px;border-top:1px solid #344955;background:#14212a;flex:0 0 auto}.timeline-controls{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);align-items:center;gap:9px;min-height:34px}.timeline-source{grid-column:1;display:flex;align-items:center;flex-wrap:wrap;gap:8px;min-width:0}.stepper{grid-column:2;justify-self:center;display:flex;align-items:center;gap:5px;font-size:12px;color:#c2d2dd}.stepper input{width:65px;padding:6px 7px;text-align:center;min-height:32px;font:12px Consolas,monospace}.stepper button{min-height:32px;padding:5px 10px;font-size:12px}.timeline-meta{font-size:11px;white-space:nowrap}.output-actions{grid-column:3;justify-self:end;display:flex;align-items:center;gap:8px}.output-actions>button{min-height:32px;padding:5px 9px;font-size:12px}.scrub{display:block;width:100%;accent-color:#d8ff55;padding:0;height:15px;min-height:15px;background:transparent;border:0;margin:7px 0}.filmstrip{display:flex;gap:3px;height:36px;overflow:hidden}.filmstrip button{padding:0;flex:1;min-width:0;border:1px solid transparent;min-height:0;border-radius:2px;overflow:hidden;background:#0a1116}.filmstrip button.at-frame{border-color:#d8ff55}.filmstrip img{height:100%;width:100%;object-fit:cover;display:block}.video-stage{flex:1;min-height:0;display:flex;flex-direction:column;padding:16px;gap:10px}.video-stage video{width:100%;height:100%;min-height:0;flex:1;object-fit:contain;background:#060b0f}.player-mode{display:flex;gap:2px;margin:0;padding:3px;border:1px solid #4b6373;border-radius:6px;min-width:0}.player-mode label{position:relative;cursor:pointer}.player-mode input{position:absolute;opacity:0;width:1px;height:1px;min-height:0}.player-mode span{display:flex;align-items:center;justify-content:center;min-height:32px;padding:5px 10px;border-radius:3px;font-size:12px;color:#c2d2dd}.player-mode input:checked+span{background:#d8ff55;color:#142000}.player-mode input:focus-visible+span{outline:2px solid #e8eef2;outline-offset:2px}
+  .diff-backdrop{position:fixed;inset:0;z-index:50;display:grid;place-items:center;padding:24px;background:#02080de8}.diff-dialog{width:min(1180px,96vw);height:min(780px,90dvh);display:flex;flex-direction:column;overflow:hidden;border:1px solid #526e80;border-radius:8px;background:#111c24;box-shadow:0 24px 80px #000c}.diff-dialog>header{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:16px 20px;border-bottom:1px solid #3d5667;background:#192a35}.diff-dialog header p{margin:0 0 5px;color:#b1c4d1;font-size:12px}.diff-dialog h2{margin:0;font-size:15px;font-weight:500}.diff-dialog h2 span,.diff-dialog thead i{display:inline-grid;place-items:center;width:22px;height:22px;margin-right:5px;border-radius:4px;background:#d8ff55;color:#162000;font:12px Consolas,monospace;font-style:normal}.diff-dialog h2 b{margin:0 9px;color:#afc4d2;font-size:12px;font-weight:400}.diff-dialog>header>button{min-height:36px;min-width:36px;font-size:20px;padding:4px 10px}.diff-body{flex:1;min-height:0;overflow:auto}.diff-state{height:100%;display:grid;place-items:center;color:#bfd0dc;font-size:13px;padding:24px}.diff-state.error{color:#ffbdc8}.diff-dialog table{width:100%;border-collapse:collapse;table-layout:fixed}.diff-dialog thead{position:sticky;top:0;z-index:1;background:#1c303d}.diff-dialog th,.diff-dialog td{padding:11px 13px;border-bottom:1px solid #334b5c;text-align:left;vertical-align:top;overflow-wrap:anywhere}.diff-dialog thead th{font-size:12px;font-weight:500;color:#d9e7ef}.diff-dialog th:first-child{width:28%}.diff-dialog tbody th{color:#d3e9a8;font:12px/1.5 Consolas,monospace}.diff-dialog td{width:36%;background:#101d26}.diff-dialog td code{display:block;font:12px/1.6 Consolas,monospace;color:#e1ebf1;white-space:pre-wrap;overflow-wrap:anywhere}.unsaved{font-size:12px;color:#b0c3d1;font-style:italic}
+  @media(max-width:700px){.preview-mode.with-history{display:flex}.runs{display:none;width:100%}.preview-mode.show-runs .runs{display:flex}.preview-mode.show-runs .viewer{display:none}.mobile-runs{display:block;min-height:36px;font-size:12px}.run-list{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start}.runs-head h2{font-size:16px}.run-toolbar{padding:7px 12px}.run-name{flex:1;min-width:0;text-align:left;border:0;background:transparent;padding:6px 0;color:inherit;font-size:12px}.run-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));width:100%}.run-actions button{min-height:40px}.timeline{container-type:inline-size;padding:10px 12px 12px}.timeline-controls{gap:8px}.timeline-meta{font-size:10px}.stepper{gap:4px}.stepper input{width:55px}.stepper button{min-height:36px;padding:5px 9px}.output-actions{flex-basis:100%;justify-content:flex-end}.output-actions>button,.download-menu summary{min-height:36px;font-size:12px}.filmstrip{height:32px}.diff-backdrop{padding:8px}.diff-dialog>header{padding:12px;gap:9px}.diff-dialog h2{font-size:12px}.diff-dialog th,.diff-dialog td{padding:8px 7px;font-size:11px}.diff-dialog td code{font-size:11px}.diff-dialog thead th{font-size:11px}.diff-dialog h2 b{margin:0 3px}.diff-dialog h2 span{width:18px;height:18px}.rename{padding:8px 12px;gap:6px}.comparison-help{font-size:12px}}
+  @container(max-width:740px){.timeline-controls{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.timeline-source{grid-column:1;grid-row:1}.output-actions{grid-column:2;grid-row:1}.stepper{grid-column:1/-1;grid-row:2}}
+  @container(max-width:480px){.timeline-controls{grid-template-columns:minmax(0,1fr)}.timeline-source{grid-column:1;grid-row:1}.output-actions{grid-column:1;grid-row:3}.stepper{grid-column:1;grid-row:2}}
+  @media(pointer:coarse){.stepper button,.output-actions>button,.download-menu summary,.run-comparison button,.run-actions button,.run-name,.player-mode span{min-height:44px}}
 </style>

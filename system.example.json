@@ -1,0 +1,21 @@
+{
+  "main": {
+    "root_dir": ".",
+    "model_path": "models",
+    "lora_dir": "",
+    "comfy_models_dir": ""
+  },
+  "controlnet": {
+    "model_dir": ""
+  },
+  "ipadapter": {
+    "clip_vision_model_path": ""
+  },
+  "animatediff": {
+    "motion_module_path": ""
+  },
+  "mask": {
+    "rvm_model_path": "",
+    "rvm_cache_dir": ""
+  }
+}

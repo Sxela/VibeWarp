@@ -3,6 +3,80 @@
 Details on WarpFusion settings mapping and every configurable subsystem.
 For CLI flags and usage, see [cli.md](cli.md).
 
+The web workspace groups these settings by workflow: Source & output, Model,
+Prompts & sampling, Guidance, Conditioning, Mask & tint, Color match, Frame consistency, Video export, All settings,
+and System settings. Search matches display labels and config names across workflows,
+filtered for the selected model. Machine-local storage rules remain unchanged when a
+model's connection settings also appear in Model setup.
+
+The navbar centers the current project/batch name independently of the controls
+on either side. Click the title to edit `batch_name`; Enter or blur saves,
+Escape cancels, and blank edits preserve the current name. The settings form and
+saved browser configuration stay in sync. The updated name is used for subsequent
+renders and output paths. Import/Export/Reset remain in Project settings. Narrow
+screens keep the editable title centered on its own navbar row.
+
+Empty workflows and groups are omitted based on the selected model and current
+settings. When a group's only contents are its **Advanced controls** subsection,
+that subsection opens automatically; mixed groups keep it collapsed initially.
+The subsection can still be collapsed manually. If the active workflow becomes empty, the workspace selects the first
+available workflow. Model setup retains its required-files panel without an
+empty Model field group. Every model's **Fixed seed** control sits in **Seed**.
+The **Guidance** workflow starts with **General**: Disco's LPIPS/image-space
+frame guidance schedules, secondary model and consistency-area guidance mask;
+SD's consistency-only temporal guidance option also lives here. **CLIP guidance**
+contains encoder/scale controls, followed by **Cutouts** (including progress
+schedules) and **Advanced guidance**. Cutout controls are directly editable
+without opening an advanced subsection. The old grayscale probability scalar
+remains a hidden fallback for unset schedules.
+
+**Mask & tint** contains only RVM/background masking, tint and RVM file overrides.
+Raw-input color matching lives in **Color match**. Flow/consistency masks live in
+**Frame consistency / Flow & Consistency**, video assembly masks in **Video export**,
+and Disco inpainting masks in **Prompts & sampling / Disco inpainting masks**.
+ControlNet/IP-Adapter masks stay in **Conditioning**; scene-mask scheduling stays
+in **Frame consistency / Scene Scheduling**. RVM file overrides also appear in
+System settings and remain machine-local.
+See the [duplicate-settings audit](settings-duplicates.md) for remaining shared
+editors and the [All-settings-only audit](settings-workflow-audit.md) for the 38
+fields still awaiting a dedicated workflow assignment.
+
+Frame range indices refer to extracted frames, after **Extract nth frame**.
+For example, range 0–10 with stride 2 needs source frames 0, 2, …, 20 and
+produces eleven extracted images. Nonzero ranges retain their absolute
+extracted-frame numbering. This prevents flow and video init from running out
+partway through a selected range.
+
+The model picker separates **Native models** (SD 1.5, SDXL, Disco 512) from
+**ComfyUI-managed models** (FLUX.2, HiDream, Qwen, Mage). FLUX.2 is grouped by its
+default ComfyUI backend; its optional Diffusers backend remains selectable in settings.
+Disco LoRA toggles retain secondary-model and guidance choices. Selecting the
+turbo sampler changes only the sampler; incompatible combinations use the existing
+validation messages instead of silently resetting other settings.
+
+Secondary-model weights and inference automatically use native CUDA BF16 where
+supported, otherwise FP16; CPU execution uses BF16. The precision selector is
+removed, and old `disco.secondary_precision` choices migrate to `auto`. Returned
+predictions and guidance/loss calculations retain FP32 precision.
+
+In **Runs & settings**, select a run and press **Load settings** in the
+toolbar to restore its saved settings to the form. **Resume** is also directly
+available. Click the run name to rename it; the player toolbar's radio switch
+selects **View frames** or **Play video** when a rendered video exists. Runs
+without saved settings keep **Load settings** disabled.
+Playback controls are centered in the player panel, with Frames/Video on the
+left and export actions on the right. Narrow panels place playback on its own
+centered row so the side controls cannot push it off-center or overlap it.
+Download and project-settings action popovers close on selection, preserving
+native link/button behavior and returning focus to the menu trigger.
+
+**Source & output → Input Video → Frame Range** is the only render limit.
+Legacy `video.max_frames` / `video_max_frames` settings are retired. An explicit
+range takes precedence during import; otherwise the old frame count becomes a
+range once. Later range edits fully replace it. `[0,0]` still means all frames;
+`[0]` selects only frame zero for imported one-frame profiles. The range editor
+shows that selection and can expand it normally. New exports omit the retired cap.
+
 ## WarpFusion settings mapping
 
 When loading a WarpFusion settings file (`--warpfusion-settings`), the
@@ -76,6 +150,24 @@ to `dwpose`.
 - `{frame: value}` — keyframe dict (with linear interpolation when `blend=True`)
 - `[[v0, v1, v2]]` — WarpFusion ramp format: interpolate across diffusion steps (CFG only)
 
+The desktop editor keeps all keyframes visible and represents ordinary constants
+at frame 0. Loaded scalar values and flat per-frame lists become equivalent
+frame-keyed JSON; nested per-step ramps retain their original representation.
+Optional schedules over visible mode-specific scalars remain unset until edited,
+so loading settings cannot activate frame schedules in distilled reference mode.
+Use the copy/paste icons to transfer schedules as JSON. If clipboard access is
+unavailable, a text area lets you copy or paste manually. Invalid pasted data
+leaves the current schedule unchanged. The **?** control explains each schedule's
+axis and interpolation behavior; errors remain visible beside the editor.
+
+Disco's **LPIPS frame guidance scale** and **Image-space frame guidance scale** each
+have one keyframe editor in **Guidance / General**. An explicit schedule overrides its
+legacy scalar, including an explicit zero. A scalar-only file initializes frame 0
+from that scalar. These two schedules always hold their value until the next key,
+regardless of global schedule blending. The adjacent consistency-mask option
+applies to both losses. **Use Secondary Model** remains a separate prediction-model
+choice. Legacy scalar fields are retained in settings for compatibility.
+
 Enable `keyframes_relative_to_frame_range` to interpret frame-keyed prompts and
 schedules from the selected range's start instead of from the video's frame 0.
 For example, with `frame_range=[60, 70]`, `{0: 1.0, 1: 0.7}` is evaluated as
@@ -140,7 +232,7 @@ VibeWarp selects ViT-H or ViT-bigG from the adapter name/weights. A WarpFusion
 settings import discovers that directory automatically. Encoder weights stay on
 CPU and move to the GPU only while an image is encoded.
 
-The **IP-Adapter** panel sits directly below **ControlNet** on the Render tab.
+The **IP-Adapter** panel sits directly below **ControlNet** under **Conditioning**.
 Its model dropdown is filtered to the active SD1.5 or SDXL family and scans the
 ControlNet model directory for matching checkpoints; a custom checkpoint path
 remains available for models stored elsewhere.
@@ -295,6 +387,112 @@ The effective post-processed mask used for each blend is saved as
 flow**. White keeps the warped stylized frame; black falls back toward the raw
 current frame. Frame 0 has no mask because it has no preceding frame to warp.
 
+Choose **Inspect** in the workspace or Runs & settings to select diagnostic layers.
+All selected layers use the same frame; click an image to enlarge it. **Not saved** means
+there is no artifact at that frame, including configured diagnostics never saved by the
+run. These placeholders do not imply the feature executed. **Download → Current frame**
+saves the focused layer on phones and the last focused layer in Inspect on desktop.
+
+## Raw video matting and color preparation
+
+Available for every model: **Mask & tint** contains RVM tint and render-image
+background compositing; **Color match / Raw input color match** contains independent
+raw color matching. Both groups offer the one-frame preparation preview.
+**Apply masked tint** (stored as `mask.rvm_enabled`) enables the foreground/background
+tints. **Use Background Mask** (`mask.use_background_mask`) enables render-image
+compositing. Masked tint, or background masking with **RVM matting** as the mask
+source, generates the shared RVM alpha masks for the selected video range before model
+loading. Mask generation does not depend on nonzero tint opacity. The official RVM MobileNetV3 FP16 TorchScript model downloads on
+the first preview/render. CUDA video decoding, CUDA matting, CUDA tint blending
+and CUDA color matching are required; these operations have no CPU fallback.
+File encoding, hashing and cache reads/writes remain ordinary disk I/O.
+
+The shared cache is keyed by the video's SHA-256 and extraction stride. Changing
+the render resolution, prompts, model, range, tint or opacity reuses original
+extracted JPEGs. Alpha masks have their own model-hash/downsample-ratio identity.
+Smaller ranges reuse their cached subsets; overlaps extract only missing spans.
+RVM preserves sequential recurrent state, saving checkpoints every 16 frames and
+at the end of a prepared span. A new range may need earlier uncached frames to
+establish that state; later jobs reuse it. Recovery may replay a short cached
+prefix from the nearest checkpoint without rewriting existing alpha masks.
+Writes are atomic, so an interrupted preparation can be retried.
+
+**Foreground color** and **Background color** are RGB values (0–255), with
+independent opacity, displayed as sliders from 0 to 1 (1 is fully opaque).
+Saved values remain fractions from 0 to 1: slider 0.5 stores 0.5. Early browser
+entries using whole percentages, such as 50, restore as 0.5. For raw RGB `x`,
+alpha `a` and colors `fg`/`bg`:
+
+```text
+prepared = a * lerp(x, fg, foreground_opacity)
+         + (1-a) * lerp(x, bg, background_opacity)
+```
+
+**Color-match raw video frames** has independent `PDF`, `LAB` and `mean`
+(per-channel mean/std) methods and strength. Color matching runs first, then
+the foreground/background tints. Choose **init stylized** to use the first
+stylized frame, or **previous warped** to use the previous stylized frame warped
+into the current frame. On render paths without that warp, the previous saved
+stylized frame is used; batched future inputs use the first available stylized
+anchor. With no stylized reference yet, color matching skips that frame and
+tinting still applies. Output color-match settings are unchanged and independent.
+
+Preparation applies only to raw render inputs, before consistency blending;
+flow estimation continues using unmodified video frames. The source video,
+cached original frames, RVM alpha and existing consistency masks are never
+recolored. Render-only prepared images go into the run's `temp` folder when a
+path is needed. Disco padding uses the same visible-content geometry for alpha.
+AnimateDiff raw inputs and temporal-contact-sheet raw cells also use preparation.
+
+**Preview one frame** accepts a zero-based extracted-frame index. For color
+matching, supply a stylized reference image path (or the configured first-frame
+reference). It uses the same cache and GPU kernels and queues on the same worker
+as rendering, without loading a diffusion model. Preview errors appear in the
+panel with the failing field and validation message; an unsuccessful new preview
+never leaves an old image displayed as its result. Cancellation uses the normal
+job cancellation control.
+
+`mask.rvm_model_path` and `mask.rvm_cache_dir` are machine-local overrides in
+System settings. Blank values use `<model_path>/rvm/rvm_mobilenetv3_fp16.torchscript`
+and `<root_dir>/.vibewarp_cache/video_inputs`.
+
+**Render mask stage** (`mask.render_mask_stage`) chooses **before diffusion** or
+**after diffusion**. Before diffusion composites the final model input after any
+warp/consistency blending, so diffusion can style the fresh background. After
+diffusion composites the output before saving and feeding it into the next frame.
+Render masking never runs inside the warp step, and a soft mask is not applied
+twice to the same image. The same boundaries apply to edit/contact-sheet and
+AnimateDiff render paths. With Turbo and **before diffusion**, the warped old history
+on warp-only frames is masked too (it is its own image for that frame); otherwise its
+1/3 share of the turbo crossfade shows a translucent ghost of the previous pose in the
+background. This placement deliberately differs from the notebook, which masks the
+warped frame and then the init again (a soft edge masked twice) and never the output;
+masked notebook settings therefore do not reach pixel parity. Tint and raw color preparation remain independent.
+
+**Mask source** (`mask.mask_source`) chooses where background masks come from, for
+both render compositing and video-assembly masking: **RVM matting** (default) extracts
+them from the input video on the GPU; **mask video** and **image folder** use your own
+mattes from `mask.mask_path` (light = foreground). A user video or folder must have one
+matte per *input video* frame — folder images are taken in natural name order — and
+`extract_nth_frame` applies to it just as it does to the input video. User sources need
+no CUDA, RVM model or RVM cache. Before rendering, every source is written to the run's
+`video_frames_alpha/{frame+1:06d}.png` at canvas size (with Disco edge padding); render
+and assembly masking both read that folder, so **Rebuild video** from History needs
+neither the cache nor a GPU. A source that is too short fails before rendering.
+Masked tint always uses RVM alpha. Notebook imports map `mask_source='mask_video'` +
+`mask_video_path` to **mask video**, and anything else to **RVM matting**.
+
+Invert, clip thresholds, and color/image/input-video background choices apply to every
+source. `mask.apply_mask_after_warp` is retained when loading/saving old settings but
+no longer controls placement. Older files default to before diffusion.
+
+The system log's top edge can be dragged or resized with arrow keys; Home/End set
+its minimum/maximum height. Height persists in this browser. The status bar parses
+ETA from outer Rendering frames / Contact sheets / AnimateDiff batches progress
+lines, including carriage-return updates, and counts down between updates. Inner
+sampling/download estimates are ignored. Unknown estimates are hidden, and ETA
+clears for completion, failure, cancellation and cleanup.
+
 ## Video assembly
 
 Post-processing options applied during video creation (configured via `VideoAssemblyConfig`):
@@ -364,9 +562,12 @@ and therefore cannot be applied through the remote ComfyUI edit backends.
 ### Background mask compositing
 
 When `use_background_mask_video=True`, each output frame is composited onto a
-background using pre-computed alpha masks. The masks must be in
-`{video_frames_folder}_alpha/` named `{frame_num+1:06d}.jpg` (grayscale,
-0=transparent 255=opaque).
+background using the run's masks in `video_frames_alpha/`, written from the selected
+**Mask source** when the run renders (see
+[Raw video matting](#raw-video-matting-and-color-preparation)). Files are
+`{frame_num+1:06d}.png`; hand-placed notebook-style `.jpg` masks are also read
+(grayscale, 0=transparent 255=opaque). If the folder is empty, assembly warns and
+exports unmasked.
 
 Background types:
 - `'color'` — solid color (CSS color string or name, e.g. `'black'`, `'#ff0000'`)
@@ -376,6 +577,10 @@ Background types:
 `mask_clip_low` / `mask_clip_high` threshold the mask before compositing.
 
 ## SD/SDXL temporal guidance
+
+Disco also supports the shared guidance-source selector, including the current
+`raw frame`. Its LPIPS and direct image-space loss scales are described in
+[Disco frame guidance](disco-diffusion.md#models-and-guidance).
 
 `diffusion.guidance_mode` selects the loss target for the two optional
 WarpFusion gradient-guidance controls:
@@ -548,7 +753,94 @@ config = RunConfig(
 The default `tile_size=128` gives 1024px tiles with `vae_stride=96` (768px
 stride, 256px overlap on each side).
 
+## Turbo intermediate strength
+
+**Turbo → Intermediate Strength** controls the diffusion/denoising strength
+on intermediate frames between regular diffusion frames, after preroll.
+At 0 those frames use optical-flow warping and blending only. A positive value
+runs diffusion on those frames at that strength: lower values retain more of
+the warped init; higher values permit more redraw and typically more sampling
+work. Regular diffusion frames retain the normal scheduled strength. Turbo
+Interval controls their spacing, while scene-cut handling can force a regular
+frame. Positive intermediate strength is supported by SD/SDXL and Disco.
+
+Strength selects the starting noise level and remaining denoising schedule.
+For Disco with N scheduled steps and positive strength s, it skips approximately
+`floor(N * (1-s))` early steps (at most N-1) and runs the rest. With 6 steps,
+0.5 runs the final 3 steps; 1 runs all 6. Turbo strength 0 bypasses sampling
+entirely. Noise amplitude follows the sampler's noise schedule, so 0.5 is not
+a linear 50% pixel-noise mixture.
+
+Color matching also applies to Turbo intermediate frames: before-matching runs
+during warp/init preparation, and after-matching runs after Turbo's output blend,
+including warp-only frames when enabled. The first frame has no previous palette
+for after-matching. After-matching corrects the unblended next-frame feedback
+as well as the displayed blend, on both diffusion anchors and intermediate
+frames. Lossless Turbo resume checkpoints store that corrected feedback.
+
+Notebook imports map `turbo_frame_skips_steps` to `1 - skip_fraction`:
+0.75 becomes strength 0.25; null or 100% means warp-only. Both numeric exports
+and percentage widget strings are supported. `forward_weights_clip_turbo_step`
+(or `soften_consistency_mask_for_turbo_frames`) maps to
+`turbo.consistency_soften`, and `disable_cc_for_turbo_frames` maps to
+`turbo.disable_cc`.
+
+On intermediate frames a positive Turbo softness overrides normal softness
+for both histories. Zero preserves the notebook's fallback: normal softness
+for the new history, zero for the old history. The disable-CC option skips
+consistency masking for both histories on intermediate frames only. Anchors
+retain the normal new-history controls. Turbo blends execute with PyTorch on
+CUDA when available, using nearest-even rounding before conversion to bytes
+(CPU fallback supports installations without CUDA). Checkpoints from the older
+Turbo feedback/blending implementation must be regenerated.
+
 ## Noise modes
+
+**Prompts & sampling → Seed → Fixed noise randomness** is a 0–1 slider for
+native Disco and SD/SDXL. It applies when that renderer's **Fixed seed** is on;
+default 0 preserves existing renders and the original RNG sequence. After
+frame zero it mixes `sqrt(1-r) * base + sqrt(r) * fresh`, with independent
+standard Gaussian fresh noise. Thus mean 0 and variance 1 are preserved in
+distribution instead of shrinking through linear averaging. Finite image
+samples still have natural small mean/std fluctuations; no per-image
+renormalization changes their distribution.
+
+The fresh-noise variance share is `r`: 0 retains the base pattern, 1 replaces it
+with independent noise on later frames. Frame zero remains unchanged. Fresh
+noise is generated on the tensor's device from an isolated seed/frame-keyed
+generator, preserving repeatability and absolute-frame resume behavior without
+advancing sampler or augmentation RNG. The mixture starts from the base noise,
+not a rolling accumulation of previously mixed frames.
+
+**Noise wiggle shift px** (`diffusion.fixed_seed_wiggle`, default 0) controls
+the distance; **0 is off** regardless of direction. **Noise wiggle direction
+[x, y]** (`diffusion.fixed_seed_wiggle_direction`, default `[0,0]`) selects:
+
+- `[0,0]`: random seed/frame-keyed offsets within ±N pixels on each axis, measured
+  from the original fixed pattern, without an accumulating random walk.
+- Any nonzero vector: a continuous cumulative roll. The vector is normalized;
+  shift N is its per-frame speed. `[1,0]` moves right, `[-1,0]` left, `[0,1]` down,
+  and `[0,-1]` up. Diagonals are supported. Absolute frame position is computed
+  as `round(frame * N * normalized_direction)` so fractional components retain
+  their long-term direction while every actual shift stays on the integer grid.
+
+Both modes wrap around, without interpolation, zero padding or averaging,
+preserving every noise value and therefore its histogram, mean and standard
+deviation. All channels share the same spatial translation. Positions remain
+reproducible on resume without consuming sampler RNG or replaying earlier frames.
+
+Set randomness to 0 for wiggle alone. Otherwise the translated fixed component
+is mixed with fresh noise using the existing variance-preserving weights; at
+randomness 1 no fixed component remains. Disco uses image-space noise pixels;
+SD/SDXL uses latent-noise pixels (typically one latent pixel spans eight output
+pixels). The control follows Fixed seed and supports the same native paths as
+randomness, including unguided Disco. Frame zero remains unchanged.
+
+This covers guided and unguided Disco/LoRA and SD img2img/txt2img default/fixed
+noise. Reconstruction noise retains its own randomness control. AnimateDiff
+retains its existing frame-keyed base and adds variation per absolute frame;
+injected reference-validation noise is unchanged. Comfy-managed renderers keep
+their existing seed controls and do not expose this native tensor-mixing option.
 
 Three noise modes control how the initial noise is constructed for each frame:
 
@@ -563,7 +855,36 @@ For `noise_mode='fixed'`, `code_randomness` controls the blend:
 - `1.0` = fully random (same as `default`)
 - Typical value: `0.1`–`0.3`
 
+## Disco cutout schedules
+
+**Guidance → Cutouts → Cutout working size cap** bounds temporary cutout
+construction memory before padding/cropping. Encoder inputs were already resized
+to each encoder's required resolution; the extra cap limits the larger working
+image and its interpolation graph. `disco.cut_max_size=0` retains native behavior;
+try 1024 for large render canvases. The cap is differentiable, keeps aspect ratio
+and relative crop footprints, and can change fine detail when enabled. It leaves
+the sampler and LPIPS input resolution unchanged.
+
+Overview views, inner crops, and grayscale schedules share **Inference progress
+(%)**. Six executed steps use 0, 20, 40, 60, 80, 100; six scheduled steps with two
+skipped use 0, 33⅓, 66⅔, 100. A single executed step uses 0. Keys may be fractional.
+Values hold until the next key. Overview/innercut values are cut counts per batch.
+For example, `{0:4,40:2,60:0}` uses four whole-frame views before 40%, two from
+40%, and none from 60%. It does not change the number of sampling steps.
+The chart always spans 0–100% and extends the last held value to 100%, even when
+the last configured key is earlier.
+
+New serialized configs include `disco.cut_schedule_version: 2`. Importing older
+notebook/native settings migrates their selections for the configured timestep
+grid and skip count once; reopening the export never converts it again. Existing
+browser settings migrate before defaults are merged, preserving their old axis.
+See [the Disco schedule migration notes](disco-video-settings-and-trusted-guidance.md).
+
 ## Prompt features
+
+The web UI edits positive and negative prompts as frame-keyed text schedules.
+Use **Keyframes** for individual entries or **JSON** for the full mapping;
+switching back to Keyframes preserves both frame numbers and prompt strings.
 
 ### Multi-prompt blending
 
@@ -791,7 +1112,7 @@ The exact PNGs sent to ComfyUI are saved per frame as
 `debug/hidream_reference_1_NNNNNN.png` and, in multi-reference mode,
 `debug/hidream_reference_2_NNNNNN.png` (and so on). These are captured after
 trained-size resampling and after optional visible labels are applied. They
-appear under **Edit inputs** in History & Comparison. Comfy uploads also use
+appear under **Edit inputs** in Runs & settings. Comfy uploads also use
 frame-specific filenames so older prompts retain the correct inputs in ComfyUI
 history instead of pointing at a file overwritten by a later frame.
 
@@ -916,9 +1237,42 @@ conditioning node.
 | `mage.references` | image 1: `raw`; image 2: `none` | Up to 16 ordered images. |
 | `mage.fixed_seed` | `True` | Reuse starting noise across frames for temporal stability. |
 
+## Temporal contact sheets
+
+Experimental. The ComfyUI image-edit backends submit one graph per frame, so
+the model never sees a frame's neighbours and appearance drifts between them.
+Contact-sheet mode tiles several frames into a single image and edits them
+together, then splits the result back into frames.
+
+**This is not Qwen-specific**, despite where it was first researched. It works
+for every ComfyUI image-edit family — **Flux 2 Klein Edit, HiDream-O1 Edit,
+Qwen Image Edit and Mage-Flow Edit** — through one shared render path. Flux
+must be on the `comfy` backend (the diffusers path is not supported). The
+fields appear on **Render → Temporal Contact Sheet** whenever one of those
+models is selected.
+
+| Setting | Default | Notes |
+|---|---|---|
+| `contact_sheet.mode` | `off` | `raw_triplets` edits neighbouring frames together; `reinject` also feeds rendered boundary frames back in. |
+| `contact_sheet.layout` | `adaptive` | `adaptive` picks from the cell count and aspect ratio; `row`, `column` and `grid` force one. |
+| `contact_sheet.gutter` | `4` | Pixel gap between tiles, so neighbouring frames do not bleed into one another. |
+| `contact_sheet.instruction` | `''` | Extra per-sheet instruction appended to the prompt. |
+| `contact_sheet.save_debug` | `True` | Writes the assembled sheets to `debug/` for inspection. |
+
+Sheets are built at one of the target model's preferred resolutions —
+`FluxKontextImageScale`'s set for the Flux-derived families, and HiDream's own
+trained resolutions for HiDream — so the graph's scaling node cannot crop a
+wide or tall sheet before the model sees it.
+
+Contact-sheet mode takes over the frame loop, so the model's own reference
+slots must be left at their defaults; validation rejects extra references
+rather than silently ignoring them. The research notes behind the feature, and
+what is still only planned, are in
+[qwen-temporal-consistency.md](qwen-temporal-consistency.md).
+
 ## Color matching
 
-Color matching is split into two independent groups under **Advanced**:
+The dedicated **Color match** tab contains two independent groups:
 
 - **Color Match — Before Diffusion** colorizes raw/current video pixels toward
   the warped previous frame before consistency-mask blending. This keeps raw

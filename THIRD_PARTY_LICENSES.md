@@ -3,6 +3,11 @@
 VibeWarp is licensed **GPL-3.0** (see LICENSE). It vendors or ports code from
 the projects below; each retains its original license and copyright.
 
+Optional Robust Video Matting uses the official MobileNetV3 FP16 TorchScript
+model from [PeterL1n/RobustVideoMatting](https://github.com/PeterL1n/RobustVideoMatting)
+(GPL-3.0). The model is downloaded on demand from the v1.0.0 release; its
+architecture source is not cloned or vendored at runtime.
+
 ## Why GPL-3.0 (and not AGPL-3.0 or a permissive license)
 
 VibeWarp was initially published under AGPL-3.0 out of caution and relicensed
@@ -53,3 +58,14 @@ to GPL-3.0 on 2026-07-10 after auditing the license of every vendored source:
 
 Runtime PyPI dependencies (torch, transformers, controlnet-aux, open-clip-torch,
 etc.) are not vendored and carry their own licenses.
+# Guided diffusion and Disco secondary model
+
+The inference modules in `vibewarp/vendor/guided_diffusion` derive from OpenAI
+guided-diffusion and the Sxela fork (MIT). The original license and revision
+are included in that directory. `vibewarp/core/disco_secondary.py` contains
+Katherine Crowson's secondary diffusion architecture, distributed under the
+MIT license in the supplied Disco Diffusion Warp notebook.
+
+Disco Dango cutouts also use the already vendored ResizeRight implementation
+(MIT © Assaf Shocher). Its license and source revision are retained under
+`vibewarp/vendor/resize_right/` and included in package data.

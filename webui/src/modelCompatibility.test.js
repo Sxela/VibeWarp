@@ -1,5 +1,30 @@
 import { describe, expect, it } from 'vitest';
-import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint } from './modelCompatibility.js';
+import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint, switchDiscoSampler } from './modelCompatibility.js';
+
+describe('Disco distilled sampler settings',()=>{
+  const settings={
+    properties:{disco:{type:'dataclass'},video:{type:'dataclass'}},
+    disco_distilled_preset:{model_version:'disco_512',text_prompts:{0:''},
+      disco:{sampler:'distilled',steps:4,encoders:[]},video:{width:512,height:512}},
+    disco_guided_restore:{model_version:'disco_512',text_prompts:{0:'default'},
+      disco:{sampler:'ddim',steps:50,encoders:['ViT-B-32']},video:{width:512,height:512}},
+  };
+  it.each([true,false])('keeps secondary and guidance choices (%s) when selecting the adapter sampler',enabled=>{
+    const original={model_version:'disco_512',text_prompts:{0:'my painting'},
+      disco:{sampler:'ddim',steps:120,encoders:['siglip2-base'],checkpoint_path:'base.pt',few_step_lora_path:'adapter.safetensors',use_secondary_model:enabled,distilled_guided:enabled,clip_guidance_scale:7000,eta:.25},
+      video:{width:1024,height:768,video_init_path:'input.mp4'}};
+    const next=switchDiscoSampler(original,'distilled',settings);
+    expect(next.config).toEqual({...original,disco:{...original.disco,sampler:'distilled'}});
+    const edited={...next.config,disco:{...next.config.disco,checkpoint_path:'new-base.pt',clip_guidance_scale:9000}};
+    const restored=switchDiscoSampler(edited,'plms',settings,next.previous);
+    expect(restored.config).toEqual({...edited,disco:{...edited.disco,sampler:'plms'}});
+  });
+  it('keeps imported adapter settings when changing back to DDIM',()=>{
+    const config={disco:{sampler:'distilled',steps:4,encoders:[],use_secondary_model:false,distilled_guided:false,few_step_lora_path:'adapter.safetensors'},video:{width:512,height:512}};
+    const next=switchDiscoSampler(config,'ddim',settings);
+    expect(next.config).toEqual({...config,disco:{...config.disco,sampler:'ddim'}});
+  });
+});
 
 const schema = {
   model_family_by_version: {

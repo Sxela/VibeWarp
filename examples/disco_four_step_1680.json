@@ -1,0 +1,56 @@
+{
+  "model_version": "disco_512",
+  "text_prompts": {
+    "0": ""
+  },
+  "negative_prompts": {
+    "0": ""
+  },
+  "disco": {
+    "sampler": "distilled",
+    "steps": 4,
+    "encoders": [],
+    "use_secondary_model": false,
+    "image_prompts": {},
+    "clip_guidance_scale": 0.0,
+    "init_scale": 0.0,
+    "image_scale": 0.0,
+    "tv_scale": 0.0,
+    "range_scale": 0.0,
+    "sat_scale": 0.0,
+    "style_strength": 1.0,
+    "eta": 0.0,
+    "inpaint": false,
+    "attention": "sdpa",
+    "few_step_lora_path": "models/disco/lora/student-1680step.safetensors",
+    "distilled_guided": false
+  },
+  "video": {
+    "width": 512,
+    "height": 512,
+    "max_size": 0
+  },
+  "diffusion": {
+    "tiled_sampler": false,
+    "sampler_scale_schedule": {
+      "0": 100.0
+    }
+  },
+  "flow": {
+    "flow_warp": false
+  },
+  "turbo": {
+    "enabled": false
+  },
+  "color": {
+    "before_enabled": false,
+    "after_enabled": false
+  },
+  "animatediff": {
+    "enabled": false
+  },
+  "contact_sheet": {
+    "mode": "off"
+  },
+  "batch_name": "disco_student_1680"
+}

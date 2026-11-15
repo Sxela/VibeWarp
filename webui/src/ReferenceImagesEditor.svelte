@@ -1,4 +1,5 @@
 <script>
+  import HelpTip from './HelpTip.svelte';
   let {
     value = [], onchange, videoPath = '', frameRange = [0, 0],
     extractNth = 1, maxReferences = 10, sourceLabels = {},
@@ -84,8 +85,7 @@
 
 <div class="reference-list">
   <div class="intro">
-    <div><b>Ordered model references</b>
-      <span>Image 1 is always sent. Choose another source to reveal the next slot.</span>
+    <div><b>Ordered model references <HelpTip label="Help: Ordered model references" text="Image 1 is always sent. Choose another source to reveal the next slot."/></b>
     </div>
     <em>{visible.filter(ref=>ref.source!=='none').length}/{maxReferences} active</em>
   </div>
@@ -160,32 +160,31 @@
 <style>
   .reference-list{display:flex;flex-direction:column;gap:14px}
   .intro{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
-  .intro b,.intro span{display:block}.intro b{color:#e7eaee;font-size:13px}
-  .intro span{margin-top:4px;color:#747d88;font-size:11px}
-  .intro em{white-space:nowrap;color:#a9c66b;font:11px Consolas,monospace;font-style:normal}
-  .opacity-control{display:flex;align-items:center;gap:10px;color:#8f98a3;font-size:11px}
+  .intro b{display:block;color:#e7eaee;font-size:13px}
+  .intro em{white-space:nowrap;color:#a9c66b;font:var(--text-value) var(--font-mono);font-style:normal}
+  .opacity-control{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:var(--text-help)}
   .opacity-control input{width:180px;padding:0;border:0;background:transparent;accent-color:#b8dc50}
-  .opacity-control output{min-width:34px;color:#dbe4cb;font:11px Consolas,monospace}
+  .opacity-control output{min-width:34px;color:#dbe4cb;font:var(--text-value) var(--font-mono)}
   .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
-  article{min-width:0;border:1px solid #303640;background:#0d1014;border-radius:11px;padding:12px}
+  article{min-width:0;border:1px solid #303640;background:#0d1014;border-radius:var(--radius);padding:12px}
   article.required{border-color:#4b5836}article.inactive{border-style:dashed;background:#0b0d10}
   article header{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}
-  article header b{font-size:12px;color:#e3e6ea}article header span{font-size:9px;color:#87936f;text-transform:uppercase;letter-spacing:.1em}
-  .thumb,.drop{position:relative;width:100%;aspect-ratio:1;border:1px solid #292f37;border-radius:8px;background:#080a0d;overflow:hidden;margin:0 0 11px}
+  article header b{font-size:var(--text-label);color:#e3e6ea}article header span{font-size:var(--text-help);color:var(--muted);text-transform:uppercase;letter-spacing:.1em}
+  .thumb,.drop{position:relative;width:100%;aspect-ratio:1;border:1px solid #292f37;border-radius:var(--radius);background:#080a0d;overflow:hidden;margin:0 0 11px}
   .thumb img,.drop img{width:100%;height:100%;object-fit:cover;display:block}
-  .thumb>span,.drop>span{color:#68717d;font-size:10px;text-align:center;padding:12px}
+  .thumb>span,.drop>span{color:var(--muted);font-size:var(--text-help);text-align:center;padding:12px}
   .thumb.empty,.drop{display:grid;place-items:center;align-content:center;gap:5px}
   .thumb i,.drop i{color:#9daa83;font:300 32px/1 system-ui;font-style:normal}
-  .thumb img+span{position:absolute;left:7px;bottom:7px;padding:4px 6px;border-radius:5px;background:#090b0dcc;color:#b9c2ad;text-transform:uppercase;letter-spacing:.08em;font-size:8px}
+  .thumb img+span{position:absolute;left:7px;bottom:7px;padding:4px 6px;border-radius:5px;background:#090b0dcc;color:#b9c2ad;text-transform:uppercase;letter-spacing:.08em;font-size:var(--text-help)}
   .drop{cursor:pointer;color:#7d8793}.drop:hover,.drop.over{border-color:#9fbe4d;background:#11170d}
   .drop .replace{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);padding:5px 8px;border-radius:6px;background:#090b0ddd;color:#dce4d0;white-space:nowrap}
   .picker{display:none}
-  label{display:flex;flex-direction:column;gap:6px;color:#8f98a3;font-size:10px}
-  select{width:100%;border:1px solid #303640;background:#11151a;color:#e5e8ec;border-radius:7px;padding:8px;outline:none;font-size:11px}
-  select:focus{border-color:#8ea834}
+  label{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:var(--text-help)}
+  select{width:100%;border:1px solid #303640;background:#11151a;color:#e5e8ec;border-radius:var(--radius);padding:8px;outline:none;font-size:var(--text-help)}
+  select:focus{border-color:var(--accent-muted)}
   .label-toggle{flex-direction:row;align-items:center;margin-top:9px;color:#929aa4}
   .label-toggle input{appearance:none;width:30px;height:17px;padding:2px;border:1px solid #37404a;background:#11151a;border-radius:12px}
   .label-toggle input:checked{background:#b8dc50}.label-toggle input:after{content:'';display:block;width:11px;height:11px;border-radius:50%;background:#69727d}.label-toggle input:checked:after{transform:translateX(13px);background:#111}
-  .err{display:block;margin:-5px 0 8px;color:#f18b91;font-size:10px}
+  .err{display:block;margin:-5px 0 8px;color:var(--error);font-size:var(--text-help)}
   @media(max-width:700px){.cards{grid-template-columns:1fr 1fr}}
 </style>

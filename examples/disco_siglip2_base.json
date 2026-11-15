@@ -1,0 +1,23 @@
+{
+  "model_version": "disco_512",
+  "batch_name": "disco_siglip2_base",
+  "text_prompts": {
+    "0": "an impressionist oil painting of a quiet riverside village, flower gardens, reflections in the water"
+  },
+  "disco": {
+    "encoders": ["siglip2-base"],
+    "use_secondary_model": true,
+    "attention": "sdpa",
+    "sampler": "ddim",
+    "steps": 50,
+    "preview_interval": 5
+  },
+  "diffusion": {
+    "tiled_sampler": false,
+    "sampler_scale_schedule": {"0": 100}
+  },
+  "video": {
+    "width": 512,
+    "height": 512
+  }
+}

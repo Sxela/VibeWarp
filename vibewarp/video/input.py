@@ -1,6 +1,7 @@
 """Video frame extraction and dataset utilities."""
 
 import os
+import math
 import subprocess
 from glob import glob
 
@@ -11,18 +12,19 @@ from PIL import Image
 IMAGE_EXTENSIONS = {'jpeg', 'jpg', 'png', 'tiff', 'bmp', 'webp'}
 
 
-def fit_dimensions(width: int, height: int, max_size: int, multiple: int = 8):
+def fit_dimensions(width: int, height: int, max_size: int, multiple: int = 8, round_up: bool = False):
     """Fit dimensions to a maximum edge while preserving aspect ratio."""
     if width <= 0 or height <= 0 or max_size <= 0:
         raise ValueError("Video dimensions and max_size must be positive")
     scale = min(1.0, max_size / max(width, height))
+    snap = math.ceil if round_up else round
     return (
-        max(multiple, round(width * scale / multiple) * multiple),
-        max(multiple, round(height * scale / multiple) * multiple),
+        max(multiple, snap(width * scale / multiple) * multiple),
+        max(multiple, snap(height * scale / multiple) * multiple),
     )
 
 
-def resolve_video_dimensions(video_path: str, max_size: int):
+def resolve_video_dimensions(video_path: str, max_size: int, multiple: int = 8, round_up: bool = False):
     """Read source dimensions and resolve render dimensions from max_size."""
     import cv2
     capture = cv2.VideoCapture(video_path)
@@ -33,7 +35,7 @@ def resolve_video_dimensions(video_path: str, max_size: int):
         capture.release()
     if width <= 0 or height <= 0:
         raise ValueError(f"Could not read video dimensions: {video_path}")
-    return fit_dimensions(width, height, max_size)
+    return fit_dimensions(width, height, max_size, multiple, round_up)
 
 
 def probe_video(video_path: str) -> dict:
@@ -189,7 +191,18 @@ def _find_ffmpeg():
     return 'ffmpeg'  # fallback to PATH
 
 
-def extract_frames(video_path, output_dir, nth_frame=1, start_frame=0, end_frame=999999999):
+def extraction_selection(frame_range, nth_frame):
+    """Map zero-based extracted-frame indices to inclusive source bounds."""
+    start = frame_range[0] if frame_range else 0
+    end = (frame_range[0] if len(frame_range or []) == 1 else
+           frame_range[1] if frame_range and frame_range[1] > 0 else None)
+    return {'start_frame': start * nth_frame,
+            'end_frame': end * nth_frame if end is not None else 999999999,
+            'start_number': start + 1}
+
+
+def extract_frames(video_path, output_dir, nth_frame=1, start_frame=0, end_frame=999999999,
+                   start_number=None):
     """Extract frames from a video file using ffmpeg.
 
     Args:
@@ -198,6 +211,7 @@ def extract_frames(video_path, output_dir, nth_frame=1, start_frame=0, end_frame
         nth_frame: extract every nth frame
         start_frame: starting frame index
         end_frame: ending frame index
+        start_number: optional one-based output number when source/render indices differ
     """
     os.makedirs(output_dir, exist_ok=True)
     ffmpeg = _find_ffmpeg()
@@ -208,7 +222,7 @@ def extract_frames(video_path, output_dir, nth_frame=1, start_frame=0, end_frame
         '-q:v', '2',
         # Extracted video frames are one-based on disk while frame_range is
         # zero-based. Preserve absolute numbering: frame 60 -> 000061.jpg.
-        '-start_number', str(start_frame + 1),
+        '-start_number', str(start_frame + 1 if start_number is None else start_number),
         os.path.join(output_dir, '%06d.jpg')
     ]
     result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)

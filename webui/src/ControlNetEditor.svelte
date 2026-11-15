@@ -1,4 +1,5 @@
 <script>
+  import HelpTip from './HelpTip.svelte';
   import { SvelteSet } from 'svelte/reactivity';
   import Field from './Field.svelte';
   import { stripQuotes } from './paths.js';
@@ -98,7 +99,7 @@
 
 <div class="base grid">
   <label class="toggle"><input type="checkbox" checked={value.enabled} onchange={(e)=>patch({enabled:e.target.checked})}/><span>Enable ControlNet processing</span></label>
-  <label class="wide"><span>Model directory <small>scanned for checkpoints</small></span><input value={value.model_dir} placeholder="models/ControlNet" onchange={(e)=>patch({model_dir:stripQuotes(e.target.value)})}/></label>
+  <label class="wide"><span>Model directory <HelpTip label="Help: Model directory" text="Scanned for checkpoints."/></span><input value={value.model_dir} placeholder="models/ControlNet" onchange={(e)=>patch({model_dir:stripQuotes(e.target.value)})}/></label>
   <label><span>Loading mode</span><select value={value.mode} onchange={(e)=>patch({mode:e.target.value})}><option>internal</option><option>external</option></select></label>
   <label><span>Global conditioning source</span><select value={value.cond_image_src} onchange={(e)=>patch({cond_image_src:e.target.value})}><option>init</option><option>stylized</option><option>cond_video</option></select></label>
   <label class="toggle"><input type="checkbox" checked={value.normalize_weights} onchange={(e)=>patch({normalize_weights:e.target.checked})}/><span>Normalize combined weights</span></label>
@@ -156,9 +157,9 @@
         <label class="wide"><span>Custom checkpoint path</span><input value={entry.path.trim()} placeholder="C:\models\ControlNet\my_net.safetensors" onchange={(e)=>entryPatch(key, {path:stripQuotes(e.target.value)})}/></label>
       {/if}
 
-      <label><span>Detect resolution <small>−1 = use global</small></span><input type="number" step="8" value={entry.detect_resolution} onchange={(e)=>entryPatch(key,{detect_resolution:number(e)})}/></label>
-      <label><span>Start <small>fraction of steps</small></span><input type="number" min="0" max="1" step="0.05" value={entry.start} onchange={(e)=>entryPatch(key,{start:number(e)})}/></label>
-      <label><span>End <small>fraction of steps</small></span><input type="number" min="0" max="1" step="0.05" value={entry.end} onchange={(e)=>entryPatch(key,{end:number(e)})}/></label>
+      <label><span>Detect resolution <HelpTip label="Help: Detect resolution" text="−1 uses the global detection resolution."/></span><input type="number" step="8" value={entry.detect_resolution} onchange={(e)=>entryPatch(key,{detect_resolution:number(e)})}/></label>
+      <label><span>Start <HelpTip label="Help: Step range" text="Fraction of sampling steps, from 0 to 1."/></span><input type="number" min="0" max="1" step="0.05" value={entry.start} onchange={(e)=>entryPatch(key,{start:number(e)})}/></label>
+      <label><span>End <HelpTip label="Help: Step range" text="Fraction of sampling steps, from 0 to 1."/></span><input type="number" min="0" max="1" step="0.05" value={entry.end} onchange={(e)=>entryPatch(key,{end:number(e)})}/></label>
       <label><span>Source</span>
         <select value={sources.some(([id])=>id===entry.source) ? entry.source : '__path__'}
                 onchange={(e)=>entryPatch(key,{source: e.target.value === '__path__' ? (entry.source || ' ') : e.target.value})}>
@@ -185,21 +186,21 @@
         <div class="derived">
           <span>Zero unconditional</span>
           {#if entry.mode === 'custom'}
-            <label class="toggle bare"><input type="checkbox" checked={entry.zero_uncond} onchange={(e)=>entryPatch(key,{zero_uncond:e.target.checked})}/></label>
+            <label class="toggle bare"><input type="checkbox" aria-label="Zero unconditional" checked={entry.zero_uncond} onchange={(e)=>entryPatch(key,{zero_uncond:e.target.checked})}/></label>
           {:else}
-            <b>{zeroUncondFor(entry) ? 'on' : 'off'}</b><small>set by mode</small>
+            <b>{zeroUncondFor(entry) ? 'on' : 'off'}</b><HelpTip label="Help: Zero unconditional" text="Set by the loading mode. Choose Custom layer weights to edit this value."/>
           {/if}
         </div>
       </div>
 
       <div class="layers">
-        <span class="layers-label">Layer weights <small>{entry.mode === 'custom' ? '13 UNet blocks — editable' : 'derived from mode'}</small></span>
+        <span class="layers-label">Layer weights <HelpTip label="Help: Layer weights" text={entry.mode === 'custom' ? '13 UNet blocks — editable' : 'Derived from the loading mode. Choose Custom layer weights to edit individual blocks.'}/></span>
         <div class="bars">
           {#each weightsFor(entry) as weight, index}
             <div class="bar" title={`Layer ${index}: ${weight.toFixed(3)}`}>
               <i style={`height:${Math.max(2, Math.min(1, weight) * 100)}%`}></i>
               {#if entry.mode === 'custom'}
-                <input type="number" min="0" max="1" step="0.05" value={Number(weight.toFixed(3))} onchange={(e)=>setLayerWeight(key, entry, index, e.target.value)}/>
+                <input type="number" aria-label={`Layer ${index} weight`} min="0" max="1" step="0.05" value={Number(weight.toFixed(3))} onchange={(e)=>setLayerWeight(key, entry, index, e.target.value)}/>
               {/if}
             </div>
           {/each}
@@ -209,7 +210,7 @@
 
     {#if net?.detectors?.length}
       <div class="detectors">
-        <p>Detector settings <small>global — shared by every net using the {net.annotator} annotator</small></p>
+        <p>Detector settings <HelpTip label="Help: Detector settings" text={`Global — shared by every net using the ${net.annotator} annotator.`}/></p>
         <div class="grid">
           {#each net.detectors as name}
             <Field {name} schema={schema.properties[name]} value={value[name]} onchange={(v)=>patch({[name]:v})}/>
@@ -231,16 +232,15 @@
   /* Do NOT set width/height on .toggle input here. style.css styles it as a
      36x20 pill with an :after knob; a scoped override outranks that and
      collapses the track into a bare circle. */
-  small{color:#68717d}
 
   .adder{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;margin-top:22px}
-  .adder .hint{grid-column:1/-1;margin:0;color:#68717d;font-size:11px}
-  .add{border:1px solid #4d5d2a;background:#d8ff55;color:#111;font-weight:700;padding:10px 20px;border-radius:8px;cursor:pointer;height:38px}
+  .adder .hint{grid-column:1/-1;margin:0;color:var(--muted);font-size:var(--text-help)}
+  .add{border:1px solid #4d5d2a;background:#d8ff55;color:#111;font-weight:700;padding:10px 20px;border-radius:var(--radius);cursor:pointer;height:38px}
   .add:disabled{background:#191c21;color:#5c636c;border-color:#303640;cursor:default}
-  .none{margin-top:18px;padding:26px;border:1px dashed #30353d;border-radius:10px;color:#656d78;font-size:12px;text-align:center}
+  .none{margin-top:18px;padding:26px;border:1px dashed #30353d;border-radius:var(--radius);color:var(--muted);font-size:var(--text-label);text-align:center}
 
   .model-list{display:grid;gap:12px;margin-top:18px}
-  article{border:1px solid #292e36;border-radius:10px;background:#0e1115;overflow:hidden}
+  article{border:1px solid #292e36;border-radius:var(--radius);background:#0e1115;overflow:hidden}
   article.stale{border-color:#67363a}
   .model-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 12px 9px 8px;background:#12161b}
   .disclose{display:flex;align-items:center;gap:9px;min-width:0;flex:1;border:0;background:none;padding:5px 4px;cursor:pointer;text-align:left}
@@ -249,40 +249,40 @@
   .disclose:hover i{border-left-color:#d8ff55}
   .title{display:flex;align-items:baseline;gap:10px;min-width:0}
   .title b{color:#e7eaee;font-size:14px}
-  .title code,code{font-size:10px;color:#626b76}
+  .title code,code{font:var(--text-help) var(--font-ui);color:var(--muted)}
   .head-right{display:flex;align-items:center;gap:10px;flex-shrink:0}
   /* Weight lives in the header: it is the one setting people constantly tune. */
   .weight{flex-direction:row;align-items:center;gap:5px;padding:3px 8px 3px 9px;border:1px solid #343a43;border-radius:20px;background:#0c0f13}
-  .weight span{color:#8ea834;font:600 11px Consolas,monospace}
-  .weight input{width:46px;border:0;background:transparent;padding:2px 0;text-align:center;font:12px Consolas,monospace;-moz-appearance:textfield}
+  .weight span{color:var(--accent-muted);font:600 var(--text-help) var(--font-ui)}
+  .weight input{width:46px;border:0;background:transparent;padding:2px 0;text-align:center;font:var(--text-value) var(--font-mono);-moz-appearance:textfield}
   .weight input::-webkit-outer-spin-button,.weight input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
-  .weight:focus-within{border-color:#8ea834}
-  .badge{font-size:10px;padding:3px 8px;border-radius:20px;border:1px solid}
+  .weight:focus-within{border-color:var(--accent-muted)}
+  .badge{font-size:var(--text-help);padding:3px 8px;border-radius:20px;border:1px solid}
   .badge.ok{color:#b6d96a;border-color:#4d5d2a;background:#1a2013}
-  .badge.warn{color:#e0c169;border-color:#6b5726;background:#211c11}
-  .badge.error{color:#f18b91;border-color:#67363a;background:#241416}
-  .remove{border:1px solid #303640;background:#171a1f;color:#8b929c;width:26px;height:26px;border-radius:7px;cursor:pointer;line-height:1}
-  .remove:hover{border-color:#67363a;color:#f18b91}
+  .badge.warn{color:var(--warning);border-color:#6b5726;background:#211c11}
+  .badge.error{color:var(--error);border-color:#67363a;background:#241416}
+  .remove{border:1px solid #303640;background:#171a1f;color:var(--muted);width:26px;height:26px;border-radius:var(--radius);cursor:pointer;line-height:1}
+  .remove:hover{border-color:#67363a;color:var(--error)}
 
   .settings{padding:16px;border-top:1px solid #292e36}
   .weighting{padding:16px;border-top:1px solid #292e36;background:#0c0f13}
   .weighting-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:16px;align-items:end}
-  .derived{display:flex;align-items:center;gap:8px;color:#aeb4bd;font-size:12px;padding-bottom:10px}
+  .derived{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:var(--text-label);padding-bottom:10px}
   .derived b{color:#e7eaee}
   .layers{margin-top:16px}
-  .layers-label{display:block;color:#aeb4bd;font-size:12px;margin-bottom:8px}
+  .layers-label{display:block;color:var(--muted);font-size:var(--text-label);margin-bottom:8px}
   .bars{display:grid;grid-template-columns:repeat(13,minmax(0,1fr));gap:4px;align-items:end}
   .bar{display:flex;flex-direction:column;justify-content:flex-end;gap:4px;height:64px}
   .bar i{display:block;width:100%;background:linear-gradient(#d8ff55,#8ea834);border-radius:3px 3px 0 0;min-height:2px}
-  .bar input{padding:4px 2px;text-align:center;font-size:10px}
+  .bar input{padding:4px 2px;text-align:center;font-size:var(--text-help)}
 
   .detectors{padding:14px 16px;background:#151a14;border-top:1px solid #33401f}
-  .detectors p{margin:0 0 12px;color:#c8d3ad;font-size:12px}
+  .detectors p{margin:0 0 12px;color:#c8d3ad;font-size:var(--text-label)}
 
-  input,select{width:100%;border:1px solid #303640;background:#0c0f13;color:#eef0f2;border-radius:8px;padding:10px 11px;outline:none;font:12px Consolas,monospace}
-  input:focus,select:focus{border-color:#8ea834}
+  input,select{width:100%;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink);border-radius:var(--radius);padding:10px 11px;font-size:var(--text-value)}
+  input:focus,select:focus{border-color:var(--accent-muted)}
   select:disabled{color:#5c636c}
-  label{display:flex;flex-direction:column;gap:7px;color:#aeb4bd;font-size:12px}
+  label{display:flex;flex-direction:column;gap:7px;color:var(--muted);font-size:var(--text-label)}
 
   @media(max-width:700px){
     .grid,.weighting-head{grid-template-columns:1fr}

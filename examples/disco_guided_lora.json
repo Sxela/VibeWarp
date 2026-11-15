@@ -1,0 +1,14 @@
+{
+  "model_version": "disco_512",
+  "text_prompts": {"0": "a detailed oil painting"},
+  "disco": {
+    "sampler": "distilled",
+    "distilled_guided": true,
+    "few_step_lora_path": "models/disco/lora/student-1680step.safetensors",
+    "use_secondary_model": false,
+    "steps_schedule": {"0": 6},
+    "style_strength_schedule": {"0": 1.0},
+    "eta": 0.0,
+    "guidance_noise_cap_percent": 10.0
+  }
+}

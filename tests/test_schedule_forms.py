@@ -1,8 +1,8 @@
 """The three schedule shapes mean different things.
 
-The UI's chip editor exposes them as Constant / Per-frame / Keyframes and must
-never silently convert between them. These tests pin the semantics its hint text
-promises, so a change to scheduling can't quietly make the UI lie.
+The UI shows ordinary values as keyframes and normalizes flat per-frame lists
+using their actual consecutive indexes. Sparse keys have different semantics.
+These tests pin the renderer's formats and the lossless normalization contract.
 """
 
 import pytest
@@ -42,10 +42,16 @@ class TestScheduleSemantics:
         assert mid == pytest.approx(0.5, abs=0.05)
 
     def test_list_and_dict_are_not_interchangeable(self):
-        """The reason the editor never converts silently: at frame 1 the list
-        gives its second element, the dict still holds its frame-0 value."""
+        """A converted list must retain its indexes, not invent sparse keys."""
         assert get_scheduled_arg(1, [10, 20, 30]) == 20
         assert get_scheduled_arg(1, {0: 10, 10: 20}) == 10
+
+    @pytest.mark.parametrize('blend', [False, True])
+    def test_consecutive_key_normalization_preserves_flat_list_values(self, blend):
+        values=[0,10,0.5,30]
+        keyed=dict(enumerate(values))
+        for frame in (0,1,2,3,4,99):
+            assert get_scheduled_arg(frame,values,blend)==get_scheduled_arg(frame,keyed,blend)
 
     def test_scalar_passes_through(self):
         assert get_scheduled_arg(7, 0.5) == 0.5
@@ -71,8 +77,7 @@ class TestConfigAcceptsEveryEditorShape:
         assert config.frame_range == [10, 40]
 
     def test_every_schedule_field_defaults_to_off(self):
-        """The editor shows 'Off' for None, meaning the static value is used —
-        so None must be the default for anything named *_schedule."""
+        """None retains the renderer's scalar fallback until an override exists."""
         from dataclasses import fields, is_dataclass
 
         from vibewarp.config import RunConfig

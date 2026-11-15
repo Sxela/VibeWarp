@@ -7,6 +7,8 @@ invert, clipping, missing-alpha fallback).
 
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -14,6 +16,82 @@ from PIL import Image
 
 from vibewarp.config import BackgroundMaskConfig, RunConfig
 from vibewarp.core.diffusion import _apply_render_bg_mask
+
+
+@pytest.mark.parametrize('stage',['before diffusion','after diffusion'])
+@pytest.mark.parametrize('version',['control_multi_v15','disco_512','qwen_image_edit_2511'])
+@pytest.mark.parametrize('frame',[0,3])
+def test_shared_rvm_mask_applies_once_at_selected_render_boundary(
+        tmp_path,monkeypatch,capsys,stage,version,frame):
+    from vibewarp.core import diffusion
+    cfg=_make_config(background='color',background_source='black')
+    cfg.model_version=version;cfg.mask.render_mask_stage=stage
+    cfg.disco.pad_to_multiple_64=False
+    cfg.video.width=cfg.video.height=16
+    frames=tmp_path/'video_frames';frames.mkdir()
+    raw_path=frames/f'{frame+1:06d}.jpg'
+    Image.new('RGB',(16,16),'white').save(raw_path)
+    alpha=tmp_path/'alpha';alpha.mkdir()
+    alpha_path=alpha/f'{frame:06d}.npy';np.save(alpha_path,np.full((16,16),.5,dtype=np.float16))
+    original_raw=raw_path.read_bytes();original_alpha=alpha_path.read_bytes()
+    ctx=diffusion.RenderContext(config=cfg,batch_folder=str(tmp_path),video_frames_folder=str(frames),
+                               raw_video_cache=SimpleNamespace(alpha=alpha))
+    # The pipeline materializes the run masks from the RVM cache before rendering.
+    from vibewarp.video.masks import materialize
+    materialize(cfg,frames,tmp_path,ctx.raw_video_cache)
+    state=diffusion.FrameState();seen=[]
+    def render(context,state):
+        with Image.open(state.init_image) as image:
+            seen.append(image.getpixel((8,8)))
+            return image.convert('RGB')
+    monkeypatch.setattr(diffusion,'render_frame',render)
+    image,path=diffusion._render_single_frame(ctx,state,frame,frame,str(tmp_path),'png')
+    assert seen==[(128,128,128) if stage=='before diffusion' else (255,255,255)]
+    assert image.getpixel((8,8))==(128,128,128)  # two applications would yield 64
+    assert state.prev_frame.getpixel((8,8))==(128,128,128)
+    with Image.open(path) as saved:assert saved.getpixel((8,8))==(128,128,128)
+    assert raw_path.read_bytes()==original_raw and alpha_path.read_bytes()==original_alpha
+    assert 'no mask for frame' not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize('stage',['before diffusion','after diffusion'])
+@pytest.mark.parametrize('stylized',[False,True])
+def test_animatediff_raw_and_overlap_inits_obey_diffusion_stage(tmp_path,stage,stylized):
+    from vibewarp.core.diffusion import RenderContext,_adiff_init_path
+    cfg=_make_config(background='color',background_source='black')
+    cfg.mask.render_mask_stage=stage;cfg.video.width=cfg.video.height=16
+    cfg.animatediff.overlap_stylized=stylized
+    frames=tmp_path/'frames';frames.mkdir();Image.new('RGB',(16,16),'white').save(frames/'000001.jpg')
+    if stylized:Image.new('RGB',(16,16),'white').save(tmp_path/f'{cfg.batch_name}(0)_000000.png')
+    alpha=tmp_path/'alpha';alpha.mkdir();np.save(alpha/'000000.npy',np.full((16,16),.5,np.float16))
+    ctx=RenderContext(config=cfg,batch_folder=str(tmp_path),video_frames_folder=str(frames),raw_video_cache=SimpleNamespace(alpha=alpha))
+    from vibewarp.video.masks import materialize
+    materialize(cfg,frames,tmp_path,ctx.raw_video_cache)
+    path,is_stylized=_adiff_init_path(ctx,0,0,4)
+    assert is_stylized is stylized
+    with Image.open(path) as image:
+        assert image.getpixel((8,8))==((128,128,128) if stage=='before diffusion' else (255,255,255))
+
+
+def test_tint_and_render_mask_schema_and_settings_stay_independent():
+    from dataclasses import asdict
+    from vibewarp.config_io import config_schema,config_from_dict,validate_config
+    from vibewarp.video.raw_processing import enabled,needs_alpha,transforms_raw
+    props=config_schema()['properties']['mask']['properties']
+    assert props['rvm_enabled']['label']=='Apply masked tint'
+    assert props['use_background_mask']['tier']=='render'
+    assert props['render_mask_stage']['choices']==['before diffusion','after diffusion']
+    assert props['apply_mask_after_warp']['tier']=='hidden'
+    for tint,mask in [(False,False),(True,False),(False,True),(True,True)]:
+        cfg=RunConfig();cfg.mask.rvm_enabled=tint;cfg.mask.use_background_mask=mask
+        assert needs_alpha(cfg)==enabled(cfg)==(tint or mask)
+        assert transforms_raw(cfg)==tint
+        cfg.mask.render_mask_stage='after diffusion';cfg.mask.apply_mask_after_warp=False
+        restored=config_from_dict(asdict(cfg))
+        assert restored.mask.render_mask_stage=='after diffusion'
+        assert restored.mask.apply_mask_after_warp is False
+    cfg.mask.render_mask_stage='before warp'
+    assert any(error['path']=='mask.render_mask_stage' for error in validate_config(cfg,require_inputs=False))
 
 
 def _setup_frames(tmp_path, alpha_value=None, size=(32, 32)):
@@ -112,6 +190,7 @@ class TestConfigAndSettings:
         assert c.use_background_mask is False
         assert c.invert_mask is False
         assert c.apply_mask_after_warp is True
+        assert c.render_mask_stage == 'before diffusion'
         assert c.background == 'init_video'
         assert c.background_source == 'red'
         assert c.mask_clip_low == 0
@@ -127,6 +206,7 @@ class TestConfigAndSettings:
             'use_background_mask': True,
             'invert_mask': True,
             'apply_mask_after_warp': False,
+            'render_mask_stage': 'after diffusion',
             'background': 'color',
             'background_source': '#00ff00',
             'mask_clip_low': 10,
@@ -139,6 +219,7 @@ class TestConfigAndSettings:
         assert m['use_background_mask'] is True
         assert m['invert_mask'] is True
         assert m['apply_mask_after_warp'] is False
+        assert m['render_mask_stage'] == 'after diffusion'
         assert m['background'] == 'color'
         assert m['background_source'] == '#00ff00'
         assert m['mask_clip_low'] == 10

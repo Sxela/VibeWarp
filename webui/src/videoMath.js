@@ -10,10 +10,10 @@
 // without the other fails.
 
 /** Fit to a maximum edge, preserving aspect, snapped to a multiple (8 for latents). */
-export function fitDimensions(width, height, maxSize, multiple = 8) {
+export function fitDimensions(width, height, maxSize, multiple = 8, roundUp = false) {
   if (width <= 0 || height <= 0 || maxSize <= 0) return {width, height};
   const scale = Math.min(1, maxSize / Math.max(width, height));
-  const snap = (n) => Math.max(multiple, Math.round((n * scale) / multiple) * multiple);
+  const snap = (n) => Math.max(multiple, (roundUp?Math.ceil:Math.round)((n * scale) / multiple) * multiple);
   return {width: snap(width), height: snap(height)};
 }
 
@@ -27,6 +27,7 @@ export function renderableFrames(frames, nth) {
 /** How many frames a [start, end] range covers, inclusive. end = 0 means "to the end". */
 export function framesInRange(range, available) {
   if (available <= 0) return 0;
+  if (range?.length === 1) return range[0] >= 0 && range[0] < available ? 1 : 0;
   const last = available - 1;
   const start = Math.min(Math.max(Math.round(range?.[0] ?? 0), 0), last);
   const rawEnd = Math.round(range?.[1] ?? 0);
@@ -42,10 +43,13 @@ export function framesInRange(range, available) {
  * "frames to render" was misleading — with nth = 1 it merely echoed the source length, and
  * it ignored the frame range entirely, so a 12-frame render advertised itself as 559.
  */
-export function derive(source, maxSize, nth, range) {
+export function derive(source, maxSize, nth, range, multiple=8, roundUp=false, manualSize=null) {
   const render = maxSize > 0
-    ? fitDimensions(source.width, source.height, maxSize)
-    : {width: source.width, height: source.height};
+    ? fitDimensions(source.width, source.height, maxSize,multiple,roundUp)
+    : roundUp
+      ? {width:Math.ceil((manualSize?.width||source.width)/multiple)*multiple,
+         height:Math.ceil((manualSize?.height||source.height)/multiple)*multiple}
+      : {width: source.width, height: source.height};
   const extracted = renderableFrames(source.frames, nth);
   return {
     render,

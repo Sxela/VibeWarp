@@ -21,6 +21,28 @@ def test_every_config_field_has_a_tab():
         'form. Classify them in vibewarp/ui_layout.py:\n  ' + '\n  '.join(missing))
 
 
+def test_first_frame_hash_is_removed_and_old_settings_ignore_it(tmp_path):
+    import json
+    from vibewarp.config_io import config_from_dict,config_from_settings
+    assert 'first_frame_sha256' not in config_schema()['properties']['video']['properties']
+    config=config_from_dict({'video':{'first_frame_path':'first.png','first_frame_sha256':'old'}})
+    assert not hasattr(config.video,'first_frame_sha256')
+    from vibewarp.settings import settings_to_dict
+    exported=settings_to_dict(config)
+    assert 'video_first_frame_sha256' not in exported
+    exported['video_first_frame_sha256']='old'
+    path=tmp_path/'legacy.txt';path.write_text(json.dumps(exported))
+    assert config_from_settings(path).video.first_frame_path=='first.png'
+    assert not hasattr(config_from_settings(path).video,'first_frame_sha256')
+
+
+def test_disco_paths_are_on_the_model_card_instead_of_system():
+    schema=config_schema()['properties']['disco']['properties']
+    for name in ('checkpoint_path','secondary_path','few_step_lora_path'):
+        assert schema[name]['tier']=='project' and schema[name]['group']=='Model'
+        assert f'disco.{name}' not in system_keys()
+
+
 def test_layout_has_no_keys_the_config_dropped():
     known = set(all_config_keys(RunConfig))
     stale = sorted(key for key in LAYOUT if key not in known)
@@ -81,11 +103,13 @@ def test_color_matching_is_split_into_two_ui_groups():
     ):
         assert color[field]['tier'] == 'advanced'
         assert color[field]['group'] == 'Color Match — Before Diffusion'
+        assert color[field]['workflows'] == ['color']
     for field in (
         'after_enabled', 'after_strength', 'after_method', 'after_regrain',
     ):
         assert color[field]['tier'] == 'advanced'
         assert color[field]['group'] == 'Color Match — After Diffusion'
+        assert color[field]['workflows'] == ['color']
     assert color['before_method']['choices'] == ['PDF', 'LAB', 'mean']
     assert color['after_method']['choices'] == ['PDF', 'LAB', 'mean']
     assert color['colormatch_mode']['tier'] == 'hidden'
@@ -122,7 +146,7 @@ def test_schema_carries_model_family_compatibility():
     assert props['reference_label_opacity']['model_families'] == [
         'flux', 'hidream', 'qwen', 'mage']
     assert props['negative_prompts']['model_families'] == [
-        'sd', 'hidream', 'qwen', 'mage']
+        'sd', 'hidream', 'qwen', 'mage', 'disco']
     # Shared outer-loop settings and the edit renderers' base seed remain visible.
     assert 'model_families' not in props['warp']['properties']['flow_blend_schedule']
     assert 'model_families' not in props['diffusion']['properties']['seed']

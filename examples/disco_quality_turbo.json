@@ -1,0 +1,26 @@
+{
+  "model_version": "disco_512",
+  "text_prompts": {
+    "0": "A beautiful highly detailed matte painting of a cyberpunk cat, greg rutkowski, Trending on artstation:1\nblack gold color scheme:1\ndof blur:-1"
+  },
+  "disco": {
+    "sampler": "distilled",
+    "distilled_guided": true,
+    "few_step_lora_path": "models/loras/student-r64-3200step.safetensors",
+    "lora_strength": 1.0,
+    "quality_lora_enabled": true,
+    "quality_lora_path": "models/loras/student-aesthetic-3908step-r128.safetensors",
+    "quality_lora_strength": 1.0,
+    "use_secondary_model": false,
+    "steps_schedule": {"0": 6},
+    "style_strength_schedule": {"0": 0.5},
+    "clip_guidance_scale": 70000,
+    "guidance_noise_cap_percent": 15.0,
+    "eta": 0.0,
+    "init_scale": 0.0,
+    "image_scale": 0.0,
+    "range_scale": 0.0
+  },
+  "diffusion": {"seed": 100500},
+  "video": {"max_size": 832}
+}

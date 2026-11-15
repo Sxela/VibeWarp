@@ -12,7 +12,7 @@ from vibewarp.flow.flow_utils import warp_flow
 def warp_frame(frame1, frame2, flow, blend=0.5, weights=None, forward_clip=0.,
                pad_pct=0.1, padding_mode='reflect', warp_mul=1.,
                match_color_fn=None, adjust_brightness_fn=None,
-               video_mode=False, return_warped=False):
+               video_mode=False, return_warped=False, raw_transform=None):
     """Warp frame1 toward frame2 using optical flow, then blend.
 
     Args:
@@ -50,6 +50,8 @@ def warp_frame(frame1, frame2, flow, blend=0.5, weights=None, forward_clip=0.,
     target_w = flow21.shape[1] - pad * 2
     target_h = flow21.shape[0] - pad * 2
     frame2pil = np.array(frame2.convert('RGB').resize((target_w, target_h), Image.LANCZOS))
+    if raw_transform is not None:
+        frame2pil = np.asarray(raw_transform(Image.fromarray(frame2pil), Image.fromarray(frame1_warped)))
 
     if weights is not None:
         if not video_mode and match_color_fn is not None:

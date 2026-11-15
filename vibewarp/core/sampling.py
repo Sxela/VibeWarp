@@ -149,6 +149,7 @@ def build_tile_specs(
     tiles_w: int,
     overlap_h: float,
     overlap_w: float,
+    alignment: int = 1,
 ) -> List[Tuple[int, int, int, int, torch.Tensor]]:
     """Build spatial tile bounds and CPU float32 blend windows.
 
@@ -157,16 +158,22 @@ def build_tile_specs(
     def overlap_px(total: int, count: int, percent: float) -> int:
         return 0 if count <= 1 else max(0, round(math.ceil(total / count) * percent / 100))
 
-    overlap_h_px = overlap_px(height, tiles_h, overlap_h)
-    overlap_w_px = overlap_px(width, tiles_w, overlap_w)
-    h_starts, tile_h = compute_tile_starts(height, tiles_h, overlap_h_px)
-    w_starts, tile_w = compute_tile_starts(width, tiles_w, overlap_w_px)
+    if alignment < 1 or height % alignment or width % alignment:
+        raise ValueError('Tile dimensions must be divisible by their spatial alignment')
+    grid_h, grid_w = height // alignment, width // alignment
+    overlap_h_px = overlap_px(grid_h, tiles_h, overlap_h)
+    overlap_w_px = overlap_px(grid_w, tiles_w, overlap_w)
+    h_starts, tile_h = compute_tile_starts(grid_h, tiles_h, overlap_h_px)
+    w_starts, tile_w = compute_tile_starts(grid_w, tiles_w, overlap_w_px)
 
     # Recompute once from the real tile size, matching the configured percentage.
     h_starts, tile_h = compute_tile_starts(
-        height, tiles_h, round(tile_h * overlap_h / 100))
+        grid_h, tiles_h, round(tile_h * overlap_h / 100))
     w_starts, tile_w = compute_tile_starts(
-        width, tiles_w, round(tile_w * overlap_w / 100))
+        grid_w, tiles_w, round(tile_w * overlap_w / 100))
+    h_starts = [p * alignment for p in h_starts]
+    w_starts = [p * alignment for p in w_starts]
+    tile_h, tile_w = tile_h * alignment, tile_w * alignment
 
     specs = []
     for hi, top in enumerate(h_starts):
@@ -294,6 +301,12 @@ class TiledModelFn:
         scale_schedule: Optional[Dict[int, float]] = None,
         enable_tiling: bool = True,
         min_scale_size: int = 0,
+        spatial_alignment: int = 1,
+        pixels_per_unit: int = 8,
+        prediction_channels: Optional[int] = None,
+        noise_resize_mode: str = 'bilinear',
+        checkpoint_tiles: bool = False,
+        restore_scaled: Optional[Callable] = None,
     ):
         self.model_fn = model_fn
         self.tiles_h = max(1, int(tiles_h))
@@ -307,6 +320,12 @@ class TiledModelFn:
         self.scale_schedule = dict(sorted((scale_schedule or {0: 100.0}).items()))
         self.enable_tiling = bool(enable_tiling)
         self.min_scale_size = max(0, int(min_scale_size))
+        self.spatial_alignment = max(1, int(spatial_alignment))
+        self.pixels_per_unit = max(1, int(pixels_per_unit))
+        self.prediction_channels = prediction_channels
+        self.noise_resize_mode = noise_resize_mode
+        self.checkpoint_tiles = checkpoint_tiles
+        self.restore_scaled = restore_scaled
         self._sigma_schedule: Sequence[float] = ()
         self._specs: Dict[Tuple[int, int], Sequence[Tuple[int, int, int, int, torch.Tensor]]] = {}
 
@@ -340,15 +359,15 @@ class TiledModelFn:
     def _scaled_size(self, height: int, width: int, scale: float) -> Tuple[int, int]:
         ratio = scale / 100.0
         if self.min_scale_size:
-            final_longest_px = max(height, width) * 8
+            final_longest_px = max(height, width) * self.pixels_per_unit
             ratio = max(ratio, self.min_scale_size / final_longest_px)
         ratio = min(ratio, 1.0)
 
         def aligned(value: int) -> int:
-            # SD UNets downsample the latent internally three times. Keeping the
-            # temporary axes on an 8-latent-unit boundary avoids skip-connection
-            # shape mismatches at fractional scales.
-            return min(value, max(8, int(round(value * ratio / 8.0)) * 8))
+            # SD uses an 8-latent-unit grid; pixel denoisers can request a
+            # coarser alignment to keep internal skip connections compatible.
+            multiple = max(8, self.spatial_alignment)
+            return min(value, max(multiple, int(round(value * ratio / multiple)) * multiple))
 
         return aligned(height), aligned(width)
 
@@ -362,9 +381,9 @@ class TiledModelFn:
         """Whole-frame coarse pass. Spatial tiling is never used below 100%."""
         full_size = x.shape[-2:]
         target_size = self._scaled_size(*full_size, scale)
-        scaled_x = F.interpolate(
-            x.float(), size=target_size, mode='bilinear', align_corners=False,
-        ).to(dtype=x.dtype)
+        resize_options = {'align_corners': False} if self.noise_resize_mode in ('bilinear', 'bicubic') else {}
+        scaled_x = F.interpolate(x.float(), size=target_size,
+            mode=self.noise_resize_mode, **resize_options).to(dtype=x.dtype)
         spatial_kwargs = {'image_cond', 'c_concat', 'denoise_mask', 'mask'}
         scaled_kwargs = {
             key: (_resize_spatial_tensor(value, full_size, target_size)
@@ -384,10 +403,13 @@ class TiledModelFn:
         finally:
             if self.sd_model is not None and original_hints:
                 self.sd_model._cn_hints = original_hints
-        if prediction.shape != scaled_x.shape:
+        expected = (x.shape[0], self.prediction_channels or x.shape[1], *target_size)
+        if prediction.shape != expected:
             raise RuntimeError(
                 f"Multiscale denoiser returned {tuple(prediction.shape)} for "
                 f"scaled latent {tuple(scaled_x.shape)}")
+        if self.restore_scaled is not None:
+            return self.restore_scaled(prediction, scaled_x, x, sigma)
         return F.interpolate(
             prediction.float(), size=full_size, mode='bilinear', align_corners=False,
         ).to(dtype=x.dtype)
@@ -411,13 +433,14 @@ class TiledModelFn:
             tiles_w = tile_count_for_size(width, self.tile_size, self.split_threshold)
         if tiles_h == 1 and tiles_w == 1:
             return self.model_fn(x, sigma, **kwargs)
-        specs = self._specs.setdefault(
-            (height, width),
-            build_tile_specs(
+        specs = self._specs.get((height, width))
+        if specs is None:
+            specs = build_tile_specs(
                 height, width, tiles_h, tiles_w,
-                self.overlap_h, self.overlap_w),
-        )
-        accum = torch.zeros_like(x, dtype=torch.float32)
+                self.overlap_h, self.overlap_w, self.spatial_alignment)
+            self._specs[(height, width)] = specs
+        accum = torch.zeros((x.shape[0], self.prediction_channels or x.shape[1], height, width),
+                            device=x.device, dtype=torch.float32)
         weights = torch.zeros(
             (1, 1, height, width), device=x.device, dtype=torch.float32)
         original_hints = (
@@ -439,8 +462,13 @@ class TiledModelFn:
                         for key, hint in original_hints.items()
                     }
                 tile = x[..., top:bottom, left:right].contiguous()
-                prediction = self.model_fn(tile, sigma, **tile_kwargs)
-                if prediction.shape != tile.shape:
+                if self.checkpoint_tiles and torch.is_grad_enabled() and tile.requires_grad:
+                    from torch.utils.checkpoint import checkpoint
+                    prediction = checkpoint(self.model_fn, tile, sigma, use_reentrant=False, **tile_kwargs)
+                else:
+                    prediction = self.model_fn(tile, sigma, **tile_kwargs)
+                expected = (tile.shape[0], self.prediction_channels or tile.shape[1], *tile.shape[-2:])
+                if prediction.shape != expected:
                     raise RuntimeError(
                         f"Tiled denoiser returned {tuple(prediction.shape)} for tile "
                         f"{tuple(tile.shape)}")

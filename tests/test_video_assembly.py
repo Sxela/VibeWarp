@@ -153,21 +153,19 @@ class TestCreateVideoDeflicker:
         captured_cmds = []
         def fake_run(cmd, **kw):
             captured_cmds.append(cmd)
-            r = MagicMock()
-            r.returncode = 0
-            return r
+            stdout = ' V....D libx264 H.264 encoder\n' if '-encoders' in cmd else ''
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr='')
 
-        with patch('subprocess.run', side_effect=fake_run):
+        # CI does not install the optional bundled ffmpeg package. A capable
+        # system encoder must reach encoding without importing that fallback.
+        with patch.dict('sys.modules', {'imageio_ffmpeg': None}), patch('subprocess.run', side_effect=fake_run):
             with patch('vibewarp.video.input._find_ffmpeg', return_value='ffmpeg'):
-                try:
-                    create_video(
-                        frames_dir=str(tmp_path),
-                        output_path=str(tmp_path / 'out.mp4'),
-                        batch_name='batch',
-                        use_deflicker=True,
-                    )
-                except Exception:
-                    pass
+                create_video(
+                    frames_dir=str(tmp_path),
+                    output_path=str(tmp_path / 'out.mp4'),
+                    batch_name='batch',
+                    use_deflicker=True,
+                )
 
         # Find the encode command (has -vf)
         encode_cmds = [c for c in captured_cmds if '-vf' in c]
@@ -188,27 +186,23 @@ class TestCreateVideoDeflicker:
         captured_cmds = []
         def fake_run(cmd, **kw):
             captured_cmds.append(cmd)
-            r = MagicMock()
-            r.returncode = 0
-            return r
+            stdout = ' V....D libx264 H.264 encoder\n' if '-encoders' in cmd else ''
+            return subprocess.CompletedProcess(cmd, 0, stdout=stdout, stderr='')
 
-        with patch('subprocess.run', side_effect=fake_run):
+        with patch.dict('sys.modules', {'imageio_ffmpeg': None}), patch('subprocess.run', side_effect=fake_run):
             with patch('vibewarp.video.input._find_ffmpeg', return_value='ffmpeg'):
-                try:
-                    create_video(
-                        frames_dir=str(tmp_path),
-                        output_path=str(tmp_path / 'out.mp4'),
-                        batch_name='batch',
-                        use_deflicker=False,
-                    )
-                except Exception:
-                    pass
+                create_video(
+                    frames_dir=str(tmp_path),
+                    output_path=str(tmp_path / 'out.mp4'),
+                    batch_name='batch',
+                    use_deflicker=False,
+                )
 
         encode_cmds = [c for c in captured_cmds if '-vf' in c]
-        if encode_cmds:
-            vf_idx = encode_cmds[0].index('-vf')
-            vf_value = encode_cmds[0][vf_idx + 1]
-            assert 'deflicker' not in vf_value
+        assert encode_cmds, "No ffmpeg encode command captured"
+        vf_idx = encode_cmds[0].index('-vf')
+        vf_value = encode_cmds[0][vf_idx + 1]
+        assert 'deflicker' not in vf_value
 
 
 class TestConsistencyCheckedVideoBlending:

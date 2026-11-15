@@ -101,6 +101,18 @@ describe('prompt routing', () => {
   });
 });
 
+it('edits grayscale probabilities as progress-keyed dictionaries', async () => {
+  const onchange = vi.fn();
+  render(Field, {name: 'cut_icgray_schedule', path: 'disco',
+    schema: {type: 'object', schedule_domain: 'inference_progress', schedule_value:'probability'},
+    value: {0: .2}, onchange});
+  expect(screen.queryByRole('button', {name: 'Constant'})).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', {name: 'Per-frame'})).not.toBeInTheDocument();
+  expect(screen.getByRole('spinbutton', {name: 'Inference progress (%)'})).toHaveValue(0);
+  await fireEvent.change(screen.getByRole('spinbutton', {name: 'Grayscale probability'}), {target: {value: '.4'}});
+  expect(onchange).toHaveBeenLastCalledWith({'0': .4});
+});
+
 describe('validation errors', () => {
   it('shows the message next to the field, not only in the sidebar', () => {
     render(Field, { name: 'sd_checkpoint_path', schema: stringField, value: '',

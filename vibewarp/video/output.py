@@ -147,11 +147,14 @@ def apply_video_mask(
     invert: bool = False,
     clip_low: int = 0,
     clip_high: int = 255,
+    alpha_mask: Optional[Image.Image] = None,
 ) -> Image.Image:
     """Composite a stylized frame onto a background using a pre-computed alpha mask.
 
-    The alpha masks must be in ``{video_frames_folder}_alpha/`` named as
-    ``{frame_num+1:06d}.jpg`` — the same numbering used by the notebook.
+    An explicit alpha_mask can be supplied (the raw-input preview does). Otherwise
+    the run's masks are read from ``{video_frames_folder}_alpha/`` as
+    ``{frame_num+1:06d}.png`` (written by vibewarp.video.masks for every mask source)
+    or ``.jpg`` (the notebook's naming, for masks placed there by hand).
 
     Args:
         frame: rendered stylized frame (RGB PIL Image)
@@ -166,14 +169,17 @@ def apply_video_mask(
     Returns:
         Composited RGB PIL Image, or the original frame if the mask is missing.
     """
-    alpha_dir = video_frames_folder + '_alpha'
-    alpha_path = os.path.join(alpha_dir, f'{frame_num + 1:06d}.jpg')
-
-    if not os.path.exists(alpha_path):
-        return frame
+    from vibewarp.video.masks import mask_file, run_mask_folder
+    alpha_path = mask_file(run_mask_folder(video_frames_folder), frame_num)
 
     size = frame.size
-    alpha = Image.open(alpha_path).resize(size).convert('L')
+    if alpha_mask is None:
+        if alpha_path is None:
+            return frame
+        with Image.open(alpha_path) as opened:
+            alpha = opened.resize(size).convert('L')
+    else:
+        alpha = alpha_mask.resize(size).convert('L')
 
     if invert:
         alpha = ImageOps.invert(alpha)
@@ -281,13 +287,15 @@ def create_video(
     missed_consistency_weight: float = 1.0,
     overshoot_consistency_weight: float = 1.0,
     edges_consistency_weight: float = 1.0,
+    visible_size: Optional[tuple] = None,
 ) -> str:
     """Assemble rendered frames into a video file.
 
     Per-frame post-processing order (when enabled):
       1. Blend with previous frame (optical flow or linear)
       2. Apply background mask composite
-      3. RealESRGAN upscale
+      3. Crop centered canvas padding, when visible_size is supplied
+      4. RealESRGAN upscale
     Then encode with ffmpeg, optionally adding a deflicker filter and audio.
 
     Args:
@@ -319,6 +327,7 @@ def create_video(
         video_frames_folder: raw video frames dir (for bg + alpha masks)
         mask_clip_low: threshold below which alpha mask values → 0
         mask_clip_high: threshold above which alpha mask values → 255
+        visible_size: optional (width, height) of content inside the working canvas
 
     Returns:
         Path to the created video file.
@@ -326,6 +335,18 @@ def create_video(
     if ffmpeg_path is None:
         from vibewarp.video.input import _find_ffmpeg
         ffmpeg_path = _find_ffmpeg()
+        # Some system ffmpeg builds omit libx264. Prefer a usable existing
+        # bundled build rather than fail after an expensive frame render.
+        probe = subprocess.run([ffmpeg_path, '-hide_banner', '-encoders'], capture_output=True, text=True)
+        if 'libx264' not in probe.stdout:
+            try:
+                from imageio_ffmpeg import get_ffmpeg_exe
+                bundled = get_ffmpeg_exe()
+            except ImportError:
+                bundled = None
+            if not bundled:
+                raise RuntimeError('ffmpeg needs the libx264 encoder; select a compatible build')
+            ffmpeg_path = bundled
 
     frame_pattern = os.path.join(frames_dir,
                                  f'{batch_name}({batch_num})_*.{img_format}')
@@ -348,13 +369,27 @@ def create_video(
             print(f"Upscaling disabled: {e}")
             upscale_ratio = 1
 
-    # Build a per-frame post-processor that applies mask + upscale
+    if use_background_mask_video and video_frames_folder:
+        from vibewarp.video.masks import run_mask_folder
+        mask_folder = run_mask_folder(video_frames_folder)
+        if not os.path.isdir(mask_folder) or not os.listdir(mask_folder):
+            print(f"WARNING: video background masking is on but {mask_folder} has no masks; "
+                  "the video is exported unmasked. Render the run with masking enabled "
+                  "to generate them.")
+
+    # Masking remains part of blend feedback; export geometry does not.
     def _postprocess(img: Image.Image, frame_idx: int) -> Image.Image:
         if use_background_mask_video and video_frames_folder:
             img = apply_video_mask(
                 img, frame_idx, background_video, background_source_video,
                 video_frames_folder, invert_mask_video, mask_clip_low, mask_clip_high,
             )
+        return img
+
+    def _export(img: Image.Image) -> Image.Image:
+        if visible_size is not None:
+            from vibewarp.video.padding import crop_visible
+            img = crop_visible(img, visible_size)
         if upscale_ratio > 1 and upsampler is not None:
             img = upscale_frame(upsampler, img, upscale_ratio)
         return img
@@ -367,10 +402,10 @@ def create_video(
         _blend_frames(frames, blend_dir, blend_mode, blend, flow_dir,
                       check_consistency, threads, _postprocess,
                       missed_consistency_weight, overshoot_consistency_weight,
-                      edges_consistency_weight)
+                      edges_consistency_weight, export_fn=_export)
     else:
         for i, f in enumerate(tqdm(frames, desc="Copying frames")):
-            img = _postprocess(Image.open(f), i)
+            img = _export(_postprocess(Image.open(f), i))
             img.save(os.path.join(blend_dir, f'{i:06d}.png'))
 
     frame_input = os.path.join(blend_dir, '%06d.png')
@@ -410,7 +445,7 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
                   check_consistency, threads, postprocess_fn=None,
                   missed_consistency_weight=1.0,
                   overshoot_consistency_weight=1.0,
-                  edges_consistency_weight=1.0):
+                  edges_consistency_weight=1.0, export_fn=None):
     """Blend consecutive frames for smoother video output.
 
     Args:
@@ -422,20 +457,20 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
         check_consistency: load CC maps for flow blending
         threads: thread count (currently unused — sequential for simplicity)
         postprocess_fn: optional callable(img, frame_idx) → img applied after blend
+        export_fn: optional callable(img) → img for crop/upscale outside feedback
     """
     if postprocess_fn is None:
         postprocess_fn = lambda img, _: img
+    if export_fn is None:
+        export_fn = lambda img: img
 
+    previous = None
     for i, frame_path in enumerate(tqdm(frames, desc="Processing frames")):
         if i == 0 or blend_mode == 'None':
             img = postprocess_fn(Image.open(frame_path).convert('RGB'), i)
         else:
             curr = np.array(Image.open(frame_path).convert('RGB'))
-            prev_path = os.path.join(output_dir, f'{i - 1:06d}.png')
-            if os.path.exists(prev_path):
-                prev = np.array(Image.open(prev_path).convert('RGB'))
-            else:
-                prev = np.array(Image.open(frames[i - 1]).convert('RGB'))
+            prev = np.array(previous.convert('RGB'))
 
             if blend_mode == 'linear':
                 blended = prev * (1 - blend) + curr * blend
@@ -470,7 +505,8 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
 
             img = postprocess_fn(img, i)
 
-        img.save(os.path.join(output_dir, f'{i:06d}.png'))
+        previous = img.copy()
+        export_fn(img).save(os.path.join(output_dir, f'{i:06d}.png'))
 
 
 def _find_flow_file(flow_dir, frame_path):

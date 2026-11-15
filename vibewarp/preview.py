@@ -14,6 +14,7 @@ about it — getting it wrong silently shows you the wrong frame.
 import os
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Dict, List, Optional
 
 # A run directory is a plain name ("54") directly under <output_dir>/<batch_name>.
@@ -213,7 +214,9 @@ def resume_status(run: str, batch_name: str, run_id: str, *,
             output = _scan(
                 run, '', _output_prefix(run, batch_name, run_id, names), names=names)
         selected = config.frame_range or [0, 0]
-        if len(selected) == 2 and selected[1] > selected[0]:
+        if len(selected) == 1:
+            start, end = selected[0], selected[0] + 1
+        elif len(selected) == 2 and selected[1] > selected[0]:
             start, end = selected[0], selected[1] + 1
         else:
             extracted = extracted_frames
@@ -347,24 +350,93 @@ def describe_run(output_dir: str, batch_name: str, run_id: str) -> Optional[dict
             run, layer.directory, layer.prefix, layer.frame_offset, names=names)
         scanned[layer.id] = frames
         if frames:
-            layers.append({
+            layers.append(_layer_metadata({
                 'id': layer.id,
                 'label': layer.label,
                 'group': layer.group,
                 'frames': sorted(frames),
-            })
+            }))
 
     all_frames = sorted({f for layer in layers for f in layer['frames']})
+    saved_ids = {layer['id'] for layer in layers}
+    missing_layers = []
+    path = settings_file(run)
+    if path:
+        try:
+            stat = os.stat(path)
+            stems = _expected_debug_stems(path, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            stems = ()
+        for stem in stems:
+            layer_id = f'debug:{stem}'
+            if layer_id not in saved_ids:
+                label, group = _debug_label(stem)
+                missing_layers.append(_layer_metadata({'id': layer_id, 'label': label, 'group': group,
+                                                       'frames': [], 'expected': True}))
     return {
         'run': run_id,
         'layers': layers,
         'frames': all_frames,
+        'missing_layers': missing_layers,
         'video_available': video_file(run, batch_name, root_names) is not None,
         'resume_from': resume_status(
             run, batch_name, run_id,
             output_frames=scanned.get('output'),
             extracted_frames=scanned.get('init')),
     }
+
+
+def _layer_metadata(layer: dict) -> dict:
+    layer['category'] = ('Frames' if layer['group'] in ('Input', 'Render', 'Diffusion')
+                         else layer['group'])
+    short = {'init': 'Init', 'warped': 'Warped', 'output': 'Output',
+             'debug:consistency_mask': 'CC mask',
+             'debug:diffusion_input': 'Diffusion input'}.get(layer['id'], layer['label'])
+    if layer['group'] == 'ControlNet':
+        short = short.replace(' — detected map', ' map').replace(' — source', ' input')
+    if layer['group'] == 'IP-Adapter':
+        short = short.removeprefix('IP-Adapter ').replace(' — source ', ' · reference ')
+    layer['short_label'] = short
+    return layer
+
+
+@lru_cache(maxsize=64)
+def _expected_debug_stems(path: str, mtime_ns: int, size: int) -> tuple:
+    """Expected artifacts, not claims that a feature ran. Cache by settings version."""
+    from vibewarp.config_io import config_from_settings
+    from vibewarp.ui_layout import model_family_for_version
+    try:
+        config = config_from_settings(path)
+    except (ValueError, TypeError, OSError):
+        return ()
+    family = model_family_for_version(config.model_version)
+    stems = []
+    if config.flow.flow_warp and config.flow.check_consistency:
+        stems.append('consistency_mask')
+    if family == 'sd':
+        stems.append('diffusion_input')
+        if config.controlnet.enabled:
+            for key, entry in config.controlnet.models.items():
+                if entry.weight > 0:
+                    stems.extend((f'{key}_source', f'{key}_detected'))
+        if config.ipadapter.enabled:
+            for key, entry in config.ipadapter.models.items():
+                if entry.weight <= 0:
+                    continue
+                refs = entry.source_images or [entry.source_image]
+                safe_key = re.sub(r'[^A-Za-z0-9._-]+', '_', str(key)).strip('._-') or 'adapter'
+                index = 0
+                for ref in refs:
+                    if (not ref or (isinstance(ref, dict) and ref.get('source') in ('none', 'off', ''))
+                            or (isinstance(ref, str) and ref.lower() in ('none', 'off'))):
+                        continue
+                    index += 1
+                    stems.append(f'ipa_{safe_key}_source_{index}')
+    elif family in ('flux', 'hidream', 'qwen', 'mage'):
+        for index, ref in enumerate(getattr(config, family).references, 1):
+            if index == 1 or ref.source != 'none':
+                stems.append(f'{family}_reference_{index}')
+    return tuple(stem for stem in stems if _RUN_ID.fullmatch(stem))
 
 
 def _debug_label(stem: str) -> tuple:

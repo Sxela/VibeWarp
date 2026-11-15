@@ -1,4 +1,5 @@
 <script>
+  import HelpTip from './HelpTip.svelte';
   import { stripQuotes } from './paths.js';
 
   let {
@@ -170,7 +171,7 @@
 </div>
 
 <div class="adder">
-  <label><span>Add IP-Adapter</span>
+  <label><span>Add IP-Adapter <HelpTip label="Help: IP-Adapters" text="Adapters may be added repeatedly with a different image and weight."/></span>
     <select bind:value={picker} disabled={!available.length}>
       <option value="">{loading ? 'Loading…' : available.length
         ? 'Select an IP-Adapter…' : 'All compatible adapters added'}</option>
@@ -181,8 +182,7 @@
     </select>
   </label>
   <button class="add" onclick={add} disabled={!picker}>Add</button>
-  <p class="hint">Adapters may be added repeatedly with a different image and weight ·
-    {catalog.files.length} checkpoint{catalog.files.length===1?'':'s'}
+  <p class="hint">{catalog.files.length} checkpoint{catalog.files.length===1?'':'s'}
     in the ControlNet model directory{catalog.adapters.length
       ? ` · ${catalog.adapters.length} compatible with ${modelVersion||'this model'}` : ''}</p>
 </div>
@@ -278,23 +278,22 @@
             placeholder="C:\models\controlnet\ip-adapter-plus_sd15.safetensors"
             onchange={(event)=>entryPatch(key,{path:stripQuotes(event.currentTarget.value)})}/></label>
         {/if}
-        <label><span>Start <small>fraction of steps</small></span><input type="number"
+        <label><span>Start <HelpTip label="Help: Step range" text="Fraction of sampling steps, from 0 to 1."/></span><input type="number"
           min="0" max="1" step="0.05" value={entry.start}
           onchange={(event)=>entryPatch(key,{start:number(event)})}/></label>
-        <label><span>End <small>fraction of steps</small></span><input type="number"
+        <label><span>End <HelpTip label="Help: Step range" text="Fraction of sampling steps, from 0 to 1."/></span><input type="number"
           min="0" max="1" step="0.05" value={entry.end}
           onchange={(event)=>entryPatch(key,{end:number(event)})}/></label>
         <label><span>Weight type</span><select value={entry.weight_type}
           onchange={(event)=>entryPatch(key,{weight_type:event.currentTarget.value})}>
           {#each choices('weight_type',['linear']) as choice}<option value={choice}>{choice}</option>{/each}
         </select></label>
-        <label><span>Combine images</span><select value={entry.combine_embeds}
+        <label><span>Combine images <HelpTip label="Help: Combine images" text={combineHints[entry.combine_embeds] ?? combineHints.concat}/></span><select value={entry.combine_embeds}
           onchange={(event)=>entryPatch(key,{combine_embeds:event.currentTarget.value})}>
           {#each choices('combine_embeds',['concat','add','subtract','average','norm average']) as choice}
             <option value={choice}>{choice}</option>
           {/each}
         </select></label>
-        <p class="combine-hint">{combineHints[entry.combine_embeds] ?? combineHints.concat}</p>
         <label class="wide"><span>Embedding scaling</span><select value={entry.embeds_scaling}
           onchange={(event)=>entryPatch(key,{embeds_scaling:event.currentTarget.value})}>
           {#each choices('embeds_scaling',['V only','K+V']) as choice}<option value={choice}>{choice}</option>{/each}
@@ -307,48 +306,48 @@
 
 <style>
   .base{display:flex;gap:28px;padding-bottom:18px;border-bottom:1px solid #292e36}
-  .toggle{display:flex;flex-direction:row;align-items:center;gap:9px;color:#aeb4bd;font-size:12px}
+  .toggle{display:flex;flex-direction:row;align-items:center;gap:9px;color:var(--muted);font-size:var(--text-label)}
   /* No width/height override here -- see the note in ControlNetEditor: it
      would collapse style.css's 36x20 pill into a bare circle. */
   .adder{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;margin-top:18px}
-  .adder .hint{grid-column:1/-1;margin:0;color:#68717d;font-size:10px}
-  .add{height:38px;border:1px solid #4d5d2a;background:#d8ff55;color:#111;font-weight:700;padding:10px 20px;border-radius:8px;cursor:pointer}
+  .adder .hint{grid-column:1/-1;margin:0;color:var(--muted);font-size:var(--text-help)}
+  .add{height:38px;border:1px solid #4d5d2a;background:#d8ff55;color:#111;font-weight:700;padding:10px 20px;border-radius:var(--radius);cursor:pointer}
   .add:disabled{background:#191c21;color:#5c636c;border-color:#303640}
-  .none{margin-top:18px;padding:26px;border:1px dashed #30353d;border-radius:10px;color:#656d78;text-align:center;font-size:12px}
+  .none{margin-top:18px;padding:26px;border:1px dashed #30353d;border-radius:var(--radius);color:var(--muted);text-align:center;font-size:var(--text-label)}
   .adapter-list{display:grid;gap:14px;margin-top:18px}
-  article{border:1px solid #292e36;border-radius:11px;background:#0e1115;overflow:hidden}
+  article{border:1px solid #292e36;border-radius:var(--radius);background:#0e1115;overflow:hidden}
   header{display:flex;align-items:center;gap:12px;padding:11px 13px;background:#12161b}
-  header>div{display:flex;flex-direction:column;flex:1;min-width:0}header b{color:#e7eaee;font-size:13px}header div span{color:#626b76;font-size:9px;text-transform:uppercase}
+  header>div{display:flex;flex-direction:column;flex:1;min-width:0}header b{color:#e7eaee;font-size:13px}header div span{color:var(--muted);font-size:var(--text-help);text-transform:uppercase}
   .weight{display:flex;flex-direction:row;align-items:center;gap:5px;padding:3px 8px;border:1px solid #343a43;border-radius:20px}
-  .weight span{color:#8ea834;font:600 11px Consolas}.weight input{width:48px;border:0;padding:2px;text-align:center}
-  .remove{border:1px solid #303640;background:#171a1f;color:#8b929c;width:27px;height:27px;border-radius:7px;cursor:pointer}
-  .remove:hover{border-color:#67363a;color:#f18b91}
-  .badge{font-size:9px;padding:3px 7px;border-radius:20px;border:1px solid;white-space:nowrap}
+  .weight span{color:var(--accent-muted);font:600 var(--text-help) var(--font-ui)}.weight input{width:48px;border:0;padding:2px;text-align:center}
+  .remove{border:1px solid #303640;background:#171a1f;color:var(--muted);width:27px;height:27px;border-radius:var(--radius);cursor:pointer}
+  .remove:hover{border-color:#67363a;color:var(--error)}
+  .badge{font-size:var(--text-help);padding:3px 7px;border-radius:20px;border:1px solid;white-space:nowrap}
   .badge.ok{color:#b6d96a;border-color:#4d5d2a;background:#1a2013}
-  .badge.warn{color:#e0c169;border-color:#6b5726;background:#211c11}
-  .badge.error{color:#f18b91;border-color:#67363a;background:#241416}
+  .badge.warn{color:var(--warning);border-color:#6b5726;background:#211c11}
+  .badge.error{color:var(--error);border-color:#67363a;background:#241416}
   .content{display:grid;grid-template-columns:minmax(300px,1.35fr) minmax(260px,1fr);gap:16px;padding:16px}
   .source-stack{min-width:0}.source-title{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:10px}
-  .source-title b,.image-head b{color:#cfd4db;font-size:11px}.source-title span{color:#68717d;font-size:9px;text-transform:uppercase}
+  .source-title b,.image-head b{color:#cfd4db;font-size:var(--text-help)}.source-title span{color:var(--muted);font-size:var(--text-help);text-transform:uppercase}
   .source-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr));gap:10px}
-  .source-card{min-width:0;padding:10px;border:1px solid #292f37;border-radius:9px;background:#0b0e12}
+  .source-card{min-width:0;padding:10px;border:1px solid #292f37;border-radius:var(--radius);background:#0b0e12}
   .image-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
-  .remove-image{border:0;background:transparent;color:#737c87;font-size:9px;cursor:pointer;padding:3px}
-  .remove-image:hover{color:#f18b91}.add-image{width:100%;margin-top:10px;padding:8px;border:1px dashed #3b434d;border-radius:8px;background:#0b0e12;color:#aeb4bd;font-size:10px;cursor:pointer}
-  .add-image:hover{border-color:#8ea834;color:#d8ff55}
+  .remove-image{border:0;background:transparent;color:var(--muted);font-size:var(--text-help);cursor:pointer;padding:3px}
+  .remove-image:hover{color:var(--error)}.add-image{width:100%;margin-top:10px;padding:8px;border:1px dashed #3b434d;border-radius:var(--radius);background:#0b0e12;color:var(--muted);font-size:var(--text-help);cursor:pointer}
+  .add-image:hover{border-color:var(--accent-muted);color:#d8ff55}
   .settings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:13px;align-content:start}
   .wide{grid-column:1/-1}
-  .preview{position:relative;width:100%;aspect-ratio:1;border:1px solid #292f37;border-radius:8px;background:#080a0d;overflow:hidden;margin-bottom:11px}
+  .preview{position:relative;width:100%;aspect-ratio:1;border:1px solid #292f37;border-radius:var(--radius);background:#080a0d;overflow:hidden;margin-bottom:11px}
   .preview img{width:100%;height:100%;object-fit:cover;display:block}
-  .preview>span{color:#68717d;font-size:10px;text-align:center;padding:12px}
+  .preview>span{color:var(--muted);font-size:var(--text-help);text-align:center;padding:12px}
   .preview.empty,.drop{display:grid;place-items:center;align-content:center;gap:5px}
   .preview i{color:#9daa83;font:300 32px/1 system-ui;font-style:normal}
   .preview img+span,.drop img+span{position:absolute;left:50%;bottom:8px;transform:translateX(-50%);padding:5px 8px;border-radius:6px;background:#090b0ddd;color:#dce4d0;white-space:nowrap}
   .drop{cursor:pointer}.drop:hover,.drop.over{border-color:#9fbe4d;background:#11170d}
-  .picker{display:none}.source-stack>p{margin:8px 0 0;color:#68717d;font-size:10px;line-height:1.4}.err{display:block;color:#f18b91;font-size:10px;margin:-5px 0 8px}
-  .combine-hint{grid-column:1/-1;margin:-6px 0 0;color:#68717d;font-size:10px;line-height:1.4}
-  label{display:flex;flex-direction:column;gap:7px;color:#aeb4bd;font-size:11px}small{color:#68717d}
-  input,select{width:100%;border:1px solid #303640;background:#0c0f13;color:#eef0f2;border-radius:8px;padding:10px 11px;outline:none;font:12px Consolas,monospace}
-  input:focus,select:focus{border-color:#8ea834}
+  .picker{display:none}.source-stack>p{margin:8px 0 0;color:var(--muted);font-size:var(--text-help);line-height:1.4}.err{display:block;color:var(--error);font-size:var(--text-help);margin:-5px 0 8px}
+  .combine-hint{grid-column:1/-1;margin:-6px 0 0;color:var(--muted);font-size:var(--text-help);line-height:1.4}
+  label{display:flex;flex-direction:column;gap:7px;color:var(--muted);font-size:var(--text-help)}small{color:var(--muted)}
+  input,select{width:100%;border:1px solid var(--input-border);background:var(--input-bg);color:var(--ink);border-radius:var(--radius);padding:10px 11px;font-size:var(--text-value)}
+  input:focus,select:focus{border-color:var(--accent-muted)}
   @media(max-width:760px){.content{grid-template-columns:1fr}.source-grid{grid-template-columns:repeat(auto-fit,minmax(145px,1fr))}.settings{grid-template-columns:1fr}.wide,.combine-hint{grid-column:1}.base{flex-direction:column;gap:10px}}
 </style>

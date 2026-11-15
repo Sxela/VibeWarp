@@ -52,16 +52,8 @@ def n_params(module):
 
 def download_file(path, url, digest=None):
     """Downloads a file if it does not exist, optionally checking its SHA-256 hash."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not path.exists():
-        with urllib.request.urlopen(url) as response, open(path, 'wb') as f:
-            shutil.copyfileobj(response, f)
-    if digest is not None:
-        file_digest = hashlib.sha256(open(path, 'rb').read()).hexdigest()
-        if digest != file_digest:
-            raise OSError(f'hash of {path} (url: {url}) failed to validate')
-    return path
+    from vibewarp.acquisition import acquire
+    return Path(acquire(url, path, sha256=digest or ''))
 
 
 @contextmanager

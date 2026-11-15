@@ -5,6 +5,15 @@ import FrameRange from './FrameRange.svelte';
 const inputs = () => screen.getAllByRole('spinbutton');   // [start, end]
 
 describe('frame range', () => {
+  it('lets the range replace an imported single-frame selection',async()=>{
+    const onchange=vi.fn();
+    render(FrameRange,{value:[0],onchange,maxFrame:40});
+    expect(screen.getByText('1 frame')).toBeInTheDocument();
+    await fireEvent.change(inputs()[1],{target:{value:'10'}});
+    expect(onchange).toHaveBeenLastCalledWith([0,10]);
+    await fireEvent.click(screen.getByRole('button',{name:'Use remaining frames'}));
+    expect(onchange).toHaveBeenLastCalledWith([0,0]);
+  });
   it('is inclusive at both ends', () => {
     // 0-15 is SIXTEEN frames. Getting this wrong made AnimateDiff fail with
     // "needs at least context_length (16) frames, got 15".

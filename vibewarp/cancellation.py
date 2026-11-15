@@ -32,6 +32,11 @@ def is_cancel_requested() -> bool:
     return bool(check and check())
 
 
+def cancellation_check() -> Callable[[], bool]:
+    """Capture the current job check when handing work to a loader thread."""
+    return getattr(_state, 'check', None) or (lambda: False)
+
+
 def raise_if_cancelled() -> None:
     if is_cancel_requested():
         raise KeyboardInterrupt('Cancelled by user')

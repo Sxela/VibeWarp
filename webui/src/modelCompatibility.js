@@ -9,6 +9,11 @@ export function fieldSupportsModel(fieldSchema, family) {
   return !allowed || allowed.includes(family);
 }
 
+export function switchDiscoSampler(config, sampler) {
+  // Choosing the adapter sampler is a single-field edit, never a preset reset.
+  return {config: {...config, disco: {...config.disco, sampler}}, previous: null};
+}
+
 export function applyModelDefaults(config, version, schema) {
   let presetGroups = [
     ['flux_model_defaults', 'flux'],

@@ -7,6 +7,23 @@ import pytest
 from vibewarp.__main__ import parse_args, config_from_args, config_from_json
 
 
+def test_disco_cli_selects_pixel_sampling_and_turbo():
+    config = config_from_args(parse_args(['--model-version','disco_512',
+        '--steps','30','--sampler','plms','--checkpoint','pixel.pt','--turbo','--turbo-interval','4']))
+    assert config.disco.steps == 30 and config.disco.sampler == 'plms'
+    assert config.disco.checkpoint_path == 'pixel.pt'
+    assert config.turbo.enabled and config.turbo.interval == 4
+
+
+def test_disco_download_command_prepares_selected_assets(monkeypatch, tmp_path):
+    from vibewarp.__main__ import main
+    calls = []
+    monkeypatch.setattr('vibewarp.model_assets.ensure_selected_assets', lambda config: calls.append(config))
+    main(['--download-models','--model-version','disco_256','--models-root',str(tmp_path)])
+    assert calls[0].model_version == 'disco_256'
+    assert calls[0].model_path == str(tmp_path)
+
+
 class TestParseArgs:
     def test_defaults(self):
         args = parse_args([])

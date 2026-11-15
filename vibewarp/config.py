@@ -104,6 +104,9 @@ class DiffusionConfig:
     sampler: str = 'sample_euler_ancestral'
     seed: int = -1
     fixed_seed: bool = False
+    fixed_seed_randomness: float = field(default=0.0, metadata={'slider': {'min': 0, 'max': 1, 'step': 0.01, 'scale': 1}})
+    fixed_seed_wiggle: int = 0  # random offset amplitude or directed roll speed, in noise pixels
+    fixed_seed_wiggle_direction: List[float] = field(default_factory=lambda: [0.0, 0.0], metadata={'vector_labels': ['X', 'Y']})
     use_karras_noise: bool = True
     clip_skip: int = 1
     # SDXL only. True (default) = notebook/A1111 behaviour: CLIP's final layer norm is
@@ -125,12 +128,14 @@ class DiffusionConfig:
     # need another graph. Inductor artifacts persist under .vibewarp_cache.
     compile_unet: bool = False
     # MultiDiffusion-style spatial tiling: every denoiser evaluation runs on
-    # overlapping latent tiles and blends a full-size prediction for the sampler.
+    # overlapping tiles and blends a full-size prediction for the sampler.
+    # Shared by SD (latent space) and Disco (pixel space).
     tiled_sampler: bool = False
     # Sampling-step -> percent of final latent resolution. Below 100%, the UNet
     # evaluates the whole downscaled frame and tiling is deliberately disabled;
-    # at 100%, the normal tiled path takes over. The sampler latent itself always
-    # remains full resolution.
+    # at 100%, the normal tiled path takes over. SD retains a full-resolution
+    # sampler state; Disco grows a persistent pixel-space state only at scale
+    # boundaries and computes guidance directly on the current grid.
     sampler_scale_schedule: Dict[int, float] = field(
         default_factory=lambda: {0: 100.0},
         metadata={'schedule_domain': 'sampling_step'})
@@ -139,7 +144,7 @@ class DiffusionConfig:
     # least at the model's nominal training resolution.
     sampler_scale_min_size: int = 0
     # Pixel-space target tile edge. Tile rows/columns are derived from the
-    # actual latent dimensions; overlap is shared by both spatial axes.
+    # actual model-input dimensions; overlap is shared by both spatial axes.
     sampler_tile_size: int = 512
     # Overlap between neighbouring tiles, as a percentage of the tile edge. This is the
     # cross-fade that hides the seams. 0 = hard cuts (fastest, seams likely).
@@ -162,6 +167,7 @@ class DiffusionConfig:
     guidance_mode: str = 'prev warped + cc'
     init_scale: float = 0.0
     init_latent_scale: float = 0.0
+    temporal_guidance_cc_trusted_only: bool = False
     clamp_grad: bool = True
     clamp_max: float = 2.0
     guidance_add_noise: bool = True
@@ -191,7 +197,10 @@ class VideoConfig:
     width: int = 512
     height: int = 512
     max_size: int = 0  # when >0, derive width/height from source aspect ratio
+    visible_width: int = 0  # Disco padded content; zero derives from max_size or width
+    visible_height: int = 0
     save_img_format: str = 'png'
+    first_frame_path: str = ''
 
 
 @dataclass
@@ -281,6 +290,8 @@ class ControlNetConfig:
 @dataclass
 class VideoAssemblyConfig:
     """Video post-processing and assembly settings (cell 57)."""
+    fps: float = 0.0  # 0 uses source FPS / extract_nth_frame
+    crop_to_visible: bool = False  # remove Disco canvas padding on export only
     keep_audio: bool = True                         # reattach audio from source video
     use_deflicker: bool = False                     # ffmpeg deflicker=mode=pm:size=10 filter
     blend_mode: str = 'optical flow'                # 'None', 'linear', or 'optical flow'
@@ -355,20 +366,37 @@ class CaptionConfig:
 class BackgroundMaskConfig:
     """Render-time background masking (notebook cell 42 — 'Video mask settings').
 
-    Composites the frame onto a background using pre-extracted alpha masks in
-    ``{video_frames_folder}_alpha/{frame_num+1:06d}.jpg`` (same convention as
-    the video-assembly masking). The notebook's deprecated warp_mode='use_latent'
-    latent-space compositing branch is intentionally not implemented.
+    The mask comes from `mask_source`: RVM matting of the input video, or the user's
+    own mask video / image folder. Every source is materialized into the run's
+    `video_frames_alpha/` folder, which render and assembly masking both read.
+    Masked tint always uses RVM alpha.
     """
     use_background_mask: bool = False
+    # Where the background mask comes from, for both render and assembly masking:
+    # 'RVM matting' (input video, CUDA), 'mask video' or 'image folder' (mask_path;
+    # one matte per input video frame, light = foreground). See vibewarp.video.masks.
+    mask_source: str = 'RVM matting'
+    mask_path: str = ''
     invert_mask: bool = False
-    # True: mask the warped image right before it feeds the model;
-    # False: mask the raw current video frame before warping.
+    # Legacy settings compatibility only; render_mask_stage owns placement.
     apply_mask_after_warp: bool = True
+    render_mask_stage: str = 'before diffusion'
     background: str = 'init_video'   # 'color', 'image', 'init_video'
     background_source: str = 'red'   # color string or image path
     mask_clip_low: int = 0
     mask_clip_high: int = 255
+    rvm_enabled: bool = False  # Apply masked tint; alpha generation is shared.
+    rvm_model_path: str = ''
+    rvm_cache_dir: str = ''
+    rvm_downsample_ratio: float = 0.25
+    foreground_color: List[int] = field(default_factory=lambda: [255, 255, 255], metadata={'rgb_color': True})
+    foreground_opacity: float = field(default=0.0, metadata={'slider': {'min': 0, 'max': 1, 'step': 0.01, 'scale': 1}})
+    background_color: List[int] = field(default_factory=lambda: [0, 0, 0], metadata={'rgb_color': True})
+    background_opacity: float = field(default=0.0, metadata={'slider': {'min': 0, 'max': 1, 'step': 0.01, 'scale': 1}})
+    raw_color_enabled: bool = False
+    raw_color_method: str = 'mean'
+    raw_color_strength: float = 1.0
+    raw_color_reference: str = 'previous warped'
 
 
 @dataclass
@@ -735,11 +763,119 @@ class MageFlowEditConfig:
 
 
 @dataclass
+class DiscoConfig:
+    """Pixel diffusion and differentiable image/text guidance."""
+    checkpoint_path: str = ''
+    secondary_path: str = ''
+    use_secondary_model: bool = True
+    secondary_precision: str = 'auto'  # compatibility field; device selects BF16 or FP16
+    clip_precision: str = 'fp16'  # legacy compatibility field; all guidance encoders use FP16
+    cut_batch_group: int = 1  # concatenate this many cut batches per encoder call
+    pad_to_multiple_64: bool = False  # edge-pad visible content instead of stretching
+    sampler: str = 'ddim'
+    distilled_guided: bool = True
+    timestep_grid: List[int] = field(default_factory=list)
+    clip_grad_steps: int = 1
+    clip_divide_cuts: bool = False
+    notebook_rng: bool = False
+    cut_schedule_version: int = 2  # executed inference progress; older settings migrate once
+    cut_icgray_schedule: Dict[float, float] | None = field(
+        default=None, metadata={'schedule_domain': 'inference_progress', 'schedule_value': 'probability'})
+    init_scale_schedule: Any = field(default=None, metadata={'schedule_interpolation': 'hold'})
+    image_scale_schedule: Any = field(default=None, metadata={'schedule_interpolation': 'hold'})
+    merge_loras: bool = False
+    few_step_lora_path: str = ''
+    lora_strength: float = 1.0
+    quality_lora_enabled: bool = False
+    quality_lora_path: str = ''
+    quality_lora_strength: float = 1.0
+    steps: int = 50
+    steps_schedule: Any = None
+    style_strength_schedule: Any = None
+    eta: float = 0.0
+    fixed_seed: bool = False
+    style_strength: float = 0.65
+    encoders: List[str] = field(default_factory=lambda: ['ViT-B-32', 'ViT-B-16', 'RN50'])
+    clip_guidance_scale: float = 5000.0
+    cutn_batches: int = 1
+    cut_max_size: int = 0  # longest working-image side before cut construction; 0 = native
+    cut_overview: Dict[float, int] = field(default_factory=lambda: {0: 4, 40: 2, 60: 0},
+        metadata={'schedule_domain': 'inference_progress', 'schedule_value': 'cut_count'})
+    cut_innercut: Dict[float, int] = field(default_factory=lambda: {0: 12, 40: 14, 60: 16},
+        metadata={'schedule_domain': 'inference_progress', 'schedule_value': 'cut_count'})
+    cut_ic_pow: float = 1.0
+    cut_icgray_p: float = 0.2
+    skip_augs: bool = False
+    image_prompts: Dict[int, str] = field(default_factory=dict)
+    tv_scale: float = 0.0
+    range_scale: float = 150.0
+    sat_scale: float = 0.0
+    init_scale: float = 1000.0
+    image_scale: float = 0.0
+    # Optional exclusion of flow-inconsistent pixels from LPIPS/image guidance.
+    mask_frame_guidance: bool = False
+    clamp_max: float = 0.05
+    # 0 disables the optional cap. 100 bounds each image's applied guidance
+    # displacement RMS to the current VP noise standard deviation.
+    guidance_noise_cap_percent: float = 0.0
+    attention: str = 'sdpa'
+    gradient_checkpointing: bool = True
+    preview_interval: int = 5
+    inpaint: bool = True
+    inpainting_stop: int = 6
+    inpaint_mask_blur: int = 15
+    inpaint_mask_sigma: float = 0.0
+    inpaint_mask_threshold: float = 220/255
+    guidance_every: int = 1
+    lock_cutouts_across_frames: bool = False
+    balance_guidance: bool = False
+
+
+DISCO_DISTILLED_PRESET = {
+    'model_version':'disco_512', 'text_prompts':{0:''}, 'negative_prompts':{0:''},
+    'disco':{'cut_schedule_version':2, 'sampler':'distilled', 'distilled_guided':False, 'steps':4, 'steps_schedule':None,
+             'style_strength_schedule':None, 'encoders':[], 'use_secondary_model':False,
+             'image_prompts':{},
+             'clip_guidance_scale':0., 'init_scale':0., 'image_scale':0.,
+             'mask_frame_guidance':False,
+             'guidance_noise_cap_percent':0.,
+             'tv_scale':0., 'range_scale':0., 'sat_scale':0., 'style_strength':1.,
+             'eta':0., 'inpaint':False, 'attention':'sdpa'},
+    'video':{'width':512, 'height':512, 'max_size':0},
+    'diffusion':{'tiled_sampler':False, 'sampler_scale_schedule':{0:100.}},
+    'flow':{'flow_warp':False}, 'turbo':{'enabled':False},
+    'color':{'before_enabled':False, 'after_enabled':False},
+    'animatediff':{'enabled':False}, 'contact_sheet':{'mode':'off'},
+}
+
+# UI selection preserves the user's guidance, video and frame schedules.
+# DISCO_DISTILLED_PRESET above remains the exact unconditional parity profile.
+DISCO_DISTILLED_GUIDED_PRESET = {
+    'model_version':'disco_512',
+    'disco':{'cut_schedule_version':2, 'sampler':'distilled', 'distilled_guided':True},
+}
+
+
+@dataclass
+class TurboConfig:
+    """Flow-based diffusion skipping, independent of the sampler."""
+    enabled: bool = False
+    interval: int = 3
+    preroll: int = 10
+    # Zero means warp only; nonzero runs a lightly noised diffusion pass.
+    intermediate_strength: float = 0.0
+    consistency_soften: float = 0.0
+    disable_cc: bool = False
+    scene_cut_threshold: float = 0.35
+
+
+@dataclass
 class RunConfig:
     """Top-level run configuration combining all sub-configs."""
     # Paths
     root_dir: str = field(default_factory=os.getcwd)
     model_path: str = ''
+    comfy_models_dir: str = ''
     output_dir: str = 'images_out'
     batch_name: str = 'warpfusion'
 
@@ -761,7 +897,7 @@ class RunConfig:
     # from notebook renders.
     lora_merge_precision: str = 'fp16'
 
-    # Frames
+    # Frames: inclusive [start, end], [0, 0] for all, or [N] for one frame.
     frame_range: List[int] = field(default_factory=lambda: [0, 0])
     # Interpret frame-keyed schedules relative to frame_range[0]. For example,
     # key 0 targets source frame 60 when the selected range starts at 60.
@@ -790,3 +926,5 @@ class RunConfig:
     hidream: HiDreamConfig = field(default_factory=HiDreamConfig)
     qwen: QwenEditConfig = field(default_factory=QwenEditConfig)
     mage: MageFlowEditConfig = field(default_factory=MageFlowEditConfig)
+    disco: DiscoConfig = field(default_factory=DiscoConfig)
+    turbo: TurboConfig = field(default_factory=TurboConfig)

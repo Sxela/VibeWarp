@@ -47,8 +47,132 @@ MODEL_FAMILY_BY_VERSION = {
     'qwen_image_edit_2511_gguf': 'qwen',
     'mage_flow_edit': 'mage',
     'mage_flow_edit_turbo': 'mage',
+    'disco_512': 'disco',
+    'disco_256': 'disco',
 }
-ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream', 'qwen', 'mage')
+ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream', 'qwen', 'mage', 'disco')
+
+# Workspace navigation is independent of storage tiers. In particular, a model's
+# server/files can appear during setup while remaining machine-local on export.
+WORKFLOW_GROUPS = {
+    'source': ('Input Video', 'Output', 'Video Input'),
+    'model': ('Model',),
+    'prompts': ('Prompts', 'Diffusion', 'Seed', 'Flux Edit', 'HiDream-O1 Edit',
+                'Qwen Image Edit', 'Mage-Flow Edit', 'Disco Diffusion', 'Disco inpainting masks', 'Turbo'),
+    'clip': ('General', 'CLIP guidance', 'Cutouts', 'Advanced guidance'),
+    'conditioning': ('ControlNet', 'IP-Adapter', 'Reference Images', 'Temporal Contact Sheet'),
+    'background': ('Background masking', 'RVM files'),
+    'color': ('Raw input color match', 'Color Match — Before Diffusion', 'Color Match — After Diffusion'),
+    'consistency': ('Motion', 'Flow & Consistency', 'Warp', 'AnimateDiff',
+                    'Reconstruction Noise', 'Scene Scheduling'),
+    'export': ('Video Output',),
+    'all': (),
+    'system': (),
+}
+WORKFLOW_LABELS = {
+    'source': 'Source & output', 'model': 'Model', 'prompts': 'Prompts & sampling',
+    'clip': 'Guidance',
+    'background': 'Mask & tint',
+    'color': 'Color match',
+    'conditioning': 'Conditioning', 'consistency': 'Frame consistency',
+    'export': 'Video export', 'all': 'All settings', 'system': 'System settings',
+}
+MODEL_LABELS = {
+    'control_multi_v15': 'Stable Diffusion 1.5',
+    'control_multi_sdxl': 'Stable Diffusion XL',
+    'flux2_klein_edit': 'FLUX.2 Klein · 4B',
+    'flux2_klein_9b_edit': 'FLUX.2 Klein · 9B',
+    'hidream_o1_edit': 'HiDream-O1',
+    'qwen_image_edit_2511': 'Qwen Image Edit · INT8',
+    'qwen_image_edit_2511_gguf': 'Qwen Image Edit · GGUF',
+    'mage_flow_edit': 'Mage-Flow Edit',
+    'mage_flow_edit_turbo': 'Mage-Flow Edit · Turbo',
+    'disco_512': 'Disco Diffusion · 512',
+}
+MODEL_GROUP_LABELS = {'native': 'Native models', 'comfy': 'ComfyUI-managed models'}
+
+
+def model_runtime_group(version: str) -> str:
+    # Group the edit models by their default backend; FLUX retains its optional
+    # Diffusers backend in model settings.
+    return 'comfy' if MODEL_FAMILY_BY_VERSION[version] in ('flux', 'hidream', 'qwen', 'mage') else 'native'
+
+
+GROUP_EDITORS = {
+    'Input Video': 'video', 'ControlNet': 'controlnet',
+    'IP-Adapter': 'ipadapter', 'Reference Images': 'references',
+}
+
+# Keep the shared mask next to its two losses without tying frontend ordering
+# to config dataclass declaration order.
+GROUP_FIELD_ORDER = {
+    'Background masking': ('mask.rvm_enabled', 'mask.foreground_color', 'mask.foreground_opacity',
+                          'mask.background_color', 'mask.background_opacity',
+                          'mask.use_background_mask', 'mask.mask_source', 'mask.mask_path',
+                          'mask.render_mask_stage',
+                          'mask.rvm_downsample_ratio'),
+    'General': ('disco.init_scale_schedule', 'disco.image_scale_schedule',
+                'disco.mask_frame_guidance', 'disco.use_secondary_model',
+                'diffusion.temporal_guidance_cc_trusted_only'),
+    'CLIP guidance': ('disco.encoders', 'disco.clip_guidance_scale', 'disco.image_prompts'),
+}
+
+FIELD_HELP = {
+    'mask.rvm_enabled': 'Tint foreground and background in the raw render input using RVM alpha. Either Apply masked tint or Use Background Mask generates the shared masks on the GPU.',
+    'mask.use_background_mask': 'Composite the render image onto the configured background using the mask from Mask source. This does not mask the warp step.',
+    'mask.mask_source': 'Where background masks come from, for render and video-assembly masking. RVM matting extracts them from the input video on the GPU. Mask video and Image folder use your own mattes (light = foreground), one per input video frame; Extract nth frame applies to them too. Masked tint always uses RVM.',
+    'mask.mask_path': 'Mask video file, or folder of mask images sorted by name. Used when Mask source is not RVM matting.',
+    'mask.render_mask_stage': 'Before diffusion replaces the background of the model input, allowing diffusion to style the fresh background. After diffusion composites the final output. The mask is applied only at the selected stage.',
+}
+
+RVM_FILE_FIELDS = ('mask.rvm_model_path', 'mask.rvm_cache_dir')
+SCHEDULE_FALLBACKS = {
+    'flow.missed_consistency_schedule': 'missed_consistency_weight',
+    'flow.overshoot_consistency_schedule': 'overshoot_consistency_weight',
+    'flow.edges_consistency_schedule': 'edges_consistency_weight',
+}
+FIELD_HELP.update({
+    'disco.mask_frame_guidance': 'Restrict LPIPS/image-space frame guidance to the optical-flow consistency mask. This uses consistency, not the RVM foreground alpha.',
+    'diffusion.temporal_guidance_cc_trusted_only': 'Restrict temporal gradient guidance to consistent warped areas. Independent of RVM foreground/background masks.',
+    'ipadapter.flip_uc': 'Flip the unconditional attention mask used by IP-Adapter. This is an adapter attention option, not an RVM image mask.',
+    'video_assembly.use_background_mask_video': 'Composite during video assembly using the run masks from Mask source (Background masking). Independent of the render-mask switch and its before/after-diffusion stage; masks are generated when either is on.',
+})
+
+
+def workspace_metadata(section: str, name: str) -> dict:
+    placed = classify(section, name)
+    if not placed or placed[0] == 'hidden':
+        return {}
+    tier, group = placed
+    if tier == 'system':
+        workflows = ['system']
+        if group == 'Paths' and (section in ('flux', 'hidream', 'qwen', 'mage')
+                                 or (section == 'main' and name == 'comfy_models_dir')):
+            workflows.insert(0, 'model')
+    else:
+        workflows = [next((key for key, groups in WORKFLOW_GROUPS.items()
+                           if group in groups), 'all')]
+    result = {'workflows': workflows,
+              'workspace_advanced': tier == 'advanced' and group not in ('Motion', 'Advanced guidance')}
+    if group in GROUP_EDITORS:
+        result['editor'] = GROUP_EDITORS[group]
+    order = GROUP_FIELD_ORDER.get(group, ())
+    key = f'{section}.{name}'
+    if key in order:
+        result['workspace_order'] = order.index(key)
+    if key in FIELD_HELP:
+        result['help'] = FIELD_HELP[key]
+    if key in RVM_FILE_FIELDS:
+        result['workflows'] = ['background', 'system']
+        result['workflow_groups'] = {'background': 'RVM files'}
+        result['workflow_editors'] = {'background': None}
+    if key in SCHEDULE_FALLBACKS:
+        result['schedule_fallback'] = SCHEDULE_FALLBACKS[key]
+    if group in ('Background masking', 'Raw input color match'):
+        result['preview'] = 'raw_video'
+    return result
+
+
 SECTION_MODEL_FAMILIES = {
     'controlnet': ('sd',),
     'freeu': ('sd',),
@@ -61,19 +185,31 @@ SECTION_MODEL_FAMILIES = {
     'hidream': ('hidream',),
     'qwen': ('qwen',),
     'mage': ('mage',),
+    'disco': ('disco',),
     'contact_sheet': ('flux', 'hidream', 'qwen', 'mage'),
 }
 FIELD_MODEL_FAMILIES = {
     # External edit renderers still use this seed as their base starting noise.
     'diffusion.seed': ALL_MODEL_FAMILIES,
+    'diffusion.fixed_seed_randomness': ('sd', 'disco'),
+    'diffusion.fixed_seed_wiggle': ('sd', 'disco'),
+    'diffusion.fixed_seed_wiggle_direction': ('sd', 'disco'),
+    'diffusion.guidance_mode': ('sd', 'disco'),
+    **{f'diffusion.{name}': ('sd', 'disco') for name in (
+        'tiled_sampler', 'sampler_tile_size', 'sampler_tile_overlap',
+        'sampler_tile_split_threshold', 'sampler_scale_schedule', 'sampler_scale_min_size')},
     'main.reference_label_opacity': ('flux', 'hidream', 'qwen', 'mage'),
     # FLUX.2 uses positive instructions with zeroed negative conditioning.
-    'main.negative_prompts': ('sd', 'hidream', 'qwen', 'mage'),
+    'main.negative_prompts': ('sd', 'hidream', 'qwen', 'mage', 'disco'),
     # These paths and precision settings belong to the local SD stack.
     'main.sd_checkpoint_path': ('sd',),
-    'main.model_path': ('sd',),
+    'main.model_path': ('sd', 'disco'),
+    'main.comfy_models_dir': ('flux', 'hidream', 'qwen', 'mage'),
     'main.lora_dir': ('sd',),
     'main.lora_merge_precision': ('sd',),
+    'video.visible_width': ('disco',),
+    'video.visible_height': ('disco',),
+    'video_assembly.crop_to_visible': ('disco',),
     # Scene analysis and flow/consistency scheduling are shared. These templates
     # specifically mutate SD conditioning/sampling fields and do nothing for edit models.
     'scene.steps_template': ('sd',),
@@ -88,6 +224,16 @@ FIELD_MODEL_FAMILIES = {
 # which reads fine INSIDE its own section but is meaningless once a field is hoisted next
 # to strangers: `animatediff.enabled` on the Model card would just say "Enabled".
 LABELS: Dict[str, str] = {
+    'disco.guidance_noise_cap_percent':'Guidance update cap (% of step noise RMS, 0 off)',
+    'disco.few_step_lora_path':'Distilled LoRA file or run directory',
+    'disco.distilled_guided':'Guided distilled sampling',
+    'disco.lora_strength':'LoRA strength (0 off, 1 trained strength)',
+    'disco.quality_lora_enabled':'Enable quality LoRA',
+    'disco.quality_lora_path':'Quality LoRA file',
+    'disco.quality_lora_strength':'Quality LoRA strength (1 = 100%)',
+    'disco.init_scale': 'LPIPS frame guidance scale (0 off)',
+    'disco.image_scale': 'Image-space frame guidance scale (0 off)',
+    'disco.mask_frame_guidance': 'Mask frame guidance to consistent areas',
     'diffusion.guidance_mode': 'Gradient guidance source',
     'diffusion.init_scale': 'Pixel guidance scale (0 off; try 1000)',
     'diffusion.init_latent_scale': 'Latent guidance scale (0 off; try 100)',
@@ -160,7 +306,8 @@ _assign('render', 'Diffusion',
         'diffusion.steps_schedule', 'diffusion.cfg_scale_schedule',
         'diffusion.style_strength_schedule', 'diffusion.sampler',
         'diffusion.clip_skip', 'diffusion.guidance_mode',
-        'diffusion.init_scale', 'diffusion.init_latent_scale')
+        'diffusion.init_scale', 'diffusion.init_latent_scale',
+        'diffusion.temporal_guidance_cc_trusted_only')
 _assign('render', 'Seed', 'diffusion.seed')
 _assign('render', 'ControlNet',
         'controlnet.enabled', 'controlnet.models', 'controlnet.mode',
@@ -288,7 +435,7 @@ _assign('hidden', 'Not applicable',
 _assign('advanced', 'Motion',
         'warp.flow_blend_schedule', 'flow.flow_warp', 'flow.check_consistency')
 _assign('advanced', 'Flow & Consistency',
-        'flow.use_legacy_cc', 'flow.missed_consistency_dilation',
+        'flow.missed_consistency_dilation',
         'flow.edge_consistency_width',
         'flow.missed_consistency_schedule', 'flow.overshoot_consistency_schedule',
         'flow.edges_consistency_schedule', 'flow.consistency_blur_schedule',
@@ -380,6 +527,21 @@ TIER_LABELS = {
 }
 
 
+# Pixel model controls share the existing schema-driven form.
+from vibewarp.config import DiscoConfig, TurboConfig
+_assign('system', 'Paths', 'main.comfy_models_dir')
+for _field in fields(DiscoConfig):
+    _tier = 'system' if _field.name in ('checkpoint_path', 'secondary_path', 'few_step_lora_path') else 'advanced'
+    if _field.name in ('sampler', 'distilled_guided', 'lora_strength', 'steps', 'steps_schedule', 'style_strength', 'style_strength_schedule', 'clip_guidance_scale', 'encoders', 'use_secondary_model', 'init_scale', 'image_scale', 'mask_frame_guidance'):
+        _tier = 'render'
+    _assign(_tier, 'Disco Diffusion', f'disco.{_field.name}')
+_assign('project','Model','disco.checkpoint_path','disco.secondary_path','disco.few_step_lora_path')
+_assign('project','Model','disco.quality_lora_path')
+_assign('render','Disco Diffusion','disco.quality_lora_enabled','disco.quality_lora_strength')
+for _field in fields(TurboConfig):
+    _assign('render' if _field.name == 'enabled' else 'advanced', 'Turbo', f'turbo.{_field.name}')
+
+
 def classify(section: str, field: str) -> Tuple[str, str] | None:
     """(tier, group) for a field, or None if it has not been classified."""
     return LAYOUT.get(f'{section}.{field}')
@@ -432,3 +594,93 @@ def unclassified(config_cls: type) -> list[str]:
 def system_keys() -> list[str]:
     """Fields that are machine-level and must not travel with a settings file."""
     return [key for key, (tier, _) in LAYOUT.items() if tier == 'system']
+
+_assign('advanced', 'Disco guidance', 'disco.clip_grad_steps', 'disco.clip_divide_cuts',
+    'disco.timestep_grid', 'disco.notebook_rng', 'disco.cut_icgray_schedule',
+    'disco.init_scale_schedule', 'disco.image_scale_schedule', 'disco.inpaint_mask_sigma', 'disco.merge_loras')
+_assign('advanced', 'Video Input', 'video.first_frame_path')
+_assign('advanced', 'Video Input', 'video.visible_width', 'video.visible_height')
+_assign('advanced', 'Video Output', 'video_assembly.crop_to_visible')
+LABELS['disco.pad_to_multiple_64'] = 'Pad visible content to a 64-pixel canvas'
+LABELS['disco.secondary_precision'] = 'Secondary model precision'
+_assign('hidden', 'Unused compatibility fields', 'disco.secondary_precision')
+_assign('hidden', 'Unused compatibility fields', 'disco.clip_precision')
+LABELS['disco.cut_batch_group'] = 'CLIP cut batches per encoder call'
+LABELS['video.visible_width'] = 'Visible content width (0 = automatic)'
+LABELS['video.visible_height'] = 'Visible content height (0 = automatic)'
+_assign('advanced', 'Video Output', 'video_assembly.fps')
+_assign('hidden', 'Unused compatibility fields', 'flow.use_legacy_cc')
+_assign('hidden', 'Unused compatibility fields', 'disco.cut_schedule_version')
+LABELS['diffusion.temporal_guidance_cc_trusted_only'] = 'Temporal guidance only in CC-trusted regions'
+
+# Keep each renderer's seed policy next to its shared base seed.
+_assign('render', 'Seed', 'diffusion.fixed_seed', 'disco.fixed_seed',
+        'flux.fixed_seed', 'hidream.fixed_seed', 'qwen.fixed_seed', 'mage.fixed_seed',
+        'diffusion.fixed_seed_randomness', 'diffusion.fixed_seed_wiggle',
+        'diffusion.fixed_seed_wiggle_direction')
+LABELS['diffusion.fixed_seed_randomness'] = 'Fixed noise randomness'
+LABELS['diffusion.fixed_seed_wiggle'] = 'Noise wiggle shift px (0 = off)'
+LABELS['diffusion.fixed_seed_wiggle_direction'] = 'Noise wiggle direction [x, y]'
+
+# Guidance has its own workspace; cutout schedules are directly editable before
+# the less common gradient controls. Sampling and temporal controls stay put.
+_assign('render', 'CLIP guidance', 'disco.encoders', 'disco.clip_guidance_scale',
+        'disco.image_prompts', 'disco.use_secondary_model',
+        'disco.init_scale_schedule', 'disco.image_scale_schedule', 'disco.mask_frame_guidance')
+_assign('hidden', 'Superseded by schedule', 'disco.init_scale', 'disco.image_scale')
+LABELS.update({
+    'disco.init_scale_schedule': 'LPIPS frame guidance scale (0 off)',
+    'disco.image_scale_schedule': 'Image-space frame guidance scale (0 off)',
+})
+_assign('render', 'Cutouts', 'disco.cutn_batches', 'disco.cut_overview',
+        'disco.cut_max_size',
+        'disco.cut_innercut', 'disco.cut_icgray_schedule', 'disco.cut_ic_pow',
+        'disco.skip_augs', 'disco.cut_batch_group', 'disco.clip_divide_cuts',
+        'disco.lock_cutouts_across_frames')
+_assign('hidden', 'Unused compatibility fields', 'disco.cut_icgray_p')
+_assign('advanced', 'Advanced guidance', 'disco.clip_grad_steps',
+        'disco.guidance_every', 'disco.balance_guidance', 'disco.clamp_max',
+        'disco.guidance_noise_cap_percent', 'disco.tv_scale', 'disco.range_scale',
+        'disco.sat_scale')
+
+_assign('render', 'Background masking',
+        'mask.rvm_enabled', 'mask.rvm_downsample_ratio',
+        'mask.foreground_color', 'mask.foreground_opacity',
+        'mask.background_color', 'mask.background_opacity',
+        'mask.raw_color_enabled', 'mask.raw_color_method',
+        'mask.raw_color_strength', 'mask.raw_color_reference')
+_assign('system', 'Paths', 'mask.rvm_model_path', 'mask.rvm_cache_dir')
+_assign('advanced', 'Background masking', 'mask.use_background_mask',
+        'mask.invert_mask', 'mask.apply_mask_after_warp', 'mask.background',
+        'mask.background_source', 'mask.mask_clip_low', 'mask.mask_clip_high')
+_assign('render', 'Background masking', 'mask.use_background_mask', 'mask.mask_source',
+        'mask.mask_path', 'mask.render_mask_stage')
+_assign('hidden', 'Legacy mask placement', 'mask.apply_mask_after_warp')
+LABELS.update({
+    'disco.cut_max_size': 'Cutout working size cap (px, 0 = native)',
+    'mask.rvm_enabled': 'Apply masked tint',
+    'mask.use_background_mask': 'Use Background Mask',
+    'mask.render_mask_stage': 'Render mask stage',
+    'mask.mask_source': 'Mask source',
+    'mask.mask_path': 'Mask video or image folder',
+    'mask.rvm_downsample_ratio': 'Matting resolution ratio',
+    'mask.raw_color_enabled': 'Color-match raw video frames',
+    'mask.raw_color_method': 'Raw frame color method',
+    'mask.raw_color_strength': 'Raw frame color strength',
+    'mask.raw_color_reference': 'Raw frame color reference',
+    'mask.rvm_model_path': 'RVM FP16 TorchScript model (blank downloads official model)',
+    'mask.rvm_cache_dir': 'Video input cache folder (blank uses workspace cache)',
+})
+
+# Each functional mask setting has one workflow, apart from machine-local RVM
+# file overrides which are intentionally reachable through System too.
+_assign('render', 'General', 'disco.init_scale_schedule', 'disco.image_scale_schedule',
+        'disco.use_secondary_model', 'disco.mask_frame_guidance',
+        'diffusion.temporal_guidance_cc_trusted_only')
+_assign('render', 'Flow & Consistency', 'flow.check_consistency')
+_assign('advanced', 'Flow & Consistency', 'turbo.consistency_soften', 'turbo.disable_cc')
+for _path in ('disco.inpaint', 'disco.inpainting_stop', 'disco.inpaint_mask_blur',
+              'disco.inpaint_mask_sigma', 'disco.inpaint_mask_threshold'):
+    _assign(LAYOUT[_path][0], 'Disco inpainting masks', _path)
+_assign('render', 'Raw input color match', 'mask.raw_color_enabled', 'mask.raw_color_method',
+        'mask.raw_color_strength', 'mask.raw_color_reference')

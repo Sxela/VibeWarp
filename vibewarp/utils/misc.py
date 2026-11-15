@@ -35,7 +35,7 @@ def json2exif(settings):
     return exif_dat
 
 
-def release_vram(*, log: bool = True) -> float:
+def release_vram(*, log: bool = True, synchronize: bool = True) -> float:
     """Drop cached CUDA memory and run a GC pass. Returns the GiB still allocated.
 
     A finished render leaves the UNet, VAE, ControlNets, annotators and IP-Adapter
@@ -57,7 +57,8 @@ def release_vram(*, log: bool = True) -> float:
     if not torch.cuda.is_available():
         return 0.0
 
-    torch.cuda.synchronize()
+    if synchronize:
+        torch.cuda.synchronize()
     torch.cuda.empty_cache()
     torch.cuda.ipc_collect()
     allocated = torch.cuda.memory_allocated() / 1024 ** 3

@@ -1,48 +1,192 @@
 <script>
-  import { tick } from 'svelte';
+  import { tick, untrack, onDestroy } from 'svelte';
   import Field from './Field.svelte';
+  import {normalizeRawOpacities,dropLegacyFrameHash} from './workspace.js';
+  import {closeOnSelection} from './closeOnSelection.js';
+  import RawVideoPreview from './RawVideoPreview.svelte';
   import ControlNetEditor from './ControlNetEditor.svelte';
   import IPAdapterEditor from './IPAdapterEditor.svelte';
   import ReferenceImagesEditor from './ReferenceImagesEditor.svelte';
   import VideoEditor from './VideoEditor.svelte';
   import Preview from './Preview.svelte';
   import Supporters from './Supporters.svelte';
-  import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint } from './modelCompatibility.js';
+  import DownloadProgress from './DownloadProgress.svelte';
+  import RequiredModels from './RequiredModels.svelte';
+  import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint, switchDiscoSampler } from './modelCompatibility.js';
+  import {flattenFields, fieldLocation, fieldGroup, fieldEditor, inWorkflow, searchFields, fieldValue as readFieldValue, contactSheetConflict, migrateLegacyFrameLimit} from './workspace.js';
+  import {normalizeSchedules} from './schedules.js';
+  import HelpTip from './HelpTip.svelte';
+  import OutputLog from './OutputLog.svelte';
+  import {remainingEta,formatEta} from './jobEta.js';
+  let inspectorHidden=$state(false), snapshotLoading=$state(false), snapshotError=$state('');
+  let snapshotRevision=0;
   const storageKey='vibewarp.config.v1';
-  let config=$state(null), schema=$state(null), selected=$state('project'), job=$state(null), errors=$state([]), busy=$state(false), initialized=$state(false), logCollapsed=$state(false), logElement=$state(null), source;
+  let config=$state(null), schema=$state(null), selected=$state('source'), job=$state(null), errors=$state([]), busy=$state(false), initialized=$state(false), logCollapsed=$state(true), source;
+  let etaClock=$state(Date.now());
+  let eta=$derived(remainingEta(job,etaClock));
+  $effect(()=>{
+    if(job?.state!=='running'||!Number.isFinite(job?.eta_seconds))return;
+    etaClock=Date.now();const timer=setInterval(()=>etaClock=Date.now(),1000);
+    return()=>clearInterval(timer);
+  });
+  let mobileView=$state('viewer'), viewerMode=$state('compare'), fileInput=$state(null), initError=$state('');
+  let editingProject=$state(false),projectDraft=$state(''),projectInput=$state(null),projectTitle=$state(null);
+  let inspectorWidth=$state(420), resizing=$state(false), jobConfig=$state(null);
+  const workflowHelp={source:'Choose the video, frame range, and destination.',model:'Model files and backend connection.',prompts:'Prompts, sampling, and seed.',clip:'General guidance, encoders, cutouts, and gradient controls.',conditioning:'Inputs that guide this model.',background:'RVM foreground/background masks, tint and render compositing.',color:'Raw-input color preparation and matching before or after diffusion.',consistency:'Motion, warp, and consistency between frames.',export:'Assemble the finished video.',all:'Every editable setting for this model.',system:'Paths and performance for this machine.'};
   // Tabs come from the BACKEND (vibewarp/ui_layout.py stamps tier/group onto every field
   // in the schema). The nav holds no field list of its own — one here would drift silently
   // the moment config.py changed. A field with no tier renders nowhere, and a test fails.
-  const blurbs={project:'Input & output for this video',render:'What you change every run',advanced:'Set once, or never',system:'This machine — not saved with settings',preview:'Inspect'};
-  // 'preview' is not a config section — it's the frame-by-frame debug view.
-  // Preview is a MODE, not a settings tab: it has nothing to do with the config form and
-  // wants the whole window (runs list, viewer, layer chips) rather than a column of it.
+  // History is a viewer mode rather than a settings section.
   let mode=$state('render');
-  // The monitor thumbnail is small and it is the only look you get at a frame mid-render,
-  // so it opens full size on click -- same gesture as the History view.
-  let zoomShot=$state(null);
+  let renderActive=$derived(['queued','running'].includes(job?.state));
+  let cancelling=$state(false);
   // Latches once ANY frame has rendered this session, so the supporters block appears
   // while you wait for your first frame and then never interrupts again.
   let seenFirstFrame=$state(false);
   $effect(()=>{ if(job?.preview_available) seenFirstFrame=true; });
-  let tabs=$derived(schema ? schema.tiers : []);
+  let tabs=$derived((schema?.workflows || schema?.tiers || []).filter(tab=>
+    tab.id==='model'||entries.some(entry=>inWorkflow(entry,tab.id))));
+  $effect(()=>{if(initialized&&tabs.length&&!tabs.some(tab=>tab.id===selected))selected=tabs[0].id;});
+  let modelOptions=$derived(schema?.model_options || (schema?.properties?.model_version?.choices || []).map(value=>({value,label:value})));
+  let modelGroups=$derived(schema?.model_groups || [{id:null,label:''}]);
+  let supportedModel=$derived(!config || !modelOptions.length || modelOptions.some(option=>option.value===config.model_version));
+  let viewerConfig=$derived(job ? jobConfig : config);
+  let inspectorVisible=$derived(mode==='render'&&!inspectorHidden&&viewerMode!=='inspect');
+  let pendingDownloads=$derived(downloadFiles.filter(file=>!['ready','present','cancelled'].includes(file.status)).length);
+  let missingModels=$derived(requiredModels.filter(file=>!['present','ready'].includes(file.status)).length);
+  function chooseWorkflow(id){inspectorHidden=false;selected=id;mode='render';query='';mobileView='settings';if(viewerMode==='inspect')viewerMode='compare';}
+  function openModelSetup(){chooseWorkflow(tabs.some(tab=>tab.id==='model')?'model':tabs[0]?.id);}
+  function changeInspectorWidth(value){
+    inspectorWidth=Math.max(340,Math.min(680,value));
+    try{localStorage.setItem('vibewarp.inspector.width',String(inspectorWidth));}catch{}
+  }
+  function resizeInspector(event){if(resizing)changeInspectorWidth(window.innerWidth-event.clientX);}
+  function resizeKey(event){
+    if(event.key==='ArrowLeft'||event.key==='ArrowRight'){event.preventDefault();changeInspectorWidth(inspectorWidth+(event.key==='ArrowLeft'?20:-20));}
+    if(event.key==='Home'||event.key==='End'){event.preventDefault();changeInspectorWidth(event.key==='Home'?340:680);}
+  }
+  onDestroy(()=>source?.close());
+  $effect(()=>{if(job?.state==='failed')logCollapsed=false;});
 
   // Flatten the schema into {section, name, schema, tier, group}, in declaration order.
-  let allEntries=$derived.by(()=>{
-    if(!schema) return [];
-    let out=[];
-    for(let [name,prop] of Object.entries(schema.properties)){
-      if(prop.type==='dataclass'){
-        for(let [child,sub] of Object.entries(prop.properties))
-          if(sub.tier) out.push({section:name,name:child,schema:sub,tier:sub.tier,group:sub.group});
-      } else if(prop.tier) out.push({section:'main',name,schema:prop,tier:prop.tier,group:prop.group});
-    }
-    return out;
-  });
+  let allEntries=$derived(flattenFields(schema));
   let activeModelFamily=$derived(modelFamily(config?.model_version, schema));
+  let conditioningConflict=$derived(contactSheetConflict(config,activeModelFamily));
   let comfyTarget=$derived(comfyConnection(config, schema));
   let comfyStatus=$state(null);
+  let preparation=$state(null), preparationError=$state('');
+  let requiredModels=$state([]), requiredLoading=$state(false), requiredError=$state('');
+  let requiredRevision=$state(0), preparing=$state(false);
+  const modelFiles=section=>Object.fromEntries(Object.entries(section||{}).filter(
+    ([name])=>name.endsWith('_name')||['backend','model_repo','use_lightning_lora'].includes(name)));
+  let downloadFiles=$state([]);
+  async function controlDownload(file,action){
+    try{
+      let response=await fetch(`/api/models/downloads/${file.id}/${action}`,{method:'POST'});
+      let next=await response.json();
+      if(!response.ok) throw new Error(next.detail||'Could not update download');
+      downloadFiles=downloadFiles.map(row=>row.id===next.id?next:row);
+      preparationError='';
+    }catch(error){preparationError=error.message;}
+  }
+  $effect(()=>{
+    if(!initialized) return;
+    let controller=new AbortController(),timer,stopped=false,lastReady='';
+    async function refresh(){
+      try{
+        let response=await fetch('/api/models/downloads',{signal:controller.signal});
+        if(!response.ok) throw new Error('Could not read download queue');
+        let next=await response.json();
+        if(stopped) return;
+        downloadFiles=next.files||[];
+        let current=untrack(()=>preparation);
+        let task=next.tasks?.find(task=>task.id===current?.id);
+        if(task) preparation=task;
+        let ready=downloadFiles.filter(file=>file.status==='ready').map(file=>file.id).sort().join(',');
+        if(ready!==lastReady){lastReady=ready;requiredRevision+=1;}
+      }catch(error){if(!stopped&&error.name!=='AbortError') preparationError=error.message;}
+      finally{if(!stopped) timer=setTimeout(refresh,500);}
+    }
+    refresh();
+    return()=>{stopped=true;clearTimeout(timer);controller.abort();};
+  });
+  // Selection previews local presence only. Transfers require an explicit
+  // download click or render; editing controls never starts a transfer.
+  let preparationKey=$derived(config ? JSON.stringify({
+    model_version:config.model_version, model_path:config.model_path,
+    root_dir:config.root_dir, sd_checkpoint_path:config.sd_checkpoint_path,
+    comfy_models_dir:config.comfy_models_dir,
+    controlnet:config.controlnet, ipadapter:config.ipadapter,
+    flow_warp:config.flow?.flow_warp,
+    disco:{sampler:config.disco?.sampler,distilled_guided:config.disco?.distilled_guided,few_step_lora_path:config.disco?.few_step_lora_path,
+           quality_lora_enabled:config.disco?.quality_lora_enabled,quality_lora_path:config.disco?.quality_lora_path,
+           checkpoint_path:config.disco?.checkpoint_path,secondary_path:config.disco?.secondary_path,
+           use_secondary_model:config.disco?.use_secondary_model,encoders:config.disco?.encoders},
+    flux:modelFiles(config.flux), qwen:modelFiles(config.qwen),
+    mage:modelFiles(config.mage), hidream:modelFiles(config.hidream)
+  }) : '');
+  $effect(()=>{
+    let key=preparationKey;
+    requiredRevision;
+    if(!initialized||!key) return;
+    let controller=new AbortController(), stopped=false;
+    let payload=untrack(()=>JSON.parse(JSON.stringify(config)));
+    requiredLoading=true; requiredError='';
+    let timer=setTimeout(async()=>{
+      try{
+        let response=await fetch('/api/models/required',{method:'POST',
+          headers:{'content-type':'application/json'},body:JSON.stringify(payload),signal:controller.signal});
+        if(!response.ok) throw new Error('Could not list required models');
+        let next=await response.json();
+        if(stopped) return;
+        requiredModels=next.files||[];
+      }catch(error){if(!stopped&&error.name!=='AbortError') requiredError=error.message;}
+      finally{if(!stopped) requiredLoading=false;}
+    },250);
+    return()=>{stopped=true;clearTimeout(timer);controller.abort();};
+  });
+  async function downloadRequired(){
+    preparing=true; preparationError='';
+    try{
+      let response=await fetch('/api/models/prepare',{method:'POST',
+        headers:{'content-type':'application/json'},body:JSON.stringify(config)});
+      let next=await response.json();
+      if(!response.ok) throw new Error(Array.isArray(next.detail)?next.detail.map(e=>e.message).join('; '):next.detail||'Could not download required models');
+      preparation=next;
+    }catch(error){preparationError=error.message;}
+    finally{preparing=false;}
+  }
+  let preparationId=$derived(preparation?.id);
+  $effect(()=>{
+    let id=preparationId;
+    if(!id) return;
+    let controller=new AbortController(),timer,stopped=false;
+    async function refresh(){
+      try{
+        let response=await fetch(`/api/models/prepare/${id}`,{signal:controller.signal});
+        if(!response.ok) throw new Error('Could not read download progress');
+        let next=await response.json();
+        if(stopped) return;
+        preparation=next;
+        if(['queued','running'].includes(next.state)) timer=setTimeout(refresh,500);
+        else requiredRevision+=1;
+      }catch(error){if(!stopped&&error.name!=='AbortError') preparationError=error.message;}
+    }
+    refresh();
+    return()=>{stopped=true;clearTimeout(timer);controller.abort();};
+  });
   function fieldEnabledForConfig(entry){
+    const reference=config?.disco?.sampler==='distilled'&&config.disco.distilled_guided===false;
+    if(entry.section==='disco'&&entry.name==='quality_lora_strength'&&!config?.disco?.quality_lora_enabled) return false;
+    if(entry.section==='disco'&&['distilled_guided','lora_strength'].includes(entry.name)&&config?.disco?.sampler!=='distilled') return false;
+    if(activeModelFamily==='disco'&&!reference&&entry.section==='disco'
+        &&['steps','style_strength'].includes(entry.name)) return false;
+    if(reference&&activeModelFamily==='disco'){
+      if(entry.section==='disco'&&!['sampler','distilled_guided','lora_strength','quality_lora_enabled','steps','checkpoint_path','few_step_lora_path','preview_interval','fixed_seed','use_secondary_model'].includes(entry.name)) return false;
+      if(entry.section==='diffusion'&&!['seed','fixed_seed_randomness','fixed_seed_wiggle','fixed_seed_wiggle_direction'].includes(entry.name)) return false;
+      if(entry.section==='turbo') return false;
+      if(entry.section==='main'&&['text_prompts','negative_prompts'].includes(entry.name)) return false;
+    }
     if(entry.section!=='diffusion') return true;
     if(entry.name==='unet_cache_interval')
       return config?.diffusion?.unet_cache==='deepcache';
@@ -50,19 +194,28 @@
       return config?.diffusion?.unet_cache==='first_block';
     return true;
   }
+  function fieldValue(item){
+    const section=item.section==='main'?config:config?.[item.section];
+    if(item.section==='disco'&&item.name==='cut_icgray_schedule')
+      return section?.cut_icgray_schedule ?? {0:section?.cut_icgray_p};
+    return readFieldValue(config,item);
+  }
   let entries=$derived(allEntries.filter(
-    e=>fieldSupportsModel(e.schema,activeModelFamily)&&fieldEnabledForConfig(e)));
+    e=>e.tier!=='hidden'&&!(e.section==='main'&&e.name==='model_version')
+      &&fieldSupportsModel(e.schema,activeModelFamily)&&fieldEnabledForConfig(e)));
   // Groups for the selected tab, preserving field order within each.
   let groups=$derived.by(()=>{
     let out=[];
-    for(let e of entries.filter(e=>e.tier===selected)){
-      let g=out.find(g=>g.name===e.group);
-      if(!g) out.push(g={name:e.group,items:[]});
+    for(let e of entries.filter(e=>inWorkflow(e,selected))){
+      const name=fieldGroup(e,selected);
+      let g=out.find(g=>g.name===name);
+      if(!g) out.push(g={name,items:[],editor:fieldEditor(e,selected)});
       g.items.push(e);
     }
     // Order by what ui_layout DECLARED, not by the order fields sit on RunConfig -- the
     // latter buried "Input Video" behind "Output" and "Model" on the Project tab.
     let order=tabs.find(t=>t.id===selected)?.groups ?? [];
+    for(const group of out)group.items.sort((a,b)=>(a.schema.workspace_order??999)-(b.schema.workspace_order??999));
     if(order.length) out.sort((a,b)=>{
       let ia=order.indexOf(a.name), ib=order.indexOf(b.name);
       return (ia<0?999:ia)-(ib<0?999:ib);
@@ -77,11 +230,7 @@
   let hits=$derived.by(()=>{
     let q=query.trim().toLowerCase();
     if(!q) return [];
-    return entries.filter(e=>
-      pretty(e.name).toLowerCase().includes(q) ||
-      e.group.toLowerCase().includes(q) ||
-      e.section.toLowerCase().includes(q)
-    ).slice(0,60);
+    return searchFields(entries,q);
   });
   const tierLabel=(id)=>tabs.find(t=>t.id===id)?.label||id;
 
@@ -91,7 +240,7 @@
   function locate(path){
     if(!path) return null;
     let dot=path.indexOf('.');
-    let section=dot<0?'main':path.slice(0,dot), name=dot<0?path:path.slice(dot+1);
+    let section=dot<0?'main':path.slice(0,dot), name=dot<0?path:path.slice(dot+1).split('.')[0];
     return entries.find(e=>e.section===section&&e.name===name)||null;
   }
   // 'section.field' -> message, so a field can show its OWN error instead of the sidebar
@@ -115,7 +264,7 @@
     let count={};
     for(let e of errors){
       let hit=locate(e.path);
-      if(hit) count[hit.tier]=(count[hit.tier]||0)+1;
+      if(hit){let location=fieldLocation(hit);count[location]=(count[location]||0)+1;}
     }
     return count;
   });
@@ -123,15 +272,17 @@
   async function goToError(path){
     let hit=locate(path);
     if(!hit) return;
-    selected=hit.tier;
+    inspectorHidden=false;selected=fieldLocation(hit);
+    mode='render';mobileView='settings';viewerMode='compare';
     query='';
-    openGroups.add(hit.group); openGroups=new Set(openGroups);   // Advanced starts collapsed
+    setGroupOpen(selected,fieldGroup(hit,selected),true);
     await tick();
-    // VideoEditor carries its own anchors (see its `errors` prop) — video_init_path is the
-    // most common error there is, so "just open the tab" was not good enough. ControlNet
-    // still has none; if errors start landing inside it, give it anchors the same way.
+    // Generic fields and custom editors expose anchors for validation links.
     let node=document.getElementById(`field-${hit.section}-${hit.name}`);
     if(!node) return;
+    for(let parent=node.parentElement;parent;parent=parent.parentElement){
+      if(parent.tagName==='DETAILS')parent.open=true;
+    }
     node.scrollIntoView({behavior:'smooth',block:'center'});
     node.classList.remove('flash'); void node.offsetWidth; node.classList.add('flash');
     node.querySelector('input,textarea,select')?.focus({preventScroll:true});
@@ -139,26 +290,69 @@
   // These sections have purpose-built editors; the generic Field grid can't express them.
   const custom={'Input Video':'video','ControlNet':'controlnet','IP-Adapter':'ipadapter',
                 'Reference Images':'references'};
-  // Groups that span both columns: the custom editors, plus anything whose fields are
-  // long-form (prompt textareas, keyframe chip rows) and would be cramped at half width.
-  const wide=new Set(['Prompts','Scene Scheduling','Flow & Consistency',
-                      'Reference Images','IP-Adapter']);
-  // A group can point at the tab holding the rest of its settings. AnimateDiff's toggle is
-  // a MODEL choice (in the notebook it IS the model version), so it sits on the Model card
-  // — but its tuning lives in Advanced, and you should not have to go hunting for it.
-  const seeAlso={Model:{when:()=>config?.animatediff?.enabled,tier:'advanced',group:'AnimateDiff'}};
-  function openGroup(tier,group){selected=tier;query='';openGroups.add(group);openGroups=new Set(openGroups)}
-  let openGroups=$state(new Set());
+  let groupOpen=$state({});
+  const groupIsOpen=(tier,name)=>groupOpen[`${tier}:${name}`] ?? !['advanced','all','system'].includes(tier);
+  function setGroupOpen(tier,name,open){
+    if(groupIsOpen(tier,name)!==open) groupOpen={...groupOpen,[`${tier}:${name}`]:open};
+  }
   function setField(name,v){
     config=name==='model_version'
       ? applyModelDefaults(config,v,schema)
       : {...config,[name]:v};
   }
+  async function editProjectName(){
+    if(!config)return;
+    projectDraft=config.batch_name||'';editingProject=true;
+    await tick();projectInput?.focus();projectInput?.select();
+  }
+  async function finishProjectName(save,blur=false){
+    if(!editingProject)return;
+    const name=projectDraft.trim();
+    if(save&&!name&&!blur)return;
+    if(save&&name)setField('batch_name',name);
+    editingProject=false;
+    if(!blur){await tick();projectTitle?.focus();}
+  }
   function setIn(section,name,v){
     if(section==='main') return setField(name,v);
+    if(section==='disco'&&name==='sampler'){
+      config=switchDiscoSampler($state.snapshot(config),v).config;
+      return;
+    }
     config={...config,[section]:{...config[section],[name]:v}};
   }
   function fieldHint(item){
+    if(item.section==='diffusion'&&item.name==='fixed_seed_wiggle')
+      return '0 turns wiggle off. Otherwise sets random shift amplitude or directional roll speed in noise pixels. Disco uses image pixels; SD uses latent pixels (typically 8 image pixels). Set randomness to 0 for shifts only.';
+    if(item.section==='diffusion'&&item.name==='fixed_seed_wiggle_direction')
+      return '[0, 0] gives random wiggle. Other vectors are normalized and roll every frame: [1, 0] right, [0, 1] down. Fractional cumulative positions round to whole noise pixels, preserving noise values.';
+    if(item.section==='diffusion'&&item.name==='fixed_seed_randomness')
+      return 'With Fixed seed enabled: 0 keeps the same noise; 1 uses fresh noise after frame zero. Intermediate values preserve Gaussian variance. Seed and frame keep it reproducible.';
+    if(item.section==='disco'&&item.name==='cut_max_size')
+      return 'Limits the image used to construct cuts before padding and cropping. Final cuts still use each encoder’s required resolution. Try 1024 to reduce VRAM.';
+    if(item.section==='main'&&item.name==='comfy_models_dir')
+      return 'Local or mounted ComfyUI models directory. Downloads start only from Download required models or Start render.';
+    if(item.section==='disco'){
+      let hints={
+        sampler:'Distilled runs the LoRA inside the guided DDIM/video pipeline. Guidance and frame schedules are preserved. Other step counts resample the original 1000-step noise schedule.',
+        distilled_guided:'On: CLIP/SigLIP, frame guidance, masks, flow, turbo and scheduled steps. Off: exact unconditional trained-grid preview; import a reference profile for its compatible settings.',
+        few_step_lora_path:'Custom supervised adapter .safetensors export, or a training run directory with best.json. This is not an SD/PEFT LoRA.',
+        lora_strength:'Scales the LoRA contribution on top of its trained alpha/rank. 0 disables the adapter, 1 uses trained strength; values above 1 amplify it. Applies during guidance backward too.',
+        quality_lora_enabled:'Optional aesthetic adapter. Works alone with DDIM or alongside the turbo adapter with distilled sampling. Keeps your secondary-model, guidance, flow and mask settings.',
+        quality_lora_path:'Aesthetic real-image epsilon MSE .safetensors export for Crowson Disco 512. Metadata and complete tensor keys/shapes are validated; no automatic download.',
+        quality_lora_strength:'Independent additive quality branch: 0 disables its contribution, 1 is 100%. The turbo strength remains separate.',
+        attention:'SDPA is the default. Flash and Sage are optional; gradient paths under Sage use SDPA.',
+        preview_interval:'Publish a clean-image estimate every N steps. 0 disables live denoising previews.',
+        checkpoint_path:'Optional custom checkpoint. Leave blank to download the selected model on render or when you click Download required models.',
+        secondary_path:'Optional custom secondary model. Leave blank to download it when needed, on render or from Download required models.',
+        guidance_every:'Evaluate semantic guidance every N sampling steps. 1 guides every step.',
+        guidance_noise_cap_percent:'0 disables this cap. 100 limits the combined guidance displacement RMS to one current-noise standard deviation per sampler update. Includes CLIP/SigLIP, frame and regularization losses. Gaussian noise has no fixed maximum. PLMS needs an extra unguided evaluation when restarting history.',
+        lock_cutouts_across_frames:'Repeat crop positions across frames; moving subjects are not flow-tracked.',
+        cut_overview:'Inference progress (%) → whole-frame cut count per batch. Values hold until the next key; no interpolation.',
+        cut_innercut:'Inference progress (%) → random crop count per batch. Values hold until the next key; no interpolation.'
+      };
+      if(hints[item.name]) return hints[item.name];
+    }
     let modelHint=modelFieldHint(config,item.section,item.name);
     if(modelHint) return modelHint;
     if(item.section==='diffusion'&&item.name==='sampler_scale_min_size')
@@ -181,18 +375,28 @@
   function mergeDefaults(defaults,saved){if(!saved||typeof saved!=='object'||Array.isArray(saved))return defaults;let result={...defaults};for(let key of Object.keys(saved)){if(defaults[key]&&typeof defaults[key]==='object'&&!Array.isArray(defaults[key]))result[key]=mergeDefaults(defaults[key],saved[key]);else result[key]=saved[key]}return result}
   async function init(){
     let [configResponse,jobsResponse]=await Promise.all([fetch('/api/config'),fetch('/api/jobs')]);
-    let d=await configResponse.json();schema=d.schema;let saved=null;
+    let d=await configResponse.json();let saved=null;
+    const existing=jobsResponse.ok?await jobsResponse.json():[];
     if(!d.prefilled){try{saved=JSON.parse(localStorage.getItem(storageKey))}catch{localStorage.removeItem(storageKey)}}
-    config=mergeDefaults(d.defaults,saved);initialized=true;
+    if(saved?.disco&&saved.disco.cut_schedule_version!==2){
+      // Migrate before merging defaults, which would otherwise stamp old axes as v2.
+      const response=await fetch('/api/config/import',{method:'POST',headers:{'content-type':'application/json'},
+        body:JSON.stringify({filename:'browser-settings.json',content:JSON.stringify(saved)})});
+      const migrated=await response.json();
+      if(!response.ok)throw new Error(migrated.detail?.[0]?.message||'Could not migrate saved cutout schedules');
+      saved=migrated.config;
+    }
+    schema=d.schema;
+    config=normalizeSchedules(dropLegacyFrameHash(normalizeRawOpacities(migrateLegacyFrameLimit(mergeDefaults(d.defaults,saved)))),schema);selected=tabs[0]?.id||'source';initialized=true;
+    try{inspectorWidth=Math.max(340,Math.min(680,Number(localStorage.getItem('vibewarp.inspector.width'))||420));}catch{}
     // The renderer lives on the server, so a browser reload must reconnect to
     // it rather than forgetting the only handle that can cancel the active job.
     if(jobsResponse.ok){
-      let existing=await jobsResponse.json();
       let active=existing.find(item=>item.state==='running')
               || existing.find(item=>item.state==='queued');
       if(active) trackJob(active);
     }
-  } init();
+  } init().catch(error=>{initError=error.message||'Could not load the workspace';});
   // Selecting a Comfy-backed model should explain a stopped/misconfigured server now,
   // not after the user submits a render and waits for backend initialization to fail.
   $effect(()=>{
@@ -214,16 +418,74 @@
     return()=>{clearTimeout(timer);controller.abort()};
   });
   $effect(()=>{if(initialized&&config)localStorage.setItem(storageKey,JSON.stringify(config))});
-  $effect(()=>{job?.revision;if(!logCollapsed&&logElement)requestAnimationFrame(()=>{logElement.scrollTop=logElement.scrollHeight})});
-  function listen(id){source?.close();source=new EventSource(`/api/jobs/${id}/events`);source.onmessage=(e)=>{job=JSON.parse(e.data);if(['completed','failed','cancelled'].includes(job.state))source.close()}}
-  function trackJob(next){job=next;listen(next.id)}
-  async function run(){busy=true;errors=[];let r=await fetch('/api/jobs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(config)});let d=await r.json();busy=false;if(!r.ok){errors=Array.isArray(d.detail)?d.detail:[{message:d.detail||'Submission failed'}];return}job=d;listen(job.id)}
+  function listen(id){
+    source?.close();source=new EventSource(`/api/jobs/${id}/events`);
+    source.onmessage=(event)=>{
+      if(job?.id!==id)return;
+      const next=JSON.parse(event.data);
+      if(next.config){jobConfig=next.config;snapshotError='';snapshotLoading=false;snapshotRevision+=1;}
+      job=next;
+      if(['completed','failed','cancelled'].includes(job.state)){source.close();requiredRevision+=1;}
+    };
+  }
+  async function loadJobSnapshot(id=job?.id){
+    if(!id)return;
+    const revision=++snapshotRevision;
+    snapshotLoading=true;snapshotError='';
+    try{
+      const response=await fetch(`/api/jobs/${id}`);
+      if(!response.ok)throw Error('Could not restore the submitted render settings.');
+      const next=await response.json();
+      if(revision!==snapshotRevision||job?.id!==id)return;
+      if(!next.config)throw Error('The job snapshot has no submitted settings.');
+      jobConfig=next.config;
+      // Events may have advanced while the request was in flight.
+      if((next.revision??-1)>=(job.revision??-1))job=next;
+    }catch(error){if(revision===snapshotRevision&&job?.id===id)snapshotError=error.message;}
+    finally{if(revision===snapshotRevision)snapshotLoading=false;}
+  }
+  function trackJob(next,submitted=null){
+    const same=job?.id===next.id;
+    jobConfig=next.config||submitted||(same?jobConfig:null);
+    job=next;snapshotError='';snapshotRevision+=1;snapshotLoading=false;
+    listen(next.id);
+    if(!jobConfig)loadJobSnapshot(next.id);
+  }
+  async function chooseSource(){
+    chooseWorkflow('source');setGroupOpen('source','Input Video',true);
+    await tick();document.querySelector('#field-video-video_init_path input')?.focus();
+  }
+  async function toggleInspector(){
+    if(inspectorVisible){inspectorHidden=true;mobileView='viewer';}
+    else{inspectorHidden=false;mobileView='settings';if(viewerMode==='inspect')viewerMode='compare';await tick();document.querySelector('.settings-search input')?.focus();}
+  }
+  function viewDraft(){
+    if(renderActive)return;
+    source?.close();snapshotRevision+=1;snapshotLoading=false;snapshotError='';job=null;jobConfig=null;
+  }
+  async function run(){
+    if(!config||!supportedModel||conditioningConflict)return;
+    busy=true;errors=[];
+    try{
+      const submitted=$state.snapshot(config);
+      let r=await fetch('/api/jobs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(submitted)});
+      let d=await r.json();
+      if(!r.ok){errors=Array.isArray(d.detail)?d.detail:[{message:d.detail||'Submission failed'}];mobileView='settings';return;}
+      trackJob(d,submitted);mobileView='viewer';
+    }catch(error){errors=[{message:error.message||'Could not start the render'}];}
+    finally{busy=false;}
+  }
   async function cancel(){
-    if(!job || job.cancel_requested) return;
+    if(!renderActive || job.cancel_requested || cancelling) return;
     // Apply the server snapshot immediately; the event stream will carry the
     // terminal state once the renderer and (if applicable) Comfy have stopped.
-    let r=await fetch(`/api/jobs/${job.id}/cancel`,{method:'POST'});
-    if(r.ok) job=await r.json();
+    cancelling=true;
+    try{
+      let r=await fetch(`/api/jobs/${job.id}/cancel`,{method:'POST'});
+      if(!r.ok) throw new Error('Could not cancel render');
+      job=await r.json();
+    }catch(error){errors=[{message:error.message}];}
+    finally{cancelling=false;}
   }
   // System-tier fields describe the MACHINE (model paths, VRAM, threads), so they are
   // stripped from an export and never travel to someone else's install.
@@ -248,261 +510,179 @@
     systemSnapshot=current;
     fetch('/api/system',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify($state.snapshot(config))}).catch(()=>{});
   });
-  async function importConfig(e){let f=e.target.files[0];if(!f)return;busy=true;errors=[];let content=await f.text();let r=await fetch('/api/config/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({filename:f.name,content})});let d=await r.json();busy=false;if(!r.ok){errors=Array.isArray(d.detail)?d.detail:[{message:d.detail||'Import failed'}];return}config=d.config;e.target.value=''}
-  async function resetConfig(){localStorage.removeItem(storageKey);let r=await fetch('/api/config');let d=await r.json();config=d.defaults;errors=[];selected='project'}
+  async function importConfig(e){let f=e.target.files[0];if(!f)return;busy=true;errors=[];let content=await f.text();let r=await fetch('/api/config/import',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({filename:f.name,content})});let d=await r.json();busy=false;if(!r.ok){errors=Array.isArray(d.detail)?d.detail:[{message:d.detail||'Import failed'}];return}config=normalizeSchedules(d.config,schema);viewDraft();e.target.value=''}
+  async function resetConfig(){localStorage.removeItem(storageKey);let r=await fetch('/api/config');let d=await r.json();config=normalizeSchedules(d.defaults,schema);viewDraft();errors=[];selected=tabs[0]?.id||'source'}
 </script>
-<svelte:head><title>VibeWarp</title></svelte:head>
-<header>
-  <div class="brand"><span class="mark">V</span><div><h1>VibeWarp</h1><p>Video diffusion workspace</p></div></div>
-  <div class="modes">
-    <button class:on={mode==='render'} onclick={()=>mode='render'}>Render</button>
-    <button class:on={mode==='preview'} onclick={()=>mode='preview'}>History &amp; Comparison</button>
-  </div>
-  <div class="actions">
-    {#if mode==='render'}
-      <label class="file">Import settings<input type="file" accept=".json,.txt" onchange={importConfig}/></label>
-      <button class="ghost" onclick={resetConfig}>Reset</button>
-      <button class="ghost" onclick={exportConfig}>Export</button>
+<svelte:head><title>VibeWarp</title><meta name="description" content="Local video diffusion workspace"/></svelte:head>
+<svelte:window onpointermove={resizeInspector} onpointerup={()=>resizing=false}/>
+{#snippet editField(item)}
+  {#if !(item.section==='main'&&item.name==='model_version')}
+    <Field name={item.name} schema={item.schema} path={item.section}
+      hint={fieldHint(item)} error={fieldError(item)} value={fieldValue(item)}
+      onchange={(value)=>setIn(item.section,item.name,value)}/>
+  {/if}
+{/snippet}
+<div class="app-shell">
+  <a class="skip-link" href="#workspace">Skip to workspace</a>
+  <header class="topbar">
+    <div class="topbar-left">
+    <a class="brand" href="#workspace" aria-label="VibeWarp workspace"><span class="mark">V</span><strong>VibeWarp</strong></a>
+    {#if config}
+      <label class="model-picker"><span class="visually-hidden">Model Version</span><select value={config.model_version} onchange={(event)=>setField('model_version',event.currentTarget.value)}>
+        {#if !supportedModel}<option value={config.model_version} disabled>{config.model_version} · legacy settings</option>{/if}
+        {#each modelGroups as group}
+          {#if group.id}<optgroup label={group.label}>{#each modelOptions.filter(option=>option.group===group.id) as option}<option value={option.value}>{option.label}</option>{/each}</optgroup>
+          {:else}{#each modelOptions as option}<option value={option.value}>{option.label}</option>{/each}{/if}
+        {/each}
+      </select></label>
     {/if}
-    <button class="run" onclick={run} disabled={busy||['queued','running'].includes(job?.state)}>{busy?'Loading…':'Start render'}</button>
-  </div>
-</header>
-{#if mode==='preview'}
-  <div class="preview-shell" style={`--log-height:${logCollapsed?'42px':'282px'}`}>
-    <Preview {config} {job} onload={(c)=>{config=c;errors=[];}} onjob={trackJob}/>
-  </div>
-{:else}
-<main class="render-shell" class:compact-log={logCollapsed} style={`--log-height:${logCollapsed?'42px':'282px'}`}>
-  <nav>{#each tabs as tab}<button class:active={selected===tab.id} onclick={()=>selected=tab.id}><span>{tab.label}</span>{#if errorsPerTier[tab.id]}<em>{errorsPerTier[tab.id]}</em>{/if}</button>{/each}</nav>
-  <section class="editor">
-    {#if !schema}<div class="loading">Loading configuration…</div>
-    {:else}
-      <div class="section-head">
-        <div><p>{query.trim() ? 'Across all tabs' : blurbs[selected]}</p>
-             <h2>{query.trim() ? `${hits.length} match${hits.length===1?'':'es'}` : tabs.find(t=>t.id===selected)?.label}</h2></div>
-        <div class="search-box">
-          <input class="search" placeholder="Search settings…" bind:value={query}
-                 onkeydown={(e)=>{if(e.key==='Escape')query=''}}/>
-          {#if query}<button class="clear" onclick={()=>query=''} aria-label="Clear search">×</button>{/if}
-        </div>
+    </div>
+    <div class="project-title">
+      {#if editingProject}<input bind:this={projectInput} bind:value={projectDraft} aria-label="Edit project name"
+        onblur={()=>finishProjectName(true,true)} onkeydown={(event)=>{
+          if(event.key==='Enter'){event.preventDefault();finishProjectName(true);}
+          if(event.key==='Escape'){event.preventDefault();finishProjectName(false);}
+        }}/>
+      {:else}<button bind:this={projectTitle} onclick={editProjectName} disabled={!config}
+        aria-label="Edit project name" title={`${config?.batch_name||'Your project'} · Click to edit`}>{config?.batch_name||'Your project'}</button>{/if}
+    </div>
+    <div class="topbar-actions">
+    <details class="project-menu" use:closeOnSelection>
+      <summary aria-label="Project settings"><span>Project settings</span></summary>
+      <div class="project-actions">
+        <button onclick={()=>fileInput?.click()}>Import settings</button>
+        <button onclick={exportConfig} disabled={!config}>Export settings</button>
+        <button onclick={resetConfig} disabled={!initialized}>Reset settings</button>
       </div>
-      {#if comfyStatus}
-        <div class="comfy-state" class:checking={comfyStatus.checking}
-             class:available={comfyStatus.available} role="status" aria-live="polite">
-          <i></i>
-          <div>
-            <b>ComfyUI {comfyStatus.checking ? 'checking…' : comfyStatus.available ? 'connected' : 'unavailable'}</b>
-            <span>{comfyStatus.checking ? `Checking ${comfyStatus.url}`
-              : comfyStatus.available ? `${comfyStatus.label} will use ${comfyStatus.url}`
-              : `Nothing is listening at ${comfyStatus.url}. Start ComfyUI or change its server URL.`}</span>
-          </div>
-          <button onclick={()=>goToError(comfyStatus.path)}>Server settings</button>
-        </div>
-      {/if}
-      {#if query.trim()}
-        {#if !hits.length}
-          <div class="panel"><div class="empty">Nothing matches “{query}”.</div></div>
-        {:else}
-          <div class="panel"><div class="grid">
-            {#each hits as item (item.section+'.'+item.name)}
-              {#if custom[item.group]}
-                <button class="jump" onclick={()=>{selected=item.tier;query=''}}>
-                  <b>{pretty(item.name)}</b>
-                  <span>{tierLabel(item.tier)} › {item.group} — open the tab</span>
-                </button>
-              {:else}
-                <div class="hit">
-                  <span class="where">{tierLabel(item.tier)} › {item.group}</span>
-                  <Field name={item.name} schema={item.schema} path={item.section}
-                         hint={fieldHint(item)} error={fieldError(item)}
-                         value={item.section==='main' ? config[item.name] : config[item.section]?.[item.name]}
-                         onchange={(v)=>setIn(item.section,item.name,v)}/>
-                </div>
-              {/if}
-            {/each}
-          </div></div>
-        {/if}
-      {:else}
-      <div class="groups">
-      {#each groups as group (group.name)}
-        {@const only=custom[group.name]}
-        {@const full=!!only || wide.has(group.name)}
-        {@const link=seeAlso[group.name]}
-        <details class="panel group" class:full open={selected!=='advanced' || openGroups.has(group.name)}>
-          <summary><span>{group.name}</span>{#if only && enabledDot(only)}<i></i>{/if}</summary>
-          <div class={only ? 'stack' : 'grid'}>
-            {#if only==='video'}
-              <VideoEditor value={config.video} errors={sectionErrors('video')}
-                          onchange={(v)=>setField('video',v)}
-                          frameRange={config.frame_range}
-                          onFrameRange={(v)=>setField('frame_range',v)}/>
-            {:else if only==='controlnet'}
-              <ControlNetEditor value={config.controlnet} schema={schema.properties.controlnet}
-                                modelVersion={config.model_version}
-                                onchange={(v)=>setField('controlnet',v)}/>
-            {:else if only==='ipadapter'}
-              <IPAdapterEditor value={config.ipadapter} schema={schema.properties.ipadapter}
-                onchange={(v)=>setField('ipadapter',v)}
-                modelVersion={config.model_version}
-                modelDir={config.controlnet.model_dir}
-                videoPath={config.video.video_init_path}
-                frameRange={config.frame_range}
-                extractNth={config.video.extract_nth_frame}/>
-            {:else if only==='references'}
-              {@const refItem=group.items.find(item=>item.name==='references')}
-              {@const refSection=refItem?.section}
-              <ReferenceImagesEditor value={config[refSection]?.references}
-                onchange={(v)=>setIn(refSection,'references',v)}
-                labelOpacity={config.reference_label_opacity}
-                onLabelOpacityChange={(v)=>setField('reference_label_opacity',v)}
-                videoPath={config.video.video_init_path}
-                frameRange={config.frame_range}
-                extractNth={config.video.extract_nth_frame}
-                maxReferences={schema.max_edit_references?.[activeModelFamily] ?? 10}
-                sourceLabels={schema.edit_reference_sources}/>
-            {:else}
-              {#each group.items as item (item.section+'.'+item.name)}
-                <Field name={item.name} schema={item.schema} path={item.section}
-                       hint={fieldHint(item)} error={fieldError(item)}
-                       value={item.section==='main' ? config[item.name] : config[item.section]?.[item.name]}
-                       onchange={(v)=>setIn(item.section,item.name,v)}/>
-              {/each}
-              {#if link?.when()}
-                <button class="see-also" onclick={()=>openGroup(link.tier,link.group)}>
-                  {link.group} settings → {tierLabel(link.tier)}
-                </button>
-              {/if}
-            {/if}
-          </div>
-        </details>
+    </details>
+    <input class="visually-hidden" tabindex="-1" type="file" accept=".json,.txt" bind:this={fileInput} onchange={importConfig} aria-label="Import settings file"/>
+    <span class="topbar-state"><i class:live={renderActive}></i>{renderActive?'Rendering':missingModels?'Setup needed':'Local workspace'}</span>
+    <button class="run" class:cancel={renderActive} onclick={()=>renderActive?cancel():run()}
+      disabled={renderActive?(cancelling||job.cancel_requested):busy||!config||!supportedModel||!!conditioningConflict}>
+      {renderActive?(cancelling||job.cancel_requested?'Cancelling…':'Cancel render'):busy?'Submitting…':'Start render'}
+    </button>
+    </div>
+  </header>
+  <div class="workspace-tools" role="navigation" aria-label="Workspace navigation">
+    <button aria-pressed={mode==='render'} onclick={()=>{mode='render';mobileView='viewer';}}>Workspace</button>
+    <button aria-pressed={mode==='preview'} onclick={()=>{mode='preview';mobileView='viewer';}}>Runs</button>
+    {#if jobConfig}<span class="active-render-context">Viewing {jobConfig.batch_name} · {modelOptions.find(option=>option.value===jobConfig.model_version)?.label||jobConfig.model_version}</span>{/if}
+    {#if job&&!renderActive}<button onclick={viewDraft}>View draft</button>{/if}
+    <button class="inspector-toggle" disabled={mode==='preview'} aria-expanded={inspectorVisible} aria-controls="settings-inspector" onclick={toggleInspector}>{inspectorVisible?'Hide settings':'Show settings'}</button>
+  </div>
+  <main id="workspace" class="workspace" class:inspector-hidden={inspectorHidden} class:history-mode={mode==='preview'} class:inspecting={viewerMode==='inspect'} class:mobile-settings={mobileView==='settings'} style={`--inspector-width:${inspectorWidth}px`}>
+    <nav class="workflow-nav" aria-label="Workflow">
+      <small>Project workflow</small>
+      {#each tabs.filter(tab=>tab.id!=='system') as tab,index}
+        <button class:active={mode==='render'&&selected===tab.id} onclick={()=>chooseWorkflow(tab.id)} aria-current={mode==='render'&&selected===tab.id?'page':undefined}>
+          <span class="nav-index" aria-hidden="true">{String(index+1).padStart(2,'0')}</span><span>{tab.label}</span>{#if errorsPerTier[tab.id]}<em>{errorsPerTier[tab.id]}</em>{/if}
+        </button>
       {/each}
+      <div class="nav-bottom">
+        <button class:active={mode==='preview'} onclick={()=>{mode='preview';mobileView='viewer';}} aria-current={mode==='preview'?'page':undefined}>Runs &amp; settings</button>
+        {#each tabs.filter(tab=>tab.id==='system') as tab}<button class:active={mode==='render'&&selected===tab.id} onclick={()=>chooseWorkflow(tab.id)}>{tab.label}</button>{/each}
       </div>
-      {/if}
-    {/if}
-  </section>
-  <aside>
-    <div class="monitor-head"><span class:live={job?.state==='running'}></span><div><p>Render monitor</p><h3>{job?.message||'Ready to render'}</h3></div></div>
-    {#if errors.length}<div class="errors">{#each errors as error}
-      {@const hit=locate(error.path)}
-      {#if hit}
-        <button class="err-jump" onclick={()=>goToError(error.path)}>
-          <b>{pretty(hit.name)}</b> {error.message}
-          <span>{tierLabel(hit.tier)} › {hit.group}</span>
-        </button>
-      {:else}<p><b>{error.path||'Error'}</b> {error.message}</p>{/if}
-    {/each}</div>{/if}
-    {#if job}
-      <div class="progress-meta"><span>{job.stage}</span><span>{Math.round(job.progress)}%</span></div><div class="progress"><i style={`width:${job.progress}%`}></i></div>
-      <div class="stats"><div><b>{job.frame}</b><span>Frame</span></div><div><b>{job.total_frames||'—'}</b><span>Total</span></div><div><b>{job.state}</b><span>Status</span></div></div>
-      {#if job.preview_available}
-        <button class="shot" onclick={()=>zoomShot=`/api/jobs/${job.id}/preview?v=${job.revision}`} aria-label="Zoom latest render">
-          <img class="preview" src={`/api/jobs/${job.id}/preview?v=${job.revision}`} alt="Latest render"/>
-        </button>
-      {:else}<div class="empty">Rendered frames will appear here</div>{/if}
-      {#if job.state==='running' || job.state==='queued'}<button class="cancel" onclick={cancel} disabled={job.cancel_requested}>{job.cancel_requested?'Cancelling...':'Cancel render'}</button>{/if}
-    {:else}<div class="empty tall"><strong>No active job</strong><span>Configure the render and start when ready.</span></div>{/if}
-    {#if !seenFirstFrame}<Supporters/>{/if}
-  </aside>
-</main>
-{/if}
-{#if zoomShot}
-  <!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-  <div class="lightbox" onclick={()=>zoomShot=null}>
-    <img src={zoomShot} alt="Latest render"/>
-    <button class="close" aria-label="Close zoom">×</button>
-  </div>
-{/if}
-<svelte:window onkeydown={(e)=>{if(e.key==='Escape')zoomShot=null}}/>
-<section class:collapsed={logCollapsed} class="log-dock">
-  <button class="log-head" onclick={()=>logCollapsed=!logCollapsed} aria-expanded={!logCollapsed}>
-    <span><i class:live={job?.state==='running'}></i> Output log</span>
-    <code>{logCollapsed ? (job?.logs?.at(-1)||'Waiting for pipeline output…') : ''}</code>
-    <b>{logCollapsed?'Expand':'Collapse'}</b>
-  </button>
-  {#if !logCollapsed}<pre bind:this={logElement}>{job?.logs?.join('\n')||'Waiting for pipeline output…'}</pre>{/if}
-</section>
-<style>
-  /* A tab is a list of collapsible groups. Advanced starts collapsed — it is the "set once
-     or never" tier, and 13 groups expanded is the wall of settings we are getting rid of.
+    </nav>
+    <section class="viewer-pane" aria-label="Video workspace">
+      {#if viewerConfig}<Preview config={viewerConfig} {job} history={mode==='preview'} bind:view={viewerMode}
+        onload={(next)=>{config=normalizeSchedules(next,schema);errors=[];chooseWorkflow(selected);viewerMode='compare';if(!renderActive){job=null;jobConfig=null;}}}
+        onjob={trackJob} onsource={chooseSource}/>
+      {:else}<div class="workspace-empty" role="status">{#if snapshotError}<span>{snapshotError}</span><button onclick={()=>loadJobSnapshot()}>Retry render snapshot</button>{:else}{snapshotLoading?'Restoring submitted render…':initError||'Loading workspace…'}{/if}</div>{/if}
+    </section>
+    <div class="inspector-resizer" role="slider" tabindex="0" aria-label="Settings inspector width" aria-orientation="horizontal" aria-valuemin="340" aria-valuemax="680" aria-valuenow={inspectorWidth}
+      onpointerdown={(event)=>{event.preventDefault();resizing=true;event.currentTarget.setPointerCapture?.(event.pointerId);}} onkeydown={resizeKey}></div>
+    <aside id="settings-inspector" class="settings-inspector" aria-label="Settings inspector">
+      <div class="inspector-head">
+        <p>{selected==='system'?'System settings':config?.model_version?modelOptions.find(option=>option.value===config.model_version)?.label||config.model_version:'Configuration'}</p>
+        <h2>{query.trim()?`${hits.length} matches`:tabs.find(tab=>tab.id===selected)?.label||'Settings'} {#if workflowHelp[selected]&&!query}<HelpTip label="Help: Settings section" text={workflowHelp[selected]}/>{/if}</h2>
+        <label class="mobile-workflow"><span>Settings section</span><select value={selected} onchange={(event)=>chooseWorkflow(event.currentTarget.value)}>{#each tabs as tab}<option value={tab.id}>{tab.label}</option>{/each}</select></label>
+        <label class="settings-search"><span class="visually-hidden">Search settings</span><input type="search" placeholder="Search settings…" bind:value={query} onkeydown={(event)=>{if(event.key==='Escape')query='';}}/></label>
 
-     The groups FLOW into two columns (multi-column, not grid: grid rows would leave a tall
-     group stranded next to a short one). break-inside keeps a group whole. Groups whose
-     fields are long-form — prompts, the ControlNet cards, chip rows — span both columns. */
-  .groups{column-count:2;column-gap:14px}
-  .group{break-inside:avoid;-webkit-column-break-inside:avoid}
-  .group.full{column-span:all}
-  /* Half-width columns are too narrow for a 2-up field grid; only the full-span groups
-     keep two fields per row. */
-  .group:not(.full)>:global(.grid){grid-template-columns:1fr}
-  @media(max-width:1500px){.groups{column-count:1}.group:not(.full)>:global(.grid){grid-template-columns:repeat(2,minmax(0,1fr))}}
-  .group{padding:0;margin-bottom:14px;overflow:hidden}
-  .group>summary{display:flex;align-items:center;gap:9px;padding:16px 22px;cursor:pointer;color:#dce0e5;font-size:13px;font-weight:600;list-style:none;user-select:none}
-  .group>summary::-webkit-details-marker{display:none}
-  .group>summary::before{content:'';width:5px;height:5px;border-right:1.5px solid #6d7580;border-bottom:1.5px solid #6d7580;transform:rotate(-45deg);transition:transform .15s;margin-right:2px}
-  .group[open]>summary::before{transform:rotate(45deg)}
-  .group>summary:hover{background:#171b21}
-  .group>summary i{width:6px;height:6px;border-radius:50%;background:#d8ff55}
-  .group>:global(.grid),.group>:global(.stack){padding:4px 22px 22px}
-  /* Render vs Preview: two different jobs, so two different layouts rather than cramming
-     the frame viewer into a settings column. */
-  .modes{display:flex;gap:3px;padding:3px;border:1px solid #2b3038;background:#0e1116;border-radius:10px}
-  .modes button{border:0;background:none;color:#8b929c;padding:7px 18px;border-radius:8px;cursor:pointer;font-size:13px}
-  .modes button:hover{color:#e7eaee}
-  .modes button.on{background:#232a33;color:#fff;font-weight:600}
-  /* The nav stays put while the settings scroll. `aside` was already sticky; `nav` was not,
-     so it scrolled off the top and you had to scroll back up to change tab. */
-  :global(main.render-shell>nav){position:sticky;top:78px;align-self:start}
-  /* A flex column so the supporters block can absorb whatever height is left below the
-     monitor, instead of sitting in a fixed strip with dead space under it. */
-  :global(main.render-shell>aside){display:flex;flex-direction:column}
-  :global(.section-head){display:flex;align-items:flex-end;justify-content:space-between;gap:20px}
-  .search-box{position:relative;margin-bottom:22px}
-  .comfy-state{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:11px;margin:0 0 16px;padding:12px 14px;border:1px solid #713b41;background:#2b171a;border-radius:10px;color:#f3c3c7}
-  .comfy-state>i{width:8px;height:8px;border-radius:50%;background:#e2636d;box-shadow:0 0 10px #e2636d88}
-  .comfy-state b,.comfy-state span{display:block}.comfy-state b{font-size:12px;color:#fff}.comfy-state span{margin-top:3px;font-size:11px;color:#dba3a8}
-  .comfy-state button{border:1px solid #75454a;background:#351d21;color:#f0c3c6;border-radius:7px;padding:7px 10px;cursor:pointer;font-size:11px}
-  .comfy-state button:hover{border-color:#b85a63;background:#48242a;color:#fff}
-  .comfy-state.checking{border-color:#3b4652;background:#171c22;color:#b9c1cb}.comfy-state.checking>i{background:#7f8995;box-shadow:none;animation:comfy-pulse 1s ease-in-out infinite}.comfy-state.checking span{color:#818b97}
-  .comfy-state.available{border-color:#42552f;background:#172014;color:#d8efb7}.comfy-state.available>i{background:#a9d64e;box-shadow:0 0 10px #a9d64e66}.comfy-state.available span{color:#94a57e}.comfy-state.available button{border-color:#42552f;background:#1c2817;color:#c7dda8}
-  @keyframes comfy-pulse{50%{opacity:.35}}
-  .search{width:260px;border:1px solid #303640;background:#0c0f13;color:#eef0f2;border-radius:9px;padding:9px 30px 9px 12px;font:12px Consolas,monospace}
-  .search:focus{border-color:#8ea834;outline:none}
-  /* Only rendered when there is something to clear — an always-on × next to an empty box
-     is just a dead control. Escape does the same thing from the keyboard. */
-  .clear{position:absolute;top:50%;right:8px;transform:translateY(-50%);display:grid;place-items:center;width:18px;height:18px;border:0;border-radius:50%;background:#2a3038;color:#aeb4bd;font-size:13px;line-height:1;cursor:pointer;padding:0}
-  .clear:hover{background:#c0505a;color:#fff}
-  /* A search hit says where it lives, so you learn the layout instead of fighting it. */
-  .hit{display:flex;flex-direction:column;gap:5px}
-  .where{color:#6f7883;font-size:10px;text-transform:uppercase;letter-spacing:.09em}
-  /* ControlNet / Input Video have bespoke editors, so a field can't be shown inline —
-     offer the tab instead of pretending the setting isn't there. */
-  .jump{display:flex;flex-direction:column;gap:4px;align-items:flex-start;text-align:left;border:1px dashed #3a414b;background:none;border-radius:9px;padding:11px 13px;cursor:pointer}
-  .jump:hover{border-color:#8ea834;background:#151a14}
-  .jump b{color:#e7eaee;font-size:13px}
-  .jump span{color:#7f8792;font-size:11px}
-  /* Only shown once the feature is on, so it points at settings you can actually use. */
-  .see-also{grid-column:1/-1;justify-self:start;border:1px solid #3a414b;background:none;color:#c8d3ad;border-radius:8px;padding:8px 13px;font-size:12px;cursor:pointer}
-  .see-also:hover{border-color:#8ea834;background:#151a14;color:#d8ff55}
-  /* An error you can click takes you to the field. The path alone ("video.video_init_path")
-     made you find the tab and group yourself. */
-  .err-jump{display:block;width:100%;text-align:left;border:0;background:none;color:#f0c3c6;padding:5px 4px;border-radius:6px;cursor:pointer;font-size:11px}
-  .err-jump:hover{background:#4a2429}
-  /* Error count per tab: a collapsed Advanced group must not be able to hide one. */
-  :global(main>nav em){display:grid;place-items:center;min-width:17px;height:17px;padding:0 4px;border-radius:9px;background:#c0505a;color:#fff;font:600 10px/1 system-ui,sans-serif;font-style:normal}
-  .err-jump b{color:#fff;margin-right:5px}
-  .err-jump span{display:block;margin-top:3px;color:#c78d93;font-size:10px;text-transform:uppercase;letter-spacing:.08em}
-  /* The monitor image is a button so it can be zoomed; strip the button chrome. */
-  .shot{display:block;width:100%;padding:0;border:0;background:none;cursor:zoom-in}
-  :global(button.cancel){cursor:pointer;transition:background .12s,border-color .12s,color .12s,transform .08s,box-shadow .12s}
-  :global(button.cancel:hover:not(:disabled)){background:#351b1f;border-color:#b74f59;color:#ffb7bd;box-shadow:0 0 0 1px #8b3d45}
-  :global(button.cancel:active:not(:disabled)){transform:translateY(1px);background:#4a2429}
-  :global(button.cancel:disabled){cursor:wait;background:#28171a;border-color:#7d3b42;color:#f3a2aa;opacity:1;animation:cancel-pulse 1.1s ease-in-out infinite}
-  :global(button.cancel:disabled::before){content:'';display:inline-block;width:10px;height:10px;margin-right:8px;vertical-align:-1px;border:2px solid #f3a2aa55;border-top-color:#f3a2aa;border-radius:50%;animation:cancel-spin .7s linear infinite}
-  @keyframes cancel-spin{to{transform:rotate(360deg)}}
-  @keyframes cancel-pulse{50%{box-shadow:0 0 0 2px #7d3b4244}}
-  .lightbox{position:fixed;inset:0;z-index:30;background:#05070aee;display:grid;place-items:center;padding:32px;cursor:zoom-out;overflow:auto}
-  .lightbox img{max-width:100%;max-height:100%;object-fit:contain}
-  .close{position:fixed;top:18px;right:24px;width:36px;height:36px;border:1px solid #353a42;border-radius:50%;background:#12151a;color:#d9dce0;font-size:19px;line-height:1;cursor:pointer}
-  .close:hover{background:#c0505a;color:#fff;border-color:#c0505a}
-  .log-dock{position:fixed;z-index:10;left:0;right:0;bottom:0;background:#090b0eeb;border-top:1px solid #30353d;backdrop-filter:blur(14px);box-shadow:0 -12px 35px #0008}.log-head{width:100%;height:42px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:16px;padding:0 20px;border:0;background:#12151a;color:#aeb4bd;cursor:pointer;text-align:left}.log-head span{display:flex;align-items:center;gap:9px;color:#e4e7eb;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.08em}.log-head i{width:6px;height:6px;border-radius:50%;background:#555}.log-head i.live{background:#d8ff55;box-shadow:0 0 10px #d8ff55}.log-head code{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#747d88;font:11px Consolas,monospace}.log-head b{font-size:11px;color:#7d8691}.log-dock pre{height:240px;max-height:35vh;margin:0;border-radius:0;padding:14px 20px;background:#080a0d;color:#9ca6b2;overflow:auto;font:11px/1.55 Consolas,monospace;white-space:pre-wrap}.log-dock.collapsed{height:42px}:global(main.render-shell){padding-bottom:282px}:global(main.render-shell>nav),:global(main.render-shell>aside){height:calc(100vh - 78px - var(--log-height));overflow:auto}.compact-log{padding-bottom:42px}@media(max-width:700px){.log-head{padding:0 12px}.log-head b{display:none}.log-dock pre{height:190px}:global(main.render-shell){padding-bottom:232px}.compact-log{padding-bottom:42px}}
-</style>
+      </div>
+      <div class="inspector-content">
+        {#if !supportedModel}<div class="notice warning" role="status">This model is retained in your imported settings but is no longer offered in the UI. Select a supported model above to continue.</div>{/if}
+        {#if renderActive}<div class="notice">Editing the next render. The active job uses its submitted settings.</div>{/if}
+        {#if errors.length}<div class="validation-errors" role="alert">{#each errors as error}
+          <button onclick={()=>goToError(error.path)}><strong>{error.message}</strong>{#if error.path}<small>{error.path}</small>{/if}</button>
+        {/each}</div>{/if}
+        {#if comfyStatus&&(selected==='model'||selected==='system'||!schema?.workflows)}
+          <section class="setup-state" aria-label="Backend connection">
+            <h3>{comfyStatus.label} backend</h3>
+            <dl><div><dt>ComfyUI server</dt><dd>{comfyStatus.checking?'Checking…':comfyStatus.available?'Reachable':'Unavailable'}</dd></div><div><dt>API compatibility</dt><dd>Not verified</dd></div></dl>
+            <small>{comfyStatus.url}</small>
+            {#if !comfyStatus.checking&&!comfyStatus.available}<p class="error">Start ComfyUI or check the configured server URL.</p>{/if}
+            <button onclick={()=>goToError(comfyStatus.path)}>Server settings</button>
+          </section>
+        {/if}
+        {#if selected==='model'||!schema?.workflows}
+          <section class="model-readiness" aria-label="Model setup">
+            <h3>Required model files</h3>
+            {#if !requiredLoading&&!requiredError&&!missingModels}<p class="setup-success">Required files are present.</p>{/if}
+            <RequiredModels files={requiredModels} loading={requiredLoading} error={requiredError}
+              busy={preparing||['queued','running'].includes(preparation?.state)||renderActive} ondownload={downloadRequired}/>
+            <DownloadProgress files={downloadFiles} onaction={controlDownload}/>
+            {#if preparation?.error||preparationError}<p class="error" role="alert">{preparation?.error||preparationError}</p>{/if}
+          </section>
+        {/if}
+        {#if conditioningConflict}<div class="notice warning" role="alert"><strong>Resolve this combination before rendering</strong><p>{conditioningConflict}</p><button onclick={()=>setIn('contact_sheet','mode','off')}>Turn off contact sheets</button></div>{/if}
+        {#if query.trim()}
+          {#if !hits.length}<div class="workspace-empty">No editable settings match “{query}”.</div>{/if}
+          {#each hits as item (item.section+'.'+item.name)}
+            {#if fieldEditor(item,fieldLocation(item))||custom[fieldGroup(item,fieldLocation(item))]}<button class="search-result" onclick={()=>{chooseWorkflow(fieldLocation(item));setGroupOpen(selected,fieldGroup(item,selected),true);}}><b>{item.schema.label||pretty(item.name)}</b><small>{tierLabel(fieldLocation(item))} / {fieldGroup(item,fieldLocation(item))}</small></button>
+            {:else}<div class="search-result-field"><small>{tierLabel(fieldLocation(item))} / {fieldGroup(item,fieldLocation(item))}</small>{@render editField(item)}</div>{/if}
+          {/each}
+        {:else}
+          <div class="groups">
+            {#each groups as group (selected+':'+group.name)}
+              {@const only=group.editor||custom[group.name]}
+              <details class="panel group" data-tier={selected} open={groupIsOpen(selected,group.name)} ontoggle={(event)=>setGroupOpen(event.currentTarget.dataset.tier,group.name,event.currentTarget.open)}>
+                <summary><span>{group.name}</span>{#if only&&enabledDot(only)}<i></i>{/if}</summary>
+                <div class="group-fields" id={only&&only!=='video'&&group.items[0]?`field-${group.items[0].section}-${group.items[0].name}`:undefined}>
+                  {#if only==='video'}
+                    <VideoEditor value={config.video} errors={sectionErrors('video')} modelVersion={config.model_version}
+                      discoReference={config.disco?.sampler==='distilled'&&config.disco?.distilled_guided===false}
+                      onchange={(value)=>setField('video',value)} frameRange={config.frame_range} onFrameRange={(value)=>setField('frame_range',value)}/>
+                    {#each group.items.filter(item=>item.name==='keyframes_relative_to_frame_range') as item}{@render editField(item)}{/each}
+                  {:else if only==='controlnet'}
+                    <ControlNetEditor value={config.controlnet} schema={schema.properties.controlnet} modelVersion={config.model_version} onchange={(value)=>setField('controlnet',value)}/>
+                  {:else if only==='ipadapter'}
+                    <IPAdapterEditor value={config.ipadapter} schema={schema.properties.ipadapter} onchange={(value)=>setField('ipadapter',value)} modelVersion={config.model_version}
+                      modelDir={config.controlnet?.model_dir} videoPath={config.video?.video_init_path} frameRange={config.frame_range} extractNth={config.video?.extract_nth_frame}/>
+                  {:else if only==='references'}
+                    {@const refItem=group.items.find(item=>item.name==='references')}
+                    {#if refItem}<ReferenceImagesEditor value={config[refItem.section]?.references} onchange={(value)=>setIn(refItem.section,'references',value)}
+                      labelOpacity={config.reference_label_opacity} onLabelOpacityChange={(value)=>setField('reference_label_opacity',value)}
+                      videoPath={config.video?.video_init_path} frameRange={config.frame_range} extractNth={config.video?.extract_nth_frame}
+                      maxReferences={schema.max_edit_references?.[activeModelFamily]??10} sourceLabels={schema.edit_reference_sources}/>{/if}
+                  {:else}
+                    {#each group.items.filter(item=>!item.schema.workspace_advanced) as item (item.section+'.'+item.name)}{@render editField(item)}{/each}
+                    {#if group.items.some(item=>item.schema.workspace_advanced)}
+                      <details class="expert-fields" open={group.items.every(item=>item.schema.workspace_advanced)}><summary>Advanced controls</summary><div>{#each group.items.filter(item=>item.schema.workspace_advanced) as item (item.section+'.'+item.name)}{@render editField(item)}{/each}</div></details>
+                    {/if}
+                    {#if group.items.some(item=>item.schema.preview==='raw_video')}<RawVideoPreview {config} {job} onjob={trackJob}/>{/if}
+                  {/if}
+                </div>
+              </details>
+            {/each}
+          </div>
+        {/if}
+        {#if selected==='model'&&!seenFirstFrame}<details class="supporter-details" open><summary>Support VibeWarp</summary><Supporters/></details>{/if}
+      </div>
+    </aside>
+  </main>
+  <div class="mobile-tabs" role="tablist" aria-label="Workspace views">
+    <button role="tab" aria-selected={mobileView==='viewer'&&mode==='render'} onclick={()=>{mobileView='viewer';mode='render';}}>Viewer</button>
+    <button role="tab" aria-selected={mobileView==='settings'} onclick={()=>{mobileView='settings';mode='render';if(viewerMode==='inspect')viewerMode='compare';}}>Settings</button>
+    <button role="tab" aria-selected={mode==='preview'&&mobileView!=='settings'} onclick={()=>{mode='preview';mobileView='viewer';}}>Runs</button>
+  </div>
+  <footer class="statusbar" aria-label="Render status">
+    <span class="status-dot" class:live={renderActive} class:failed={job?.state==='failed'||errors.length}></span>
+    {#if errors.length}<button class="status-link error" onclick={()=>goToError(errors[0].path)}>{errors.length} input error{errors.length===1?'':'s'}</button>
+    {:else}<span class="status-message">{job?.message||'Ready for the next render'}</span>{/if}
+    {#if job}<span class="status-numbers">{Math.round(job.progress||0)}%{#if job.total_frames} · {job.frame} / {job.total_frames}{/if}</span>{/if}
+    {#if eta!==null}<span class="status-eta" title="Estimated time remaining from render progress logs">{eta===0&&job.eta_seconds>0?'ETA updating…':`ETA ${formatEta(eta)}`}</span>{/if}
+    <button class="status-link" onclick={openModelSetup}>{pendingDownloads?`${pendingDownloads} model downloads`:missingModels?`${missingModels} missing model files`:'Model setup'}</button>
+    <button class="log-toggle" onclick={()=>logCollapsed=!logCollapsed} aria-expanded={!logCollapsed} aria-controls="output-log">{logCollapsed?'Show log':'Hide log'}</button>
+  </footer>
+  {#if !logCollapsed}<OutputLog logs={job?.logs||[]} revision={job?.revision||0}/>{/if}
+</div>

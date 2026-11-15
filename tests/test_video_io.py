@@ -23,6 +23,32 @@ class TestFitDimensions:
 
 
 class TestExtractFrames:
+    @pytest.mark.parametrize('selected,stride,start,end,number', [
+        ([0,10],2,0,20,1), ([3,10],2,6,20,4),
+        ([3],2,6,6,4), ([0],2,0,0,1),
+        ([0,0],2,0,999999999,1), ([3,0],2,6,999999999,4),
+        ([60,70],1,60,70,61), ([],1,0,999999999,1),
+    ])
+    def test_render_selection_maps_to_source_indices_and_output_numbers(
+            self,monkeypatch,tmp_path,selected,stride,start,end,number):
+        import vibewarp.video.input as video_input
+        captured=self._capture_ffmpeg(monkeypatch,video_input,f'{number:06d}.jpg')
+        extract_frames('input.mp4',str(tmp_path),nth_frame=stride,
+                       **video_input.extraction_selection(selected,stride))
+        cmd=captured['cmd']; selection=cmd[cmd.index('-vf')+1]
+        assert f'between(n\\,{start}\\,{end})' in selection
+        assert f'not(mod(n\\,{stride}))' in selection
+        assert cmd[cmd.index('-start_number')+1]==str(number)
+
+    def test_source_seek_can_keep_the_selected_render_frame_number(self, monkeypatch, tmp_path):
+        import vibewarp.video.input as video_input
+        captured = self._capture_ffmpeg(monkeypatch, video_input, '000004.jpg')
+        extract_frames('input.mp4', str(tmp_path), nth_frame=2,
+                       start_frame=6, end_frame=6, start_number=4)
+        cmd = captured['cmd']
+        assert cmd[cmd.index('-start_number') + 1] == '4'
+        assert 'between(n\\,6\\,6)' in cmd[cmd.index('-vf') + 1]
+
     @staticmethod
     def _capture_ffmpeg(monkeypatch, video_input, extracted_name):
         import types

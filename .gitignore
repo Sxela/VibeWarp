@@ -210,6 +210,15 @@ notebook_dump.txt
 
 # Render output
 images_out/
+/image_out/
+/renders/
+/outputs/
+/artifacts/
+/temp/
+/tmp/
+/cache/
+/logs/
+/video_frames/
 
 # Model weights and checkpoints
 # Anchored to the repo root so it ignores the downloaded-weights folder only,
@@ -245,3 +254,9 @@ system.json
 
 # Machine-specific GPU validation manifests (copy from *.example.json).
 /configs/*.local.json
+
+# Local test and package caches
+.test-tmp*/
+webui/.npm-cache/
+.test-tmp-cutout-parity-1106
+.taste-skill/

@@ -194,6 +194,23 @@ class TestRunFramesAnimatediff:
         assert progress[-1] == (21, 21)
         assert [current for current, _ in progress] == list(range(1, 22))
 
+    def test_after_diffusion_mask_applies_once_to_saved_batch_outputs(self,tmp_path):
+        from types import SimpleNamespace
+        ctx=self._ctx(tmp_path,frames=3,batch_length=4,overlap=0,context_length=4)
+        ctx.config.mask.use_background_mask=True
+        ctx.config.mask.render_mask_stage='after diffusion'
+        ctx.config.mask.background='color';ctx.config.mask.background_source='black'
+        alpha=tmp_path/'alpha';alpha.mkdir()
+        for frame in range(4):np.save(alpha/f'{frame:06d}.npy',np.full((64,64),.5,np.float16))
+        ctx.raw_video_cache=SimpleNamespace(alpha=alpha)
+        from vibewarp.video.masks import materialize
+        materialize(ctx.config,ctx.video_frames_folder,ctx.batch_folder,ctx.raw_video_cache)
+        with patch('vibewarp.core.diffusion._adiff_run_batch') as render:
+            render.side_effect=lambda context,frames,*a,**kw:[Image.new('RGB',(64,64),'white') for _ in frames]
+            paths=run_frames_animatediff(ctx,frame_range=[0,3])
+        for path in paths:
+            with Image.open(path) as image:assert image.getpixel((32,32))==(128,128,128)
+
     def test_refuses_fewer_frames_than_a_context_window(self, tmp_path):
         """A window shorter than context_length would rearrange to the wrong
         temporal size inside the motion module."""

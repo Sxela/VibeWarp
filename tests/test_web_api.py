@@ -91,7 +91,7 @@ def test_submit_and_read_job(tmp_path):
 
 def test_submit_returns_field_errors():
     client = TestClient(create_app(JobManager(runner=lambda *_args, **_kwargs: [])))
-    response = client.post("/api/jobs", json=asdict(RunConfig()))
+    response = client.post("/api/jobs", json=asdict(RunConfig(model_version='control_multi_sdxl')))
     assert response.status_code == 422
     paths = {error["path"] for error in response.json()["detail"]}
     assert {"sd_checkpoint_path", "video.video_init_path"} <= paths
@@ -391,3 +391,17 @@ def test_video_thumbnail_can_request_the_first_frame_of_a_render_range(
     assert response.status_code == 200
     assert response.headers['x-frame-index'] == '18'
     assert calls == [(str(video), 18)]
+
+
+def test_source_frame_download_keeps_original_resolution(tmp_path, monkeypatch):
+    import numpy as np
+    import vibewarp.web as web
+    video = tmp_path / 'input.mp4'
+    video.write_bytes(b'placeholder')
+    monkeypatch.setattr(web, 'frame_at', lambda _path, frame: (
+        frame, np.full((720, 1280, 3), 127, dtype=np.uint8)))
+    client = TestClient(create_app(JobManager(runner=lambda *_a, **_k: [])))
+    response = client.get('/api/video/thumbnail', params={
+        'path': str(video), 'frame': 18, 'download': True})
+    assert response.headers['content-disposition'] == 'attachment; filename="source-000018.jpg"'
+    assert Image.open(io.BytesIO(response.content)).size == (1280, 720)

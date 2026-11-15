@@ -1,9 +1,11 @@
-"""Qwen contact-sheet geometry, planning, and render-loop tests."""
+"""Contact-sheet geometry, planning, and render-loop tests."""
 
 import json
 from pathlib import Path
 
 import pytest
+import numpy as np
+from types import SimpleNamespace
 from PIL import Image
 
 from vibewarp.config import EditReferenceConfig, RunConfig, VideoConfig
@@ -173,6 +175,28 @@ def test_raw_contact_sheet_renders_three_then_two_frames(tmp_path):
     assert all(len(call['reference_images']) == 1 for call in backend.calls)
     assert progress == [(1, 5), (2, 5), (3, 5), (4, 5), (5, 5)]
     assert all(Path(path).is_file() for path in paths)
+
+
+@pytest.mark.parametrize('stage',['before diffusion','after diffusion'])
+def test_contact_sheet_render_mask_is_applied_at_only_the_selected_boundary(tmp_path,monkeypatch,stage):
+    from vibewarp.core import diffusion
+    ctx,backend=_make_context(tmp_path,'raw_triplets',3)
+    ctx.config.mask.use_background_mask=True;ctx.config.mask.render_mask_stage=stage
+    ctx.config.mask.background='color';ctx.config.mask.background_source='black'
+    alpha=tmp_path/'alpha';alpha.mkdir()
+    for index in range(3):np.save(alpha/f'{index:06d}.npy',np.full((36,64),.5,np.float16))
+    ctx.raw_video_cache=SimpleNamespace(alpha=alpha)
+    from vibewarp.video.masks import materialize
+    materialize(ctx.config,ctx.video_frames_folder,ctx.batch_folder,ctx.raw_video_cache)
+    events=[];original=diffusion._apply_render_bg_mask
+    def mask(*args,**kwargs):events.append('mask');return original(*args,**kwargs)
+    monkeypatch.setattr(diffusion,'_apply_render_bg_mask',mask)
+    def render(**kwargs):events.append('diffusion');return Image.new('RGB',kwargs['edit_image'].size,'white')
+    backend.render=render
+    paths=run_frames(ctx,frame_range=[0,2])
+    assert events==(['mask']*3+['diffusion'] if stage=='before diffusion' else ['diffusion']+['mask']*3)
+    for path in paths:
+        with Image.open(path) as image:assert image.getpixel((32,18))==((255,255,255) if stage=='before diffusion' else (128,128,128))
 
 
 def test_reinject_contact_sheet_uses_two_anchors_and_discards_echoes(tmp_path):

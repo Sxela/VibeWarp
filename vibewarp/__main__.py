@@ -32,6 +32,8 @@ from vibewarp.config import (
     SceneConfig,
     FreeUConfig,
     VideoAssemblyConfig,
+    DiscoConfig,
+    TurboConfig,
 )
 
 
@@ -61,7 +63,10 @@ def parse_args(argv=None):
     parser.add_argument('--checkpoint', type=str, default='',
                         help='Path to SD checkpoint (.safetensors or .ckpt)')
     parser.add_argument('--model-version', type=str, default='control_multi_v15',
-                        help='Model version (control_multi_v15, v1_5, v2_1)')
+                        help='Model version, e.g. control_multi_v15, control_multi_sdxl, disco_512, disco_256')
+    parser.add_argument('--turbo', action='store_true', help='Enable flow turbo')
+    parser.add_argument('--turbo-interval', type=int, default=3, help='Diffuse every Nth turbo frame')
+    parser.add_argument('--turbo-preroll', type=int, default=10, help='Full diffusion preroll frames')
 
     # Output
     parser.add_argument('--output-dir', type=str, default='images_out',
@@ -136,6 +141,11 @@ def config_from_args(args) -> RunConfig:
         batch_name=args.batch_name,
         text_prompts={0: args.prompt},
         negative_prompts={0: args.negative_prompt},
+        disco=DiscoConfig(
+            checkpoint_path=args.checkpoint if args.model_version.startswith('disco_') else '',
+            steps=args.steps, style_strength=args.style_strength,
+            sampler=args.sampler if args.sampler in ('ddim', 'plms') else 'ddim'),
+        turbo=TurboConfig(enabled=args.turbo, interval=args.turbo_interval, preroll=args.turbo_preroll),
         frame_range=[args.start_frame, args.end_frame],
         diffusion=DiffusionConfig(
             steps=args.steps,
@@ -163,12 +173,22 @@ def config_from_args(args) -> RunConfig:
 def main(argv=None):
     # Force unbuffered output so progress is visible
     import functools
-    print = functools.partial(__builtins__.__dict__['print'] if isinstance(__builtins__, dict) else getattr(__builtins__, 'print'), flush=True)
+    import builtins
+    print = functools.partial(builtins.print, flush=True)
 
     args = parse_args(argv)
 
     # Model download mode — resolve models_root, then download and exit
     if args.download_models or args.download_cn_only or args.download_ckpt_only:
+        if args.download_models and (args.config or args.model_version.startswith('disco_')):
+            from vibewarp.model_assets import ensure_selected_assets
+            from vibewarp.acquisition import install_download_hooks
+            config = config_from_json(args.config) if args.config else config_from_args(args)
+            if args.models_root:
+                config.model_path = args.models_root
+            install_download_hooks()
+            ensure_selected_assets(config)
+            return
         from vibewarp.core.download import download_models, DEFAULT_CKPT_SAVE_AS
         # Default to a ./models folder under the current working directory —
         # no hardcoded absolute path.

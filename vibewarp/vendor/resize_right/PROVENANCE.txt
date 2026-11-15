@@ -1,0 +1,7 @@
+Source: https://github.com/assafshocher/ResizeRight
+Revision: 510d4d5b67dccf4efdee9f311ed42609a71f17c5
+Existing vendored code matches this notebook dependency except the package-qualified interp_methods import.
+Used by Disco Dango cutouts as well as existing SD code.
+Source SHA256:
+resize_right.py: e500a4b2cae02aea4c9b2f96db740ebc7e03b61b1a257735ba4cc177320161c9
+interp_methods.py: b317e70ad666f96091fce67ba9a0f0475331088228911ca5a83d27566d64a6b5
