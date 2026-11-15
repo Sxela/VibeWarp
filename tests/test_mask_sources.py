@@ -156,7 +156,7 @@ def test_schema_puts_mask_source_and_path_next_to_the_mask_switch():
         assert props[name]['group'] == props['use_background_mask']['group']
 
 
-def test_assembly_reads_materialized_png_masks_and_warns_when_there_are_none(tmp_path, capsys):
+def test_assembly_reads_materialized_png_masks_and_warns_when_there_are_none(tmp_path, capsys, monkeypatch):
     from vibewarp.video.output import apply_video_mask, create_video
     cfg, run, video_frames = _run(tmp_path, frames=(0,))
     folder = Path(masks.run_mask_folder(video_frames))
@@ -166,13 +166,24 @@ def test_assembly_reads_materialized_png_masks_and_warns_when_there_are_none(tmp
     assert out.getpixel((4, 4)) == (0, 0, 0)
     (folder / '000001.png').unlink()
     Image.new('RGB', (8, 8), 'white').save(run / 'clip(0)_000000.png')
-    try:
-        create_video(frames_dir=str(run), output_path=str(run / 'clip.mp4'), batch_name='clip',
-                     img_format='png', blend_mode='None', use_background_mask_video=True,
-                     video_frames_folder=str(video_frames), keep_audio=False)
-    except Exception:
-        pass  # ffmpeg availability is not what this test is about
+
+    # Exercise mask handling without depending on an installed FFmpeg or codec.
+    commands = []
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(returncode=0, stderr='',
+                               stdout='libx264' if '-encoders' in cmd else '')
+    monkeypatch.setattr('vibewarp.video.input._find_ffmpeg', lambda: 'ffmpeg')
+    monkeypatch.setattr('vibewarp.video.output.subprocess.run', fake_run)
+
+    output_path = str(run / 'clip.mp4')
+    assert create_video(frames_dir=str(run), output_path=output_path, batch_name='clip',
+                        img_format='png', blend_mode='None', use_background_mask_video=True,
+                        video_frames_folder=str(video_frames), keep_audio=False) == output_path
     assert 'has no masks' in capsys.readouterr().out
+    assert [cmd[-1] for cmd in commands if '-c:v' in cmd] == [output_path]
+    with Image.open(run / 'blend_temp' / '000000.png') as frame:
+        assert frame.getpixel((4, 4)) == (255, 255, 255)
 
 
 @pytest.mark.parametrize('raw,source,path', [
