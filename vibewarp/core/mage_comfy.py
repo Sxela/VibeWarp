@@ -123,7 +123,7 @@ class ComfyMageFlowEditClient(ComfyFluxClient):
             }},
             '36': {'class_type': 'VAEDecode', 'inputs': {
                 'samples': ['35', 0], 'vae': ['3', 0]}},
-            '37': {'class_type': 'PreviewImage', 'inputs': {
+            self.output_node_id: {'class_type': 'PreviewImage', 'inputs': {
                 'images': ['36', 0]}},
         })
         return graph
@@ -140,6 +140,7 @@ class ComfyMageFlowEditClient(ComfyFluxClient):
         reference_images: list[Image.Image] | None = None,
         debug_dir: str | None = None,
         frame_num: int | None = None,
+        temporal_frame=None,
     ) -> Image.Image:
         mage = config.mage
         preset = mage_model_defaults(config)
@@ -156,6 +157,8 @@ class ComfyMageFlowEditClient(ComfyFluxClient):
             uploaded, prompt, negative_prompt, seed, width, height,
             int(preset['steps']), float(preset['guidance_scale']),
             mage.sampler, mage.scheduler)
+        if temporal_frame is not None:
+            temporal_frame.prepare(self, graph, config)
         progress = ComfyProgressMonitor(
             getattr(self, 'base_url', ''), self.client_id, graph)
         progress.start()
@@ -167,7 +170,10 @@ class ComfyMageFlowEditClient(ComfyFluxClient):
                 raise RuntimeError(f"ComfyUI returned no prompt_id: {result}")
             progress.set_prompt_id(prompt_id)
             self._active_progress = progress
-            return self._wait_for_output(prompt_id)
+            image = self._wait_for_output(prompt_id)
+            if temporal_frame is not None:
+                temporal_frame.record(self, prompt_id, config)
+            return image
         finally:
             progress.close()
             self._active_progress = None

@@ -32,7 +32,8 @@ def test_config_endpoint_exposes_complete_defaults_and_schema():
     assert "video_assembly" in body["schema"]["properties"]
 
 
-def test_config_endpoint_prefills_flux_9b_model_files():
+def test_config_endpoint_prefills_flux_9b_model_files(tmp_path, monkeypatch):
+    monkeypatch.setenv('VIBEWARP_HOME', str(tmp_path))
     initial = RunConfig(model_version='flux2_klein_9b_edit')
     client = TestClient(create_app(
         JobManager(runner=lambda *_args, **_kwargs: []),
@@ -44,7 +45,8 @@ def test_config_endpoint_prefills_flux_9b_model_files():
         'qwen_3_8b_fp8mixed.safetensors'
 
 
-def test_config_endpoint_prefills_qwen_gguf_model_file():
+def test_config_endpoint_prefills_qwen_gguf_model_file(tmp_path, monkeypatch):
+    monkeypatch.setenv('VIBEWARP_HOME', str(tmp_path))
     initial = RunConfig(model_version='qwen_image_edit_2511_gguf')
     client = TestClient(create_app(
         JobManager(runner=lambda *_args, **_kwargs: []),
@@ -54,6 +56,14 @@ def test_config_endpoint_prefills_qwen_gguf_model_file():
 
     assert body['defaults']['qwen']['comfy_unet_name'] == \
         'Qwen-Image-Edit-2511-Q5_K_M.gguf'
+
+
+def test_config_endpoint_prefills_mage_turbo_on_a_fresh_install(tmp_path, monkeypatch):
+    monkeypatch.setenv('VIBEWARP_HOME', str(tmp_path))
+    client = TestClient(create_app(initial_config=RunConfig(model_version='mage_flow_edit_turbo')))
+    mage = client.get('/api/config').json()['defaults']['mage']
+    assert mage['comfy_unet_name'] == 'mage_flow_edit_turbo_int8_convrot.safetensors'
+    assert mage['steps'] == 4
 
 
 def test_config_endpoint_uses_startup_settings():

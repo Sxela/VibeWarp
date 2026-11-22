@@ -96,6 +96,13 @@ than a noised img2img latent.
 See [Flux settings](settings.md#flux-2-klein-edit) and [HiDream
 settings](settings.md#hidream-o1-edit).
 
+Sequential samplers can also carry the previous rendered sample into denoising.
+The warp stage passes backward flow and consistency at their native resolution.
+SD and Disco read the preceding sample from frame state or a local resume
+checkpoint. ComfyUI saves the sample that feeds its decoder and VibeWarp records
+the server's latent filename. A per-frame model patch applies the correction
+after classifier-free guidance. [Flow-masked temporal guidance](settings.md#flow-masked-temporal-guidance).
+
 ## Configuration and settings flow
 
 All entry points resolve to the same `RunConfig`. WarpFusion settings retain

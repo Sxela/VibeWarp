@@ -56,7 +56,11 @@ class DownloadManager:
 
     def _specs(self, config):
         specs=[]
-        for asset in selected_assets(config):
+        from vibewarp.comfy_inventory import model_specs, required_comfy_files
+        url, _ = model_specs(config)
+        remote = required_comfy_files(config) if url else None
+        assets = selected_assets(config, comfy_files=remote) if remote is not None else selected_assets(config)
+        for asset in assets:
             specs.append(((asset.path,asset.url,asset.sha256),Path(asset.path).name,asset.path,'asset',
                 lambda asset=asset:acquire(asset.url,asset.path,sha256=asset.sha256)))
         if config.model_version.startswith('disco_') and (config.disco.sampler != 'distilled' or config.disco.distilled_guided):

@@ -283,7 +283,8 @@ class DiscoBackend:
             learn_sigma=True, rescale_timesteps=True, timestep_respacing=f'ddim{steps}')
 
     def render(self, config, init_image, prompt, negative_prompt, seed, *, frame_num=0,
-               mask=None, strength=None, preview_path=None, guidance_image=None, mask_guidance=None, trust_mask=None):
+               mask=None, strength=None, preview_path=None, guidance_image=None, mask_guidance=None, trust_mask=None,
+               temporal_target=None, return_sample=False):
         self.config = config
         d, diffusion = config.disco, self.diffusion
         if mask_guidance is None:
@@ -458,6 +459,21 @@ class DiscoBackend:
         options = dict(noise=noise, clip_denoised=False, cond_fn=cond_fn, model_kwargs={},
             device=self.device, progress=False, skip_timesteps=skip, init_image=init,
             mask=mask if d.inpaint else None, inpainting_stop=inpainting_stop)
+        if temporal_target is not None:
+            from vibewarp.core.comfy_temporal_guidance import project
+            target_pixels, projection_mask = (t.to(self.device) for t in temporal_target)
+            by_size = {}
+            def correct(clean):
+                fraction = executed_step[0] / max(1, total - 1)
+                if not config.flow.temporal_guidance_start <= fraction <= config.flow.temporal_guidance_end:
+                    return clean
+                size = clean.shape[-2:]
+                if size not in by_size:
+                    by_size[size] = (F.interpolate(target_pixels, size=size, mode='area'),
+                                     F.interpolate(projection_mask.float(), size=size, mode='area') >= .999)
+                target, mask = by_size[size]
+                return project(clean, target, mask, config.flow.temporal_guidance_strength)
+            options['denoised_fn'] = correct
         if sampler_name == 'ddim':
             options['eta'] = d.eta
         result = None
@@ -465,7 +481,8 @@ class DiscoBackend:
         cap_stats = {}
         samples = (progressive_disco_samples(diffusion, denoiser, init, noise, sizes,
                     skip=skip, sampler=sampler_name, cond_fn=cond_fn, eta=d.eta,
-                    mask=mask if d.inpaint else None, inpainting_stop=inpainting_stop)
+                    mask=mask if d.inpaint else None, inpainting_stop=inpainting_stop,
+                    denoised_fn=options.get('denoised_fn'))
                    if progressive else sampler(denoiser, tuple(init.shape), **options))
         from vibewarp.core.disco_repeated import install_multi_guidance
         install_multi_guidance(diffusion, d.clip_grad_steps, d.clip_divide_cuts, d.cutn_batches)
@@ -491,7 +508,8 @@ class DiscoBackend:
                 executed_step[0] = step + 1
         if not torch.isfinite(result).all():
             raise FloatingPointError('Nonfinite Disco sampler output')
-        return tensor_image(result)
+        image = tensor_image(result)
+        return (image, result.detach()) if return_sample else image
 
 
 def tensor_image(tensor):
@@ -546,10 +564,21 @@ def render_disco_frame(ctx, state):
         kernel = max(1, config.disco.inpaint_mask_blur) | 1
         mask = cv2.GaussianBlur(mask.astype(np.float32), (kernel, kernel), config.disco.inpaint_mask_sigma)
         mask = (mask >= config.disco.inpaint_mask_threshold).astype(np.float32)
+    temporal = {}
+    if config.flow.temporal_guidance_strength:
+        from vibewarp.core.temporal_projection import native_target, save_native_history
+        def encode_initial(image):
+            pixels = torch.from_numpy(np.array(image.convert('RGB'))).permute(2, 0, 1)
+            return pixels[None].float() / 127.5 - 1
+        temporal = {'temporal_target': native_target(ctx, state, encode_initial, ctx.disco_backend.device),
+                    'return_sample': True}
     result = ctx.disco_backend.render(config, init, prompt, negative, seed,
         frame_num=frame, mask=mask,
         guidance_image=guidance, mask_guidance=mask_guidance, trust_mask=trust,
         strength=getattr(ctx, '_turbo_strength', None),
-        preview_path=str(Path(ctx.batch_folder) / 'temp' / 'denoise_preview.png'))
+        preview_path=str(Path(ctx.batch_folder) / 'temp' / 'denoise_preview.png'), **temporal)
+    if temporal:
+        result, state.prev_latent = result
+        save_native_history(ctx, state, state.prev_latent)
     state.prev_frame = result
     return result

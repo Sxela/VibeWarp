@@ -7,6 +7,56 @@ from vibewarp.config_io import apply_path_defaults, validate_config
 from vibewarp.video.input import fit_dimensions
 
 
+@pytest.mark.parametrize('version', ['control_multi_v15', 'flux2_klein_edit', 'hidream_o1_edit',
+    'qwen_image_edit_2511', 'mage_flow_edit', 'flux3_klein', 'moss_image', 'minimax_h3_image'])
+@pytest.mark.parametrize('padding', [False, True])
+def test_other_models_ignore_preserved_disco_canvas_settings(version, padding):
+    from vibewarp.config_io import config_from_dict
+    config = config_from_dict({'model_version': version})
+    config.disco.pad_to_multiple_64 = padding
+    config.video.visible_width, config.video.visible_height = 1080, 1920
+    config.video_assembly.crop_to_visible = True
+    assert not validate_config(config, require_inputs=False, check_paths=False)
+    assert (config.video.visible_width, config.video.visible_height) == (1080, 1920)
+    assert config.video_assembly.crop_to_visible
+
+
+def test_disco_still_requires_padding_for_visible_geometry():
+    config = RunConfig(model_version='disco_512')
+    config.video.visible_width, config.video.visible_height = 1080, 1920
+    config.video_assembly.crop_to_visible = True
+    errors = validate_config(config, require_inputs=False, check_paths=False)
+    assert any(e['path'] == 'video.visible_width' for e in errors)
+    assert any(e['path'] == 'video_assembly.crop_to_visible' for e in errors)
+
+
+@pytest.mark.parametrize('version', ['control_multi_v15', 'flux3_klein', 'moss_image', 'minimax_h3_image'])
+def test_other_models_never_export_using_disco_crop(tmp_path, monkeypatch, version):
+    from vibewarp import pipeline
+    config = RunConfig(model_version=version)
+    config.video_assembly.fps = 24
+    config.video.visible_width, config.video.visible_height = 1080, 1920
+    config.disco.pad_to_multiple_64 = True
+    config.video_assembly.crop_to_visible = True
+    captured = {}
+    monkeypatch.setattr(pipeline, 'create_video', lambda **kwargs: captured.update(kwargs) or 'out.mp4')
+    assert pipeline.assemble_video(config, str(tmp_path)) == 'out.mp4'
+    assert captured['visible_size'] is None
+
+
+def test_disco_export_keeps_requested_crop(tmp_path, monkeypatch):
+    from vibewarp import pipeline
+    config = RunConfig(model_version='disco_512')
+    config.video_assembly.fps = 24
+    config.video.visible_width, config.video.visible_height = 1080, 1920
+    config.disco.pad_to_multiple_64 = True
+    config.video_assembly.crop_to_visible = True
+    captured = {}
+    monkeypatch.setattr(pipeline, 'create_video', lambda **kwargs: captured.update(kwargs) or 'out.mp4')
+    pipeline.assemble_video(config, str(tmp_path))
+    assert captured['visible_size'] == (1080, 1920)
+
+
 @pytest.mark.parametrize('width,height,maximum,expected',[
     (1280,720,768,(768,448)),(1920,1080,1000,(1024,576)),
     (720,1280,768,(448,768)),(512,512,512,(512,512)),
@@ -61,6 +111,33 @@ def test_exact_unconditional_profile_keeps_fixed_reference_dimensions():
     assert config.video.max_size==0
     assert (config.video.width,config.video.height)==(512,512)
     assert not validate_config(config,require_inputs=False)
+
+
+@pytest.mark.parametrize('version,expected', [
+    ('flux3_klein', (768, 432)), ('moss_image', (768, 432)), ('minimax_h3_image', (768, 448)),
+])
+def test_comfy_source_sizing_ignores_manual_dimensions_and_aligns_canvas(tmp_path, monkeypatch, version, expected):
+    from vibewarp import pipeline
+    config = RunConfig(model_version=version)
+    video = tmp_path / 'source.mp4'
+    video.touch()
+    config.video.video_init_path = str(video)
+    config.video.width = 513
+    assert any(error['path'] == 'video.width' for error in validate_config(config, require_inputs=False))
+    config.video.max_size = 768
+    monkeypatch.setattr(pipeline, 'resolve_video_dimensions',
+                        lambda path, size, **options: fit_dimensions(1920, 1080, size, **options))
+
+    class ReachedSetup(Exception):
+        pass
+
+    def setup(config, **kwargs):
+        assert (config.video.width, config.video.height) == expected
+        raise ReachedSetup
+
+    monkeypatch.setattr(pipeline, 'setup_directories', setup)
+    with pytest.raises(ReachedSetup):
+        pipeline.run(config)
 
 
 def test_direct_disco_render_rounds_input_and_guidance_mask():

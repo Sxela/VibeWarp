@@ -50,6 +50,18 @@ describe('validation errors', () => {
 });
 
 describe('probing the video', () => {
+  it('updates the canvas when model alignment changes and matches Python half-even rounding', async () => {
+    mockProbe({source: {...PROBE.source, width: 1280, height: 600}});
+    const props = {value: {...video, video_init_path: 'clip.mp4', max_size: 512}, onchange: vi.fn()};
+    const {container, rerender} = render(VideoEditor, {...props, dimensionMultiple: 16});
+    await waitFor(() => expect(container.querySelector('.hi')).toHaveTextContent('512×240'));
+    await rerender({...props, dimensionMultiple: 32});
+    await waitFor(() => expect(container.querySelector('.hi')).toHaveTextContent('512×256'));
+    // 208 / 32 = 6.5. The nearer even multiple is 192.
+    mockProbe({source: {...PROBE.source, width: 1280, height: 520}});
+    await rerender({...props, value: {...props.value, video_init_path: 'other.mp4'}, dimensionMultiple: 32});
+    await waitFor(() => expect(container.querySelector('.hi')).toHaveTextContent('512×192'));
+  });
   it('uses the selected range even when old browser data contains a retired cap',async()=>{
     mockProbe();
     const {container}=render(VideoEditor,{value:{...video,video_init_path:'C:/clip.mp4',max_frames:1},frameRange:[0,10],onchange:vi.fn()});

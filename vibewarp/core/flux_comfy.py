@@ -28,6 +28,8 @@ class ComfyFluxError(RuntimeError):
 class ComfyFluxClient:
     """Synchronous client for the distilled FLUX.2 Klein Comfy workflow."""
 
+    output_node_id = '37'
+
     def __init__(self, config: Any):
         fx = config.flux
         files = flux_model_files(config)
@@ -163,7 +165,7 @@ class ComfyFluxClient:
                 'sigmas': ['33', 0], 'latent_image': ['30', 0]}},
             '36': {'class_type': 'VAEDecode', 'inputs': {
                 'samples': ['35', 0], 'vae': ['3', 0]}},
-            '37': {'class_type': 'PreviewImage', 'inputs': {'images': ['36', 0]}},
+            self.output_node_id: {'class_type': 'PreviewImage', 'inputs': {'images': ['36', 0]}},
         })
         return graph
 
@@ -188,7 +190,7 @@ class ComfyFluxClient:
                 if status.get('status_str') == 'error':
                     raise ComfyFluxError(
                         f"ComfyUI execution failed: {status.get('messages', status)}")
-                images = item.get('outputs', {}).get('37', {}).get('images', [])
+                images = item.get('outputs', {}).get(self.output_node_id, {}).get('images', [])
                 if images:
                     ref = images[0]
                     response = self._request('GET', '/view', params={
@@ -201,7 +203,8 @@ class ComfyFluxClient:
                     return image.convert('RGB')
                 if status.get('completed'):
                     raise ComfyFluxError(
-                        "ComfyUI completed the Flux graph without an image output")
+                        f"ComfyUI completed prompt {prompt_id} without an image at output node "
+                        f"{self.output_node_id}; returned output nodes: {list(item.get('outputs', {}))}")
             time.sleep(0.25)
         raise ComfyFluxError(
             f"Timed out after {self.timeout:g}s waiting for ComfyUI prompt {prompt_id}")
@@ -217,6 +220,7 @@ class ComfyFluxClient:
         reference_images: list[Image.Image] | None = None,
         debug_dir: str | None = None,
         frame_num: int | None = None,
+        temporal_frame=None,
     ) -> Image.Image:
         references, prompt = prepare_flux_references(
             config, edit_image, prompt, reference_images=reference_images)
@@ -226,6 +230,8 @@ class ComfyFluxClient:
         graph = self._build_prompt(
             uploaded, prompt, seed, width, height,
             config.flux.steps, config.flux.guidance_scale)
+        if temporal_frame is not None:
+            temporal_frame.prepare(self, graph, config)
         progress = ComfyProgressMonitor(
             getattr(self, 'base_url', ''), self.client_id, graph)
         progress.start()
@@ -237,7 +243,10 @@ class ComfyFluxClient:
                 raise ComfyFluxError(f"ComfyUI returned no prompt_id: {result}")
             progress.set_prompt_id(prompt_id)
             self._active_progress = progress
-            return self._wait_for_output(prompt_id)
+            image = self._wait_for_output(prompt_id)
+            if temporal_frame is not None:
+                temporal_frame.record(self, prompt_id, config)
+            return image
         finally:
             progress.close()
             self._active_progress = None

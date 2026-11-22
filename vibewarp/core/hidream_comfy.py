@@ -179,7 +179,7 @@ class ComfyHiDreamClient:
             # introduce an autoencoder round-trip.
             '8': {'class_type': 'VAEDecode', 'inputs': {
                 'samples': ['13', 0], 'vae': ['1', 2]}},
-            '9': {'class_type': 'PreviewImage', 'inputs': {'images': ['8', 0]}},
+            self.output_node_id: {'class_type': 'PreviewImage', 'inputs': {'images': ['8', 0]}},
         }
         for index, image_name in enumerate(image_names, start=1):
             load_id = '4' if index == 1 else str(12 + index)
@@ -235,7 +235,8 @@ class ComfyHiDreamClient:
                     return image.convert('RGB')
                 if status.get('completed'):
                     raise ComfyHiDreamError(
-                        "ComfyUI completed the HiDream graph without an image output")
+                        f"ComfyUI completed prompt {prompt_id} without an image at output node "
+                        f"{self.output_node_id}; returned output nodes: {list(item.get('outputs', {}))}")
             time.sleep(0.25)
         raise ComfyHiDreamError(
             f"Timed out after {self.timeout:g}s waiting for ComfyUI prompt {prompt_id}")
@@ -252,6 +253,7 @@ class ComfyHiDreamClient:
         reference_images: list[Image.Image] | None = None,
         debug_dir: str | None = None,
         frame_num: int | None = None,
+        temporal_frame=None,
     ) -> Image.Image:
         hd = config.hidream
         if hd.use_trained_resolution:
@@ -285,6 +287,8 @@ class ComfyHiDreamClient:
             hd.steps, hd.guidance_scale, hd.sampler, hd.scheduler,
             hd.noise_scale, hd.patch_seam_smoothing, hd.patch_seam_start,
             hd.patch_seam_passes, hd.patch_seam_blend)
+        if temporal_frame is not None:
+            temporal_frame.prepare(self, graph, config)
         progress = ComfyProgressMonitor(
             getattr(self, 'base_url', ''), self.client_id, graph)
         progress.start()
@@ -296,7 +300,10 @@ class ComfyHiDreamClient:
                 raise ComfyHiDreamError(f"ComfyUI returned no prompt_id: {result}")
             progress.set_prompt_id(prompt_id)
             self._active_progress = progress
-            return self._wait_for_output(prompt_id)
+            image = self._wait_for_output(prompt_id)
+            if temporal_frame is not None:
+                temporal_frame.record(self, prompt_id, config)
+            return image
         finally:
             progress.close()
             self._active_progress = None

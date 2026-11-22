@@ -1,7 +1,7 @@
 """Default configuration, model URLs, and settings dataclass."""
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Dict, List, Optional
 from vibewarp.ipadapter_catalog import ipadapter_urls
 
@@ -77,6 +77,9 @@ class FlowConfig:
     soften_consistency_schedule: Any = None
     lazy_warp: bool = True
     force_flow_generation: bool = False
+    temporal_guidance_strength: float = 0.0
+    temporal_guidance_start: float = 0.1
+    temporal_guidance_end: float = 0.85
 
 
 @dataclass
@@ -587,7 +590,8 @@ def flux_model_files(config: 'RunConfig') -> Dict[str, str]:
         current = getattr(config.flux, key)
         known_defaults = {
             defaults[key] for defaults in FLUX_MODEL_DEFAULTS.values()}
-        resolved[key] = selected[key] if current in known_defaults else current
+        explicit = key.startswith('comfy_') and key in getattr(config.flux, '_explicit_fields', set())
+        resolved[key] = selected[key] if current in known_defaults and not explicit else current
     return resolved
 
 
@@ -683,7 +687,8 @@ def qwen_model_files(config: 'RunConfig') -> Dict[str, str]:
         current = getattr(config.qwen, key)
         known_defaults = {
             defaults[key] for defaults in QWEN_MODEL_DEFAULTS.values()}
-        resolved[key] = selected[key] if current in known_defaults else current
+        explicit = key.startswith('comfy_') and key in getattr(config.qwen, '_explicit_fields', set())
+        resolved[key] = selected[key] if current in known_defaults and not explicit else current
     return resolved
 
 
@@ -736,7 +741,8 @@ def mage_model_defaults(config: 'RunConfig') -> Dict[str, object]:
         current = getattr(config.mage, key)
         known_defaults = {
             defaults[key] for defaults in MAGE_MODEL_DEFAULTS.values()}
-        resolved[key] = selected[key] if current in known_defaults else current
+        explicit = key.startswith('comfy_') and key in getattr(config.mage, '_explicit_fields', set())
+        resolved[key] = selected[key] if current in known_defaults and not explicit else current
     return resolved
 
 
@@ -760,6 +766,51 @@ class MageFlowEditConfig:
         'identity, and pose. Use the remaining reference images only for the '
         'requested appearance or visual style.'
     )
+
+
+COMFY_IMAGE_DEFAULTS = {
+    'flux3_klein': dict(comfy_unet_name='flux3-image-klein-base-int8-convrot.safetensors',
+        comfy_clip_name='qwen3vl_4b_int8_convrot.safetensors', comfy_vae_name='flux2-vae.safetensors',
+        comfy_edit_lora_name='', steps=50, guidance_scale=4.0, scheduler='simple'),
+    'moss_image': dict(comfy_unet_name='moss_image_sft_int8_convrot.safetensors',
+        comfy_clip_name='qwen3.5_9b_w4a8_gptq.safetensors', comfy_vae_name='flux2-vae_small.safetensors',
+        comfy_edit_lora_name='moss_image_edit_lora_rank_64_bf16.safetensors',
+        steps=30, guidance_scale=4.0, scheduler='normal'),
+    'minimax_h3_image': dict(comfy_unet_name='minimax_h3_image_pruned_w4a8.safetensors',
+        comfy_clip_name='qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors',
+        comfy_vae_name='minimax_h3_image_vae_fp16.safetensors', comfy_edit_lora_name='',
+        steps=6, guidance_scale=1.0, scheduler='simple'),
+}
+
+
+def comfy_image_defaults(config):
+    keys = COMFY_IMAGE_DEFAULTS['flux3_klein']
+    return {key: getattr(config.comfy_image, key) for key in keys}
+
+
+COMFY_IMAGE_DIMENSION_MULTIPLES = {'flux3_klein': 16, 'moss_image': 16, 'minimax_h3_image': 32}
+
+
+@dataclass
+class ComfyImageConfig:
+    """Native ComfyUI FLUX.3, MOSS and MiniMax H3 still-image workflows."""
+    comfy_server_url: str = 'http://127.0.0.1:8188'
+    # None inherits from the model selected on RunConfig.
+    comfy_unet_name: Optional[str] = None
+    comfy_clip_name: Optional[str] = None
+    comfy_vae_name: Optional[str] = None
+    comfy_edit_lora_name: Optional[str] = None
+    comfy_timeout: float = 1200.0
+    mode: str = 'edit'
+    steps: Optional[int] = None
+    guidance_scale: Optional[float] = None
+    sampler: str = 'euler'
+    scheduler: Optional[str] = None
+    sampling_shift: float = 2.772588722239781  # log(16), FLUX.3 Base template
+    edit_lora_strength: float = 1.0
+    fixed_seed: bool = True
+    references: List[EditReferenceConfig] = field(default_factory=_default_edit_references)
+    multi_reference_instruction: str = ''
 
 
 @dataclass
@@ -888,6 +939,8 @@ class RunConfig:
     negative_prompts: Dict[int, str] = field(default_factory=lambda: {0: ""})
     # Shared alpha for every optional @ImageN reference label.
     reference_label_opacity: float = 0.7
+    reference_label_font_scale: float = 1.0
+    reference_label_badge_height: float = 0.12
 
     # LORA directory (for per-frame LORA scheduling via <lora:name:weight> in prompts)
     lora_dir: str = ''
@@ -926,5 +979,12 @@ class RunConfig:
     hidream: HiDreamConfig = field(default_factory=HiDreamConfig)
     qwen: QwenEditConfig = field(default_factory=QwenEditConfig)
     mage: MageFlowEditConfig = field(default_factory=MageFlowEditConfig)
+    comfy_image: ComfyImageConfig = field(default_factory=ComfyImageConfig)
     disco: DiscoConfig = field(default_factory=DiscoConfig)
     turbo: TurboConfig = field(default_factory=TurboConfig)
+
+    def __post_init__(self):
+        preset = COMFY_IMAGE_DEFAULTS.get(self.model_version, COMFY_IMAGE_DEFAULTS['flux3_klein'])
+        inherited = {key: value for key, value in preset.items() if getattr(self.comfy_image, key) is None}
+        if inherited:
+            self.comfy_image = replace(self.comfy_image, **inherited)

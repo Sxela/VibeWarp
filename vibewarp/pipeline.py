@@ -20,7 +20,7 @@ warnings.filterwarnings("ignore")
 
 import torch
 
-from vibewarp.config import RunConfig
+from vibewarp.config import COMFY_IMAGE_DIMENSION_MULTIPLES, RunConfig
 from vibewarp.controlnet_catalog import resolve_mode
 from vibewarp.core.diffusion import (
     RenderContext,
@@ -421,7 +421,8 @@ def run(
                 config.video.video_init_path,config.video.max_size,multiple=64,round_up=True)
         else:
             config.video.width, config.video.height = resolve_video_dimensions(
-                config.video.video_init_path, config.video.max_size)
+                config.video.video_init_path, config.video.max_size,
+                multiple=COMFY_IMAGE_DIMENSION_MULTIPLES.get(config.model_version, 8))
         print(f"  Source aspect resolution: {config.video.width}x{config.video.height} "
               f"(max size {config.video.max_size})")
     # 1. Setup directories
@@ -676,6 +677,8 @@ def assemble_video(config: RunConfig, run_dir: str) -> str:
         missed_consistency_weight=va.missed_consistency_weight,
         overshoot_consistency_weight=va.overshoot_consistency_weight,
         edges_consistency_weight=va.edges_consistency_weight,
+        padding_ratio=config.warp.padding_ratio,
+        padding_mode=config.warp.padding_mode,
         keep_audio=va.keep_audio,
         source_video=config.video.video_init_path,
         use_deflicker=va.use_deflicker,
@@ -690,7 +693,8 @@ def assemble_video(config: RunConfig, run_dir: str) -> str:
         mask_clip_low=va.mask_clip_low,
         mask_clip_high=va.mask_clip_high,
         visible_size=((config.video.visible_width, config.video.visible_height)
-                      if va.crop_to_visible else None),
+                      if (config.model_version.startswith('disco_')
+                          and config.disco.pad_to_multiple_64 and va.crop_to_visible) else None),
     )
 
 

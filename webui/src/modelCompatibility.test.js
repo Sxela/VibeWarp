@@ -1,5 +1,34 @@
 import { describe, expect, it } from 'vitest';
-import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint, switchDiscoSampler } from './modelCompatibility.js';
+import { applyModelDefaults, rememberModelSelections, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint, switchDiscoSampler } from './modelCompatibility.js';
+
+it('isolates custom filenames per model and restores them after serialization',()=>{
+  const schema={properties:{comfy_image:{properties:{
+    comfy_clip_name:{comfy_model:true},comfy_unet_name:{comfy_model:true},
+    comfy_vae_name:{comfy_model:true},comfy_edit_lora_name:{comfy_model:true},
+  }}},comfy_image_model_defaults:{
+    flux3:{comfy_clip_name:'4b',comfy_unet_name:'flux',comfy_vae_name:'flux-vae',comfy_edit_lora_name:''},
+    minimax:{comfy_clip_name:'32b',comfy_unet_name:'mini',comfy_vae_name:'mini-vae',comfy_edit_lora_name:''},
+  }};
+  let config={model_version:'flux3',comfy_image:{comfy_clip_name:'custom-4b',comfy_unet_name:'custom-flux',comfy_vae_name:'full-vae',comfy_edit_lora_name:'',mode:'edit'}};
+  let saved=rememberModelSelections(config,schema);
+  config=applyModelDefaults(config,'minimax',schema,saved);
+  expect(config.comfy_image).toMatchObject(schema.comfy_image_model_defaults.minimax);
+  config.comfy_image.comfy_clip_name='custom-32b';
+  saved=JSON.parse(JSON.stringify(rememberModelSelections(config,schema,saved)));
+  config=applyModelDefaults(config,'flux3',schema,saved);
+  expect(config.comfy_image).toMatchObject({comfy_clip_name:'custom-4b',comfy_unet_name:'custom-flux',comfy_vae_name:'full-vae',comfy_edit_lora_name:'',mode:'edit'});
+  expect(applyModelDefaults(config,'minimax',schema,saved).comfy_image.comfy_clip_name).toBe('custom-32b');
+});
+
+it('switches native Comfy image presets and connects to the selected server',()=>{
+  const schema={model_family_by_version:{moss_image:'comfy_image'},comfy_image_model_defaults:{
+    flux3_klein:{comfy_unet_name:'flux.safetensors',steps:50},moss_image:{comfy_unet_name:'moss.safetensors',steps:30}}};
+  const current={comfy_image:{comfy_unet_name:'flux.safetensors',steps:50,mode:'text',comfy_server_url:'http://comfy.example:8188'}};
+  const next=applyModelDefaults(current,'moss_image',schema);
+  expect(next.comfy_image).toEqual({...current.comfy_image,comfy_unet_name:'moss.safetensors',steps:30});
+  expect(comfyConnection(next,schema).url).toBe('http://comfy.example:8188');
+  expect(applyModelDefaults({...current,comfy_image:{...current.comfy_image,steps:79}},'moss_image',schema).comfy_image.steps).toBe(79);
+});
 
 describe('Disco distilled sampler settings',()=>{
   const settings={

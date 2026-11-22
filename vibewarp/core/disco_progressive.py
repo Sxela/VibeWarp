@@ -73,7 +73,7 @@ def resize_state(state, clean, size, alpha, sigma):
 
 
 def progressive_disco_samples(diffusion, model, init, noise, sizes, *, skip,
-                              sampler, cond_fn, eta=0., mask=None, inpainting_stop=0):
+                              sampler, cond_fn, eta=0., mask=None, inpainting_stop=0, denoised_fn=None):
     """Run the existing DDIM/PLMS step functions on a persistent current grid."""
     full_size = init.shape[-2:]
     shape = sizes[0]
@@ -105,6 +105,8 @@ def progressive_disco_samples(diffusion, model, init, noise, sizes, *, skip,
                 state = state * (1-current_mask) + renoised * current_mask
             denoiser = stage_denoiser(model, shape, full_size)
             options = dict(clip_denoised=False, cond_fn=cond_fn, model_kwargs={})
+            if denoised_fn is not None:
+                options['denoised_fn'] = denoised_fn
             if sampler == 'ddim':
                 out = diffusion.ddim_sample(denoiser, state, t, eta=eta, **options)
             else:

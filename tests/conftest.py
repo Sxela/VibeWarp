@@ -60,6 +60,7 @@ def dummy_flow():
 _NO_CUDA = (
     'Torch not compiled with CUDA enabled',   # CPU-only build (what CI installs)
     'Found no NVIDIA driver',                 # CUDA build, no device
+    'No CUDA GPUs are available',             # CUDA build, all devices hidden
 )
 
 

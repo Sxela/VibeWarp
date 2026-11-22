@@ -146,6 +146,7 @@ def render_flux_frame(
     reference_images: Optional[list[Image.Image]] = None,
     debug_dir: Optional[str] = None,
     frame_num: Optional[int] = None,
+    temporal_frame=None,
 ) -> Image.Image:
     """Run one Flux edit step and return the rendered PIL image.
 
@@ -173,8 +174,11 @@ def render_flux_frame(
             reference_images=reference_images,
             debug_dir=debug_dir,
             frame_num=frame_num,
+            **({'temporal_frame': temporal_frame} if temporal_frame is not None else {}),
         )
 
+    if config.flow.temporal_guidance_strength:
+        raise ValueError("Klein temporal guidance requires the ComfyUI backend")
     import torch
 
     fx = config.flux

@@ -1,7 +1,7 @@
 <script>
   import { tick, untrack, onDestroy } from 'svelte';
   import Field from './Field.svelte';
-  import {normalizeRawOpacities,dropLegacyFrameHash} from './workspace.js';
+  import {normalizeRawOpacities,dropLegacyFrameHash,conditionsMatch} from './workspace.js';
   import {closeOnSelection} from './closeOnSelection.js';
   import RawVideoPreview from './RawVideoPreview.svelte';
   import ControlNetEditor from './ControlNetEditor.svelte';
@@ -12,7 +12,7 @@
   import Supporters from './Supporters.svelte';
   import DownloadProgress from './DownloadProgress.svelte';
   import RequiredModels from './RequiredModels.svelte';
-  import { applyModelDefaults, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint, switchDiscoSampler } from './modelCompatibility.js';
+  import { applyModelDefaults, rememberModelSelections, comfyConnection, fieldSupportsModel, modelFamily, modelFieldHint, switchDiscoSampler } from './modelCompatibility.js';
   import {flattenFields, fieldLocation, fieldGroup, fieldEditor, inWorkflow, searchFields, fieldValue as readFieldValue, contactSheetConflict, migrateLegacyFrameLimit} from './workspace.js';
   import {normalizeSchedules} from './schedules.js';
   import HelpTip from './HelpTip.svelte';
@@ -21,6 +21,8 @@
   let inspectorHidden=$state(false), snapshotLoading=$state(false), snapshotError=$state('');
   let snapshotRevision=0;
   const storageKey='vibewarp.config.v1';
+  const modelSelectionsKey='vibewarp.modelSelections.v1';
+  let modelSelections={};
   let config=$state(null), schema=$state(null), selected=$state('source'), job=$state(null), errors=$state([]), busy=$state(false), initialized=$state(false), logCollapsed=$state(true), source;
   let etaClock=$state(Date.now());
   let eta=$derived(remainingEta(job,etaClock));
@@ -76,6 +78,7 @@
   let comfyStatus=$state(null);
   let preparation=$state(null), preparationError=$state('');
   let requiredModels=$state([]), requiredLoading=$state(false), requiredError=$state('');
+  let comfyModels=$state([]);
   let requiredRevision=$state(0), preparing=$state(false);
   const modelFiles=section=>Object.fromEntries(Object.entries(section||{}).filter(
     ([name])=>name.endsWith('_name')||['backend','model_repo','use_lightning_lora'].includes(name)));
@@ -123,7 +126,9 @@
            checkpoint_path:config.disco?.checkpoint_path,secondary_path:config.disco?.secondary_path,
            use_secondary_model:config.disco?.use_secondary_model,encoders:config.disco?.encoders},
     flux:modelFiles(config.flux), qwen:modelFiles(config.qwen),
-    mage:modelFiles(config.mage), hidream:modelFiles(config.hidream)
+    mage:modelFiles(config.mage), hidream:modelFiles(config.hidream),
+    comfy_image:{...modelFiles(config.comfy_image),mode:config.comfy_image?.mode},
+    comfy_urls:[config.flux?.comfy_server_url,config.qwen?.comfy_server_url,config.mage?.comfy_server_url,config.hidream?.comfy_server_url,config.comfy_image?.comfy_server_url]
   }) : '');
   $effect(()=>{
     let key=preparationKey;
@@ -140,6 +145,7 @@
         let next=await response.json();
         if(stopped) return;
         requiredModels=next.files||[];
+        comfyModels=next.comfy_models||[];
       }catch(error){if(!stopped&&error.name!=='AbortError') requiredError=error.message;}
       finally{if(!stopped) requiredLoading=false;}
     },250);
@@ -176,6 +182,7 @@
     return()=>{stopped=true;clearTimeout(timer);controller.abort();};
   });
   function fieldEnabledForConfig(entry){
+    if(!conditionsMatch(entry.schema,config))return false;
     const reference=config?.disco?.sampler==='distilled'&&config.disco.distilled_guided===false;
     if(entry.section==='disco'&&entry.name==='quality_lora_strength'&&!config?.disco?.quality_lora_enabled) return false;
     if(entry.section==='disco'&&['distilled_guided','lora_strength'].includes(entry.name)&&config?.disco?.sampler!=='distilled') return false;
@@ -199,6 +206,11 @@
     if(item.section==='disco'&&item.name==='cut_icgray_schedule')
       return section?.cut_icgray_schedule ?? {0:section?.cut_icgray_p};
     return readFieldValue(config,item);
+  }
+  function comfyModelInfo(item){
+    const row=comfyModels.find(row=>row.section===item.section&&row.field===item.name);
+    return {...row,suggested:schema.comfy_model_suggestions?.[config.model_version]?.[item.name]
+      ??row?.suggested??'',loading:requiredLoading};
   }
   let entries=$derived(allEntries.filter(
     e=>e.tier!=='hidden'&&!(e.section==='main'&&e.name==='model_version')
@@ -296,8 +308,9 @@
     if(groupIsOpen(tier,name)!==open) groupOpen={...groupOpen,[`${tier}:${name}`]:open};
   }
   function setField(name,v){
+    if(name==='model_version')modelSelections=rememberModelSelections(config,schema,modelSelections);
     config=name==='model_version'
-      ? applyModelDefaults(config,v,schema)
+      ? applyModelDefaults(config,v,schema,modelSelections)
       : {...config,[name]:v};
   }
   async function editProjectName(){
@@ -387,6 +400,7 @@
       saved=migrated.config;
     }
     schema=d.schema;
+    try{let savedSelections=JSON.parse(localStorage.getItem(modelSelectionsKey));if(savedSelections&&typeof savedSelections==='object'&&!Array.isArray(savedSelections))modelSelections=savedSelections;}catch{}
     config=normalizeSchedules(dropLegacyFrameHash(normalizeRawOpacities(migrateLegacyFrameLimit(mergeDefaults(d.defaults,saved)))),schema);selected=tabs[0]?.id||'source';initialized=true;
     try{inspectorWidth=Math.max(340,Math.min(680,Number(localStorage.getItem('vibewarp.inspector.width'))||420));}catch{}
     // The renderer lives on the server, so a browser reload must reconnect to
@@ -417,7 +431,10 @@
     },250);
     return()=>{clearTimeout(timer);controller.abort()};
   });
-  $effect(()=>{if(initialized&&config)localStorage.setItem(storageKey,JSON.stringify(config))});
+  $effect(()=>{if(initialized&&config){
+    localStorage.setItem(storageKey,JSON.stringify(config));
+    localStorage.setItem(modelSelectionsKey,JSON.stringify(rememberModelSelections(config,schema,modelSelections)));
+  }});
   function listen(id){
     source?.close();source=new EventSource(`/api/jobs/${id}/events`);
     source.onmessage=(event)=>{
@@ -463,11 +480,12 @@
     if(renderActive)return;
     source?.close();snapshotRevision+=1;snapshotLoading=false;snapshotError='';job=null;jobConfig=null;
   }
-  async function run(){
-    if(!config||!supportedModel||conditioningConflict)return;
+  async function run(oneFrame=false){
+    if(busy||renderActive||!config||!supportedModel||conditioningConflict)return;
     busy=true;errors=[];
     try{
       const submitted=$state.snapshot(config);
+      if(oneFrame)submitted.frame_range=[submitted.frame_range?.[0]??0];
       let r=await fetch('/api/jobs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(submitted)});
       let d=await r.json();
       if(!r.ok){errors=Array.isArray(d.detail)?d.detail:[{message:d.detail||'Submission failed'}];mobileView='settings';return;}
@@ -518,6 +536,7 @@
 {#snippet editField(item)}
   {#if !(item.section==='main'&&item.name==='model_version')}
     <Field name={item.name} schema={item.schema} path={item.section}
+      modelInfo={comfyModelInfo(item)}
       hint={fieldHint(item)} error={fieldError(item)} value={fieldValue(item)}
       onchange={(value)=>setIn(item.section,item.name,value)}/>
   {/if}
@@ -557,6 +576,8 @@
     </details>
     <input class="visually-hidden" tabindex="-1" type="file" accept=".json,.txt" bind:this={fileInput} onchange={importConfig} aria-label="Import settings file"/>
     <span class="topbar-state"><i class:live={renderActive}></i>{renderActive?'Rendering':missingModels?'Setup needed':'Local workspace'}</span>
+    <button class="render-one" onclick={()=>run(true)} title="Test the style on the first frame of the selected range"
+      disabled={renderActive||busy||!config||!supportedModel||!!conditioningConflict}>Render 1 frame</button>
     <button class="run" class:cancel={renderActive} onclick={()=>renderActive?cancel():run()}
       disabled={renderActive?(cancelling||job.cancel_requested):busy||!config||!supportedModel||!!conditioningConflict}>
       {renderActive?(cancelling||job.cancel_requested?'Cancelling…':'Cancel render'):busy?'Submitting…':'Start render'}
@@ -640,6 +661,7 @@
                 <div class="group-fields" id={only&&only!=='video'&&group.items[0]?`field-${group.items[0].section}-${group.items[0].name}`:undefined}>
                   {#if only==='video'}
                     <VideoEditor value={config.video} errors={sectionErrors('video')} modelVersion={config.model_version}
+                      dimensionMultiple={schema.comfy_image_dimension_multiples?.[config.model_version]}
                       discoReference={config.disco?.sampler==='distilled'&&config.disco?.distilled_guided===false}
                       onchange={(value)=>setField('video',value)} frameRange={config.frame_range} onFrameRange={(value)=>setField('frame_range',value)}/>
                     {#each group.items.filter(item=>item.name==='keyframes_relative_to_frame_range') as item}{@render editField(item)}{/each}
@@ -649,9 +671,12 @@
                     <IPAdapterEditor value={config.ipadapter} schema={schema.properties.ipadapter} onchange={(value)=>setField('ipadapter',value)} modelVersion={config.model_version}
                       modelDir={config.controlnet?.model_dir} videoPath={config.video?.video_init_path} frameRange={config.frame_range} extractNth={config.video?.extract_nth_frame}/>
                   {:else if only==='references'}
+                    {#each group.items.filter(item=>item.schema.group_editor_extra) as item (item.section+'.'+item.name)}{@render editField(item)}{/each}
                     {@const refItem=group.items.find(item=>item.name==='references')}
                     {#if refItem}<ReferenceImagesEditor value={config[refItem.section]?.references} onchange={(value)=>setIn(refItem.section,'references',value)}
                       labelOpacity={config.reference_label_opacity} onLabelOpacityChange={(value)=>setField('reference_label_opacity',value)}
+                      labelFontScale={config.reference_label_font_scale??1} onLabelFontScaleChange={value=>setField('reference_label_font_scale',value)}
+                      labelBadgeHeight={config.reference_label_badge_height??0.12} onLabelBadgeHeightChange={value=>setField('reference_label_badge_height',value)}
                       videoPath={config.video?.video_init_path} frameRange={config.frame_range} extractNth={config.video?.extract_nth_frame}
                       maxReferences={schema.max_edit_references?.[activeModelFamily]??10} sourceLabels={schema.edit_reference_sources}/>{/if}
                   {:else}

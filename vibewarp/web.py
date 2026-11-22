@@ -5,7 +5,7 @@ from pathlib import Path
 from threading import Timer
 from urllib.parse import urlsplit
 from PIL import Image
-from vibewarp.config import RunConfig, flux_model_files, qwen_model_files
+from vibewarp.config import MAGE_MODEL_DEFAULTS, RunConfig, flux_model_files, mage_model_defaults, qwen_model_files
 from vibewarp.config_io import ConfigError, apply_path_defaults, config_from_dict, config_from_settings, config_schema, settings_as_dict, strip_path_quotes, validate_config
 from vibewarp.controlnet_catalog import CONTROLNET_MODES, MODE_PRESETS, specs_for_version
 from vibewarp.ipadapter_catalog import specs_for_version as ipadapter_specs_for_version
@@ -53,6 +53,9 @@ def _ui_config(config: RunConfig) -> RunConfig:
         setattr(config.flux, key, value)
     for key, value in qwen_model_files(config).items():
         setattr(config.qwen, key, value)
+    if config.model_version in MAGE_MODEL_DEFAULTS:
+        for key, value in mage_model_defaults(config).items():
+            setattr(config.mage, key, value)
     reference = config.model_version.startswith('disco_') and config.disco.sampler == 'distilled' and not config.disco.distilled_guided
     if config.video.max_size <= 0 and not reference:
         config.video.max_size = max(config.video.width, config.video.height)
@@ -115,10 +118,9 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
 
     @app.get("/api/config")
     def get_config_metadata():
-        # This machine's paths/VRAM tuning win over the shipped defaults.
-        overlaid = config_from_dict(system_settings.overlay(
-            asdict(initial_config or RunConfig())))
-        defaults = asdict(_ui_config(overlaid))
+        # Resolve inherited filenames before serialization marks every field explicit.
+        base = _ui_config(initial_config or RunConfig())
+        defaults = asdict(config_from_dict(system_settings.overlay(asdict(base))))
         return {
             "defaults": defaults,
             "schema": config_schema(),
@@ -128,9 +130,11 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
     @app.post('/api/models/required')
     def list_required_models(payload: dict):
         from vibewarp.model_assets import required_model_files
+        from vibewarp.comfy_inventory import comfy_model_catalog
         try:
             config = apply_path_defaults(config_from_dict(payload))
-            return {'files':required_model_files(config)}
+            catalog = comfy_model_catalog(config)
+            return {'files': required_model_files(config, comfy_files=catalog), 'comfy_models': catalog}
         except (ConfigError,ValueError,TypeError) as exc:
             raise HTTPException(422,detail=str(exc))
 
@@ -189,7 +193,7 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
         return _comfy_port_status(url)
 
     @app.get("/api/video/probe")
-    def probe_video_endpoint(path: str = "", max_size: int = 0, extract_nth_frame: int = 1):
+    def probe_video_endpoint(path: str = "", max_size: int = 0, extract_nth_frame: int = 1, model_version: str = ""):
         """Source metadata + the size and frame count this render will ACTUALLY produce.
 
         The render size is computed with the same `fit_dimensions` the pipeline uses, so
@@ -208,7 +212,10 @@ def create_app(job_manager: JobManager | None = None, initial_config: RunConfig 
 
         width, height = info["width"], info["height"]
         if max_size > 0:
-            width, height = fit_dimensions(info["width"], info["height"], max_size)
+            from vibewarp.config import COMFY_IMAGE_DIMENSION_MULTIPLES
+            disco = model_version.startswith('disco_')
+            multiple = 64 if disco else COMFY_IMAGE_DIMENSION_MULTIPLES.get(model_version, 8)
+            width, height = fit_dimensions(width, height, max_size, multiple, round_up=disco)
 
         nth = max(1, int(extract_nth_frame or 1))
         # Extraction keeps every nth frame, so this is the real ceiling on frame_range.

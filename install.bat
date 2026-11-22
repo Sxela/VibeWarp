@@ -4,6 +4,7 @@ REM Downloads a private embedded Python (see py_ver below), pip, ffmpeg, a venv
 REM and installs VibeWarp + PyTorch. Safe to re-run: finished steps are
 REM skipped, so a failed download just needs another run.
 REM Everything lands next to this script; nothing touches system Python.
+REM Model weights are downloaded on demand from the UI, never by this installer.
 
 setlocal
 
@@ -102,8 +103,8 @@ echo Installing PyTorch from %torch_index% ...
 call python -m pip install "torch==2.11.0" "torchvision==0.26.0" --index-url "%torch_index%"
 if errorlevel 1 goto :failed
 
-echo Installing VibeWarp...
-call python -m pip install -e "%~dp0."
+echo Installing VibeWarp and UI dependencies...
+call python -m pip install -e "%~dp0.[ui]"
 if errorlevel 1 goto :failed
 
 echo.
@@ -111,10 +112,11 @@ echo -----------------------------------------------------------------
 echo Install complete.
 echo.
 echo Next steps:
-echo   1. Download models for your settings file:
-echo        run.bat --download-models --warpfusion-settings path\to\settings.txt
-echo   2. Render:
-echo        run.bat --warpfusion-settings path\to\settings.txt --video input.mp4
+echo   1. Open the UI:
+echo        run-ui.bat
+echo   2. Choose your model, input video and settings in the UI.
+echo   3. Click Download required models or Start render to download missing models.
+echo      Existing model files are reused. No model weights were downloaded during setup.
 echo -----------------------------------------------------------------
 pause
 exit /b 0

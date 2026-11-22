@@ -206,6 +206,57 @@ class TestCreateVideoDeflicker:
 
 
 class TestConsistencyCheckedVideoBlending:
+    def test_native_cache_and_original_previous_render(self, tmp_path):
+        from vibewarp.video.output import _blend_frames
+
+        flow_dir = tmp_path / 'flow'
+        dest = tmp_path / 'export'
+        flow_dir.mkdir()
+        dest.mkdir()
+        frames = []
+        # Nonzero range proves lookup uses absolute render indices.
+        for index, value in enumerate((40, 120, 200), start=5):
+            frame = tmp_path / f'batch(0)_{index:06d}.png'
+            Image.new('RGB', (16, 16), (value,) * 3).save(frame)
+            frames.append(str(frame))
+            np.save(flow_dir / f'{index:06d}.jpg.npy',
+                    np.zeros((16, 16, 2), dtype=np.float32))
+            Image.new('RGB', (16, 16), 'white').save(
+                flow_dir / f'{index:06d}.jpg_12-21_cc.jpg')
+        _blend_frames(frames, str(dest), 'optical flow', .5,
+                      str(flow_dir), True, 1)
+        assert [Image.open(dest / f'{i:06d}.png').getpixel((8, 8))[0]
+                for i in range(3)] == [40, 80, 160]
+
+    def test_smaller_flow_scales_vectors_and_preserves_render_size(self, tmp_path):
+        from vibewarp.video import output
+
+        flow_dir = tmp_path / 'flow'
+        dest = tmp_path / 'export'
+        flow_dir.mkdir()
+        dest.mkdir()
+        frames = []
+        for i in range(2):
+            frame = tmp_path / f'batch(0)_{i:06d}.png'
+            Image.new('RGB', (32, 48)).save(frame)
+            frames.append(str(frame))
+        np.save(flow_dir / '000000.jpg.npy', np.ones((16, 16, 2), dtype=np.float32))
+        Image.new('RGB', (16, 16), 'white').save(flow_dir / '000000.jpg_12-21_cc.jpg')
+        captured = {}
+
+        def warp(previous, current, flow, **kwargs):
+            captured.update(flow=flow, **kwargs)
+            return current
+
+        with patch.object(output, 'warp_frame', side_effect=warp):
+            output._blend_frames(frames, str(dest), 'optical flow', .5,
+                                 str(flow_dir), True, 1,
+                                 padding_ratio=.2, padding_mode='edge')
+        np.testing.assert_array_equal(captured['flow'], np.broadcast_to([2, 3], (48, 32, 2)))
+        assert captured['weights'].shape == (48, 32, 3)
+        assert captured['pad_pct'] == .2 and captured['padding_mode'] == 'edge'
+        assert Image.open(dest / '000001.png').size == (32, 48)
+
     def test_export_weights_and_notebook_mask_defaults_reach_load_cc(self, tmp_path):
         from vibewarp.video import output
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # VibeWarp installer (Linux/macOS).
 # Creates ./env, installs PyTorch + VibeWarp. Re-run safe.
+# Model weights are downloaded on demand from the UI, never by this installer.
 # Requires: python3.11+ and ffmpeg available via your package manager.
 # (The pinned deps require >=3.11; the project is validated on 3.14.)
 set -euo pipefail
@@ -37,16 +38,17 @@ else
     python -m pip install 'torch==2.11.0' 'torchvision==0.26.0' --index-url "$TORCH_INDEX"
 fi
 
-python -m pip install -e .
+python -m pip install -e '.[ui]'
 
 cat <<'EOF'
 -----------------------------------------------------------------
 Install complete.
 
 Next steps:
-  1. Download models for your settings file:
-       ./run.sh --download-models --warpfusion-settings path/to/settings.txt
-  2. Render:
-       ./run.sh --warpfusion-settings path/to/settings.txt --video input.mp4
+  1. Open the UI:
+       ./run-ui.sh
+  2. Choose your model, input video and settings in the UI.
+  3. Click Download required models or Start render to download missing models.
+     Existing model files are reused. No model weights were downloaded during setup.
 -----------------------------------------------------------------
 EOF

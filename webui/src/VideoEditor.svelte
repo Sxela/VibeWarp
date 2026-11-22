@@ -6,7 +6,7 @@
   // It also probes the video (ffprobe, falling back to OpenCV) as soon as a path is set:
   // the source metadata, the size the render will ACTUALLY be, and the real frame ceiling
   // were all previously invisible until the render started.
-  let { value, onchange, errors = {}, frameRange, onFrameRange,modelVersion='',discoReference=false } = $props();
+  let { value, onchange, errors = {}, frameRange, onFrameRange,modelVersion='',discoReference=false,dimensionMultiple=8 } = $props();
   import FrameRange from './FrameRange.svelte';
   import { stripQuotes } from './paths.js';
   import { derive } from './videoMath.js';
@@ -42,7 +42,7 @@
     ? Math.max(value.width||512,value.height||512) : value.max_size??0);
   let probe = $derived(source
     ? derive(source,effectiveMaxSize,value.extract_nth_frame??1,frameRange,
-        modelVersion.startsWith('disco_')?64:8,modelVersion.startsWith('disco_'),value)
+        modelVersion.startsWith('disco_')?64:dimensionMultiple,modelVersion.startsWith('disco_'),value)
     : null);
 
   const setPath = (e) => patch({video_init_path: stripQuotes(e.target.value)});
@@ -86,7 +86,7 @@
     </div>
   {/if}
 
-  <label id="field-video-max_size"><span>Max size <HelpTip label="Help: Max size">Longest edge. {modelVersion.startsWith('disco_')?'Disco dimensions round up to the next multiple of 64.':'The render size above is the exact result, rounded to /8.'}</HelpTip></span>
+  <label id="field-video-max_size"><span>Max size <HelpTip label="Help: Max size">Longest edge. {modelVersion.startsWith('disco_')?'Disco dimensions round up to the next multiple of 64.':`Render dimensions round to the nearest multiple of ${dimensionMultiple}.`}</HelpTip></span>
     <input class:invalid={!!errors.max_size} type="number" min="8" step="8"
            value={effectiveMaxSize} onchange={(e)=>patch({max_size: Number(e.target.value)})}/>
     {#if errors.max_size}<small class="err">{errors.max_size}</small>{/if}

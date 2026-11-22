@@ -74,6 +74,15 @@ that hid five bugs in AnimateDiff before it was finally compared.
 
 ---
 
+The optional [flow-masked temporal guidance](settings.md#flow-masked-temporal-guidance)
+extension has a separate reference in the Klein experiments. A three-frame
+Klein 4B GPU comparison verified that the first frame matched with guidance
+on and off and the two guided frames changed. Long-clip visual quality across
+models remains open. Three-frame GPU smoke runs also exercised native SD 1.5
+and Disco 512, Klein 9B, FLUX.3 Klein, MOSS, MiniMax H3 Image, HiDream,
+Mage-Flow (standard and turbo), and Qwen Edit GGUF. The native SDXL and
+non-GGUF Qwen paths still need a render with their own checkpoints.
+
 ## Open work
 
 ### 1. LORA without ControlNets diverges — MAE 0.221 · *good first issue*
@@ -192,7 +201,7 @@ translation, add it to `VERIFIED_KEYS` too.
 
 Parity is the current priority, but not the only way to help.
 
-- **Frontend tests.** The UI has 193 frontend tests (`cd webui && npm test`) and plenty of
+- **Frontend tests.** The UI has 244 frontend tests (`cd webui && npm test`) and plenty of
   room for more. Component behaviour the Python suite cannot see needs a component test —
   the two bugs that prompted the suite (a prompt editor writing a list into a
   `Dict[int, str]`, and dead mode buttons) were both invisible to the backend.

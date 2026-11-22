@@ -75,6 +75,41 @@ it('starts render through the job endpoint without selection-triggered preparati
   expect(requests('/api/models/prepare')).toHaveLength(0);
 });
 
+it.each([{range:[0,0],start:0},{range:[17,42],start:17},{range:[9],start:9},{range:undefined,start:0}])(
+  'renders only the first frame for range $range without changing the draft',async({range,start})=>{
+    const original=fetchMock.getMockImplementation();
+    fetchMock.mockImplementation((url,options)=>url==='/api/config'
+      ?response({schema,defaults:{...structuredClone(defaults),frame_range:range},prefilled:true}):original(url,options));
+    render(App);
+    await screen.findByText('weights.pt');
+    const draft=JSON.parse(localStorage.getItem('vibewarp.config.v1'));
+    await fireEvent.click(screen.getByRole('button',{name:'Render 1 frame'}));
+    await waitFor(()=>expect(requests('/api/jobs')).toHaveLength(1));
+    const submitted=JSON.parse(requests('/api/jobs')[0][1].body);
+    expect(submitted).toEqual({...draft,frame_range:[start]});
+    expect(JSON.parse(localStorage.getItem('vibewarp.config.v1'))).toEqual(draft);
+    expect(await screen.findByRole('button',{name:'Cancel render'})).toBeEnabled();
+    expect(screen.getByRole('button',{name:'Render 1 frame'})).toBeDisabled();
+    expect(requests('/api/models/prepare')).toHaveLength(0);
+  });
+
+it('keeps the full range available after a failed one-frame submission',async()=>{
+  const original=fetchMock.getMockImplementation();
+  let posts=0;
+  fetchMock.mockImplementation((url,options)=>{
+    if(url==='/api/config')return response({schema,defaults:{...structuredClone(defaults),frame_range:[17,42]},prefilled:true});
+    if(url==='/api/jobs'&&options?.method==='POST'&&posts++===0)
+      return {ok:false,json:async()=>({detail:'Test validation failure'})};
+    return original(url,options);
+  });
+  render(App);await screen.findByText('weights.pt');
+  await fireEvent.click(screen.getByRole('button',{name:'Render 1 frame'}));
+  await screen.findByText('Test validation failure');
+  await fireEvent.click(screen.getByRole('button',{name:'Start render'}));
+  await waitFor(()=>expect(requests('/api/jobs')).toHaveLength(2));
+  expect(requests('/api/jobs').map(([,options])=>JSON.parse(options.body).frame_range)).toEqual([[17],[17,42]]);
+});
+
 it.each(['queued','running'])('switches the main render button to cancel while %s',async(state)=>{
   const streams=[];
   vi.stubGlobal('EventSource',class{constructor(){streams.push(this);}close(){}});

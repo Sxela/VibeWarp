@@ -4,6 +4,8 @@
     value = [], onchange, videoPath = '', frameRange = [0, 0],
     extractNth = 1, maxReferences = 10, sourceLabels = {},
     labelOpacity = 0.7, onLabelOpacityChange = () => {},
+    labelFontScale = 1, onLabelFontScaleChange = () => {},
+    labelBadgeHeight = 0.12, onLabelBadgeHeightChange = () => {},
   } = $props();
 
   const choices = [
@@ -98,6 +100,19 @@
     <output>{Math.round(labelOpacity * 100)}%</output>
   </div>
 
+  <div class="opacity-control">
+    <span>Tag size</span>
+    <input type="range" min="0.5" max="4" step="0.1" aria-label="Reference tag size"
+      value={labelFontScale} oninput={event=>onLabelFontScaleChange(Number(event.currentTarget.value))}/>
+    <output>{Number(labelFontScale).toFixed(1)}×</output>
+  </div>
+  <div class="opacity-control">
+    <span>Badge height</span>
+    <input type="range" min="0.04" max="0.3" step="0.01" aria-label="Reference badge height"
+      value={labelBadgeHeight} oninput={event=>onLabelBadgeHeightChange(Number(event.currentTarget.value))}/>
+    <output>{Math.round(labelBadgeHeight*100)}%</output>
+  </div>
+
   <div class="cards">
     {#each visible as ref, index (`${index}-${ref.source}-${ref.image_path}`)}
       <article class:required={index===0} class:inactive={ref.source==='none'}>
@@ -163,7 +178,8 @@
   .intro b{display:block;color:#e7eaee;font-size:13px}
   .intro em{white-space:nowrap;color:#a9c66b;font:var(--text-value) var(--font-mono);font-style:normal}
   .opacity-control{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:var(--text-help)}
-  .opacity-control input{width:180px;padding:0;border:0;background:transparent;accent-color:#b8dc50}
+  .opacity-control>span{min-width:90px}
+  .opacity-control input{width:180px;min-width:40px;flex-shrink:1;padding:0;border:0;background:transparent;accent-color:#b8dc50}
   .opacity-control output{min-width:34px;color:#dbe4cb;font:var(--text-value) var(--font-mono)}
   .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
   article{min-width:0;border:1px solid #303640;background:#0d1014;border-radius:var(--radius);padding:12px}

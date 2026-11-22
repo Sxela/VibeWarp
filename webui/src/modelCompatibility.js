@@ -14,11 +14,24 @@ export function switchDiscoSampler(config, sampler) {
   return {config: {...config, disco: {...config.disco, sampler}}, previous: null};
 }
 
-export function applyModelDefaults(config, version, schema) {
+export function rememberModelSelections(config, schema, saved = {}) {
+  if (!config?.model_version) return saved;
+  let selections = {};
+  for (let [section, definition] of Object.entries(schema?.properties || {})) {
+    for (let [key, field] of Object.entries(definition.properties || {})) {
+      if (field.comfy_model && config[section]?.[key] !== undefined)
+        selections[section] = {...selections[section], [key]: config[section][key]};
+    }
+  }
+  return {...saved, [config.model_version]: selections};
+}
+
+export function applyModelDefaults(config, version, schema, selections = null) {
   let presetGroups = [
     ['flux_model_defaults', 'flux'],
     ['qwen_model_defaults', 'qwen'],
     ['mage_model_defaults', 'mage'],
+    ['comfy_image_model_defaults', 'comfy_image'],
   ];
   for (let [presetKey, sectionKey] of presetGroups) {
     let presets = schema?.[presetKey];
@@ -31,6 +44,12 @@ export function applyModelDefaults(config, version, schema) {
       let current = section[key];
       if (!current || known.some(preset => preset[key] === current))
         section[key] = next;
+    }
+    if (selections) {
+      for (let [key, field] of Object.entries(schema?.properties?.[sectionKey]?.properties || {})) {
+        if (!field.comfy_model) continue;
+        section[key] = selections[version]?.[sectionKey]?.[key] ?? target[key] ?? field.default ?? '';
+      }
     }
     return { ...config, model_version: version, [sectionKey]: section };
   }
@@ -50,6 +69,9 @@ export function comfyConnection(config, schema) {
   if (family === 'qwen') {
     return { label: 'Qwen Image Edit', url: config?.qwen?.comfy_server_url,
              path: 'qwen.comfy_server_url' };
+  }
+  if (family === 'comfy_image') {
+    return {label: 'ComfyUI Image', url: config?.comfy_image?.comfy_server_url, path: 'comfy_image.comfy_server_url'};
   }
   if (family === 'mage') {
     return { label: 'Mage-Flow Edit', url: config?.mage?.comfy_server_url,

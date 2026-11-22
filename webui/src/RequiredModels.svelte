@@ -7,13 +7,15 @@
 <section class="required-models" aria-label="Required models">
   <details bind:open={expanded}>
   <summary>Required models · {missing.length}</summary>
-  {#if loading}<p role="status">Checking local model files…</p>{/if}
+  {#if loading}<p role="status">Checking model availability…</p>{/if}
   <ul>
     {#each missing as file (file.path)}
       <li>
-        <div><strong>{file.name}</strong><span>{file.status==='present'?'Present':'Missing'}</span></div>
+        <div><strong>{file.name}</strong><span>{file.status==='present'?'Present':file.status==='unknown'?'Unavailable':'Missing'}</span></div>
         <small>{file.path}</small>
-        {#if file.status!=='present' && !file.downloadable}<small>Choose an existing custom file.</small>{/if}
+        {#if file.source==='comfy'}<small>{file.server_url}</small>{/if}
+        {#if file.error}<small class="error">{file.error}</small>{/if}
+        {#if file.status!=='present' && !file.downloadable}<small>{file.source==='comfy'?'Check the ComfyUI connection and its model list. A local models folder is needed for VibeWarp downloads.':'Choose an existing custom file.'}</small>{/if}
       </li>
     {/each}
   </ul>
