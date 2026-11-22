@@ -13,6 +13,7 @@ from tests.conftest import is_missing_cuda
 @pytest.mark.parametrize('exc_type, message', [
     (AssertionError, 'Torch not compiled with CUDA enabled'),
     (RuntimeError, 'Found no NVIDIA driver on your system'),
+    (RuntimeError, 'No CUDA GPUs are available'),
     (AssertionError, 'blah Torch not compiled with CUDA enabled blah'),
 ])
 def test_recognises_a_missing_cuda(exc_type, message):

@@ -8,6 +8,7 @@ from typing import Any, Iterable
 import requests
 from PIL import Image
 
+from vibewarp.comfy_inventory import diffusion_loader
 from vibewarp.core.comfy_progress import ComfyProgressMonitor
 from vibewarp.core.edit_references import reference_prompt, save_debug_reference
 from vibewarp.core.flux_comfy import ComfyFluxClient
@@ -30,15 +31,9 @@ class ComfyQwenEditClient(ComfyFluxClient):
         self.upload_subfolder = f"vibewarp/{self.client_id}"
         self._validate_server()
 
-    def _unet_loader(self) -> tuple[str, dict[str, Any]]:
-        if self.unet_name.lower().endswith('.gguf'):
-            return 'UnetLoaderGGUF', {'unet_name': self.unet_name}
-        return 'UNETLoader', {
-            'unet_name': self.unet_name, 'weight_dtype': 'default'}
-
     def _validate_server(self) -> None:
         self._request('GET', '/system_stats')
-        unet_loader, _ = self._unet_loader()
+        unet_loader = diffusion_loader(self.unet_name)['class_type']
         expected = {
             unet_loader: ('unet_name', self.unet_name),
             'CLIPLoader': ('clip_name', self.clip_name),
@@ -102,9 +97,8 @@ class ComfyQwenEditClient(ComfyFluxClient):
         if not image_names:
             raise ValueError('Qwen Image Edit requires at least one reference image')
 
-        unet_loader, unet_inputs = self._unet_loader()
         graph: dict[str, dict[str, Any]] = {
-            '1': {'class_type': unet_loader, 'inputs': unet_inputs},
+            '1': diffusion_loader(self.unet_name),
             '2': {'class_type': 'CLIPLoader', 'inputs': {
                 'clip_name': self.clip_name,
                 'type': 'qwen_image',
@@ -169,7 +163,7 @@ class ComfyQwenEditClient(ComfyFluxClient):
             }},
             '36': {'class_type': 'VAEDecode', 'inputs': {
                 'samples': ['35', 0], 'vae': ['3', 0]}},
-            '37': {'class_type': 'PreviewImage', 'inputs': {
+            self.output_node_id: {'class_type': 'PreviewImage', 'inputs': {
                 'images': ['36', 0]}},
         })
         if use_lightning_lora:
@@ -192,6 +186,7 @@ class ComfyQwenEditClient(ComfyFluxClient):
         reference_images: list[Image.Image] | None = None,
         debug_dir: str | None = None,
         frame_num: int | None = None,
+        temporal_frame=None,
     ) -> Image.Image:
         qwen = config.qwen
         references = ([image.convert('RGB') for image in reference_images[:3]]
@@ -207,6 +202,8 @@ class ComfyQwenEditClient(ComfyFluxClient):
             qwen.steps, qwen.guidance_scale, qwen.sampler, qwen.scheduler,
             qwen.sampling_shift, qwen.use_lightning_lora,
             qwen.lora_strength)
+        if temporal_frame is not None:
+            temporal_frame.prepare(self, graph, config)
         progress = ComfyProgressMonitor(
             getattr(self, 'base_url', ''), self.client_id, graph)
         progress.start()
@@ -218,7 +215,10 @@ class ComfyQwenEditClient(ComfyFluxClient):
                 raise RuntimeError(f"ComfyUI returned no prompt_id: {result}")
             progress.set_prompt_id(prompt_id)
             self._active_progress = progress
-            return self._wait_for_output(prompt_id)
+            image = self._wait_for_output(prompt_id)
+            if temporal_frame is not None:
+                temporal_frame.record(self, prompt_id, config)
+            return image
         finally:
             progress.close()
             self._active_progress = None

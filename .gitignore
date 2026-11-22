@@ -260,3 +260,10 @@ system.json
 webui/.npm-cache/
 .test-tmp-cutout-parity-1106
 .taste-skill/
+
+# Local research tools, experiment notes and generated test runs.
+/local-experiments/
+
+# Temporary pytest fixture trees from sweep validation and local checks.
+/.pytest-*/
+/.test-*/

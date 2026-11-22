@@ -1,5 +1,14 @@
 """Known Comfy weight sources, matching docs/settings.md setup recipes."""
 COMFY_SOURCES = {
+    'flux3-image-klein-base-int8-convrot.safetensors': ('diffusion_models', 'https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/diffusion_models/flux3-image-klein-base-int8-convrot.safetensors'),
+    'qwen3vl_4b_int8_convrot.safetensors': ('text_encoders', 'https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/text_encoders/qwen3vl_4b_int8_convrot.safetensors'),
+    'moss_image_sft_int8_convrot.safetensors': ('diffusion_models', 'https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/diffusion_models/moss_image_sft_int8_convrot.safetensors'),
+    'moss_image_edit_lora_rank_64_bf16.safetensors': ('loras', 'https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/loras/moss_image_edit_lora_rank_64_bf16.safetensors'),
+    'qwen3.5_9b_w4a8_gptq.safetensors': ('text_encoders', 'https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/text_encoders/qwen3.5_9b_w4a8_gptq.safetensors'),
+    'flux2-vae_small.safetensors': ('vae', 'https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/vae/flux2-vae_small.safetensors'),
+    'minimax_h3_image_pruned_w4a8.safetensors': ('diffusion_models', 'https://huggingface.co/Comfy-Org/MiniMax-H3-Image/resolve/main/diffusion_models/minimax_h3_image_pruned_w4a8.safetensors'),
+    'minimax_h3_image_vae_fp16.safetensors': ('vae', 'https://huggingface.co/Comfy-Org/MiniMax-H3-Image/resolve/main/vae/minimax_h3_image_vae_fp16.safetensors'),
+    'qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors': ('text_encoders', 'https://huggingface.co/Comfy-Org/MiniMax-H3/resolve/main/text_encoders/qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors'),
     'flux-2-klein-4b-fp8.safetensors': ('diffusion_models', 'https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors'),
     'qwen_3_4b.safetensors': ('text_encoders', 'https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors'),
     'flux2-vae.safetensors': ('vae', 'https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-4b/resolve/main/split_files/vae/flux2-vae.safetensors'),

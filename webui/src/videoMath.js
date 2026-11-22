@@ -13,7 +13,13 @@
 export function fitDimensions(width, height, maxSize, multiple = 8, roundUp = false) {
   if (width <= 0 || height <= 0 || maxSize <= 0) return {width, height};
   const scale = Math.min(1, maxSize / Math.max(width, height));
-  const snap = (n) => Math.max(multiple, (roundUp?Math.ceil:Math.round)((n * scale) / multiple) * multiple);
+  const snap = (n) => {
+    const units = (n * scale) / multiple;
+    const lower = Math.floor(units);
+    // Python round() chooses the even integer at an exact half.
+    const nearest = units - lower === 0.5 ? lower + lower % 2 : Math.round(units);
+    return Math.max(multiple, (roundUp ? Math.ceil(units) : nearest) * multiple);
+  };
   return {width: snap(width), height: snap(height)};
 }
 

@@ -99,7 +99,7 @@ def test_disco_clip_controls_and_cutouts_have_an_ordered_workspace():
 def test_model_picker_omits_disco_256_without_breaking_legacy_settings():
     schema = config_schema()
     options = schema['model_options']
-    assert len(options) == 10
+    assert len(options) == 13
     assert 'disco_256' not in {option['value'] for option in options}
     assert schema['properties']['model_version']['choice_labels']['control_multi_v15'] == 'Stable Diffusion 1.5'
     assert config_from_dict({'model_version': 'disco_256'}).model_version == 'disco_256'
@@ -112,6 +112,11 @@ def test_custom_editors_are_declared_by_the_schema():
     assert props['controlnet']['properties']['models']['editor'] == 'controlnet'
     assert props['qwen']['properties']['references']['editor'] == 'references'
     assert 'editor' not in props['controlnet']['properties']['model_dir']
+    ci = props['comfy_image']['properties']
+    assert ci['multi_reference_instruction']['group_editor_extra']
+    assert ci['multi_reference_instruction']['workflows'] == ['conditioning']
+    assert not ci['references']['group_editor_extra']
+    assert not props['reference_label_opacity']['group_editor_extra']
 
 
 def test_frame_range_has_no_independent_frame_limit():
@@ -126,4 +131,6 @@ def test_model_picker_groups_native_and_comfy_managed_models():
     ]
     native = {option['value'] for option in schema['model_options'] if option['group'] == 'native'}
     assert native == {'control_multi_v15', 'control_multi_sdxl', 'disco_512'}
-    assert len([option for option in schema['model_options'] if option['group'] == 'comfy']) == 7
+    comfy = {option['value'] for option in schema['model_options'] if option['group'] == 'comfy'}
+    assert len(comfy) == 10
+    assert {'flux3_klein', 'moss_image', 'minimax_h3_image'} <= comfy

@@ -18,7 +18,7 @@ construction memory (try 1024 px; 0 preserves native behavior). Final cuts still
 use each encoder's required input size. Failed/cancelled jobs become terminal
 before GPU cleanup, and cleanup errors do not stop the job worker.
 
-Disco cutout schedules use executed inference progress (0–100%), restarting after skipped steps. Overview, innercut and grayscale values hold until the next key; charts show that hold through 100%. Older settings migrate once while preserving their configured run's cut selections. Video export cropping and upscaling preserve full-canvas blend feedback, and automatic model preparation preserves explicit relative ControlNet/IP-Adapter paths.
+Disco cutout schedules use executed inference progress (0–100%), restarting after skipped steps. Overview, innercut and grayscale values hold until the next key; charts show that hold through 100%. Older settings migrate once while preserving their configured run's cut selections. Video export blends adjacent original renders independently using numbered flow caches and consistency masks, before cropping or upscaling. Automatic model preparation preserves explicit relative ControlNet/IP-Adapter paths.
 
 Feeds each frame of a video through Stable Diffusion, warping the previous render forward
 along optical flow so every frame builds on the last instead of being redrawn from scratch.
@@ -31,6 +31,33 @@ Optical flow, consistency masks and ControlNets are the controls for *how much* 
 together — turn them up for stability, down for dissolve.
 
 ## The interface
+
+**FLUX.3 Image Klein**, **MOSS-Image**, and **MiniMax H3 Image** are available
+under ComfyUI-managed models, with text/edit mode in Prompts & sampling.
+Saved runs restore the generation mode, sampling overrides, model files and ordered references.
+Main style/edit prompts live there; extra multi-image role instructions appear
+above the reference cards in Conditioning.
+MOSS edit mode applies its edit LoRA with ordered references on both conditioning
+branches, following the native MOSS node's input convention.
+Conditioning also provides tag-size, badge-height and opacity controls for the
+optional baked image labels; these affect the actual model reference images.
+ComfyUI model-file selections are remembered separately for each model in your browser.
+On a fresh install, the UI fills in the checkpoint and encoder for the selected model variant.
+All ComfyUI model availability checks use the server's model-list API rather
+than local absolute paths, including GGUF files in legacy `unet` folders.
+See [setup and requirements](docs/comfy-image-models.md).
+Model-file dropdowns pin the suggestion first, then sort server-reported files
+by their shared name prefix and alphabetically. Missing suggestions can be
+downloaded; local ComfyUI download folders are discovered from its API.
+ComfyUI-managed models return their completed image to the shared player and history;
+submission/history/image retrieval is covered for every workflow variant.
+Disco-only canvas/cropping settings remain saved when switching models and do
+not affect validation or exports for other models.
+
+**Render 1 frame**, beside **Start render**, tests the style on the first frame
+of the selected range. It uses the current settings and leaves the full range
+in the form unchanged. The test run appears in history with normal progress
+and cancellation controls.
 
 A local web UI (Svelte + FastAPI), started with `run-ui.bat` / `run-ui.sh`. There is a full
 CLI too — see the [CLI reference](docs/cli.md).
@@ -65,7 +92,7 @@ Disco's init/image scale schedules, secondary model and frame-guidance mask
 are directly available in **Guidance / General**.
 Frame ranges use extracted-frame indices: with stride 2, range 0–10 extracts
 source frames 0, 2, …, 20, retaining video guidance for all eleven render frames.
-The persistent model picker groups ten variants into **Native
+The persistent model picker groups thirteen variants into **Native
 models** and **ComfyUI-managed models**, with Start/Cancel always in reach. The source
 video is probed before rendering, and phones use Viewer,
 Settings, and Runs views.
@@ -106,8 +133,8 @@ timeline includes **Download** for the current image or assembled video and **Ma
 ## Requirements
 
 - NVIDIA GPU with CUDA support (8 GB+ VRAM recommended)
-- The one-click installer handles Python and ffmpeg for you (see below).
-  For a manual install you also need Python 3.11+ and ffmpeg on PATH.
+- The Windows one-click installer handles Python and ffmpeg for you (see below).
+  Linux/macOS and manual installs need Python 3.11+ and ffmpeg on PATH.
 
 ## Quickstart
 
@@ -121,8 +148,10 @@ the example is never applied automatically.
 
 ### 1. Install
 
-**One-click (recommended).** Downloads a private Python 3.14, ffmpeg, and all
-dependencies into this folder — nothing touches your system Python:
+**One-click (recommended).** On Windows, downloads a private Python 3.14,
+ffmpeg/ffprobe, and application dependencies into this folder — nothing touches
+your system Python. Linux/macOS uses your installed Python and ffmpeg. Both
+installers include the UI dependencies and leave model weights to the UI:
 
 - **Windows**: double-click `install.bat` (or run it from a terminal).
 - **Linux/macOS**: `./install.sh`
@@ -161,7 +190,14 @@ install, use `python -m vibewarp <args>` inside your activated venv instead.
 
 ### 2. Get models
 
-Downloads the checkpoint and all ControlNets referenced in your settings file:
+Open `run-ui.bat` (Windows) or `./run-ui.sh` (Linux/macOS), choose a model and
+input video, then configure your settings. Use **Download required models**
+to prepare missing files, or **Start render** to prepare them on demand.
+Existing files are reused; setup does not download any model weights.
+Models without a supported download source still require you to supply their files.
+
+For CLI workflows, the download command remains available and downloads the
+checkpoint and ControlNets referenced in a settings file:
 
 ```bash
 run.bat --download-models --warpfusion-settings path/to/settings.txt
@@ -177,6 +213,11 @@ Get it from the [official ComfyUI download page](https://www.comfy.org/download)
 and update it before installing the models; these backends use native ComfyUI
 nodes. Portable and manual-install users can use the
 [official GitHub repository](https://github.com/Comfy-Org/ComfyUI).
+
+Sequential SD, SDXL, Disco and ComfyUI image renders can use the previous
+sample to guide denoising in flow-consistent areas. Enable it under **Frame
+consistency → Temporal guidance**. The Klein experiment used strength `0.2`
+from 10% to 85% of the steps. [Settings and ComfyUI node setup](docs/settings.md#flow-masked-temporal-guidance).
 
 For the experimental FLUX.2 Klein Edit path, start ComfyUI separately with its
 Klein diffusion model, matching Qwen text encoder, and Flux2 VAE installed.
@@ -234,11 +275,12 @@ run.bat --warpfusion-settings settings.txt --video input.mp4 --max-size 768 --en
 Rendered frames and the assembled video appear under
 `images_out/<batch-name>/<run>/` ([details](docs/cli.md#output-layout)).
 
-### Optional web UI
+### Web UI
 
 A Svelte web UI is available via `run-ui.bat` (Windows) / `./run-ui.sh`
-(Linux/macOS). It installs the lightweight FastAPI server from the `[ui]`
-extra on first launch and opens http://localhost:7860. The form is generated
+(Linux/macOS). The installer includes the lightweight FastAPI server from the
+`[ui]` extra; the launcher also repairs missing UI dependencies in older installs.
+It opens http://localhost:7860. The form is generated
 from `RunConfig`, with full config import/export, validation, queued rendering,
 live progress and logs, cancellation/resume, partial video assembly and playback, and
 artifact previews.
@@ -327,4 +369,5 @@ Based on [WarpFusion](https://github.com/Sxela/WarpFusion) by Alex Spirin (MIT).
 ## Contributing and security
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the development setup and test commands.
+The test guide also explains render-path skips when CUDA devices are unavailable or hidden.
 Please report vulnerabilities using the private process in [SECURITY.md](SECURITY.md).

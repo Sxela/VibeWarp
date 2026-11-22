@@ -104,12 +104,14 @@ _VIBEWARP_SECTIONS = [
     'animatediff', 'ipadapter',
     'diffusion', 'brightness', 'captions', 'scene', 'freeu',
     'color', 'warp', 'flow', 'video', 'mask', 'vae', 'hidream', 'flux', 'qwen',
-    'mage', 'disco', 'turbo',
+    'mage', 'comfy_image', 'disco', 'turbo',
 ]
 _VIBEWARP_TOP_LEVEL = {
     'sd_checkpoint_path', 'model_path', 'comfy_models_dir', 'model_version', 'batch_name',
     'output_dir', 'text_prompts', 'negative_prompts',
     'reference_label_opacity',
+    'reference_label_font_scale',
+    'reference_label_badge_height',
     'lora_dir', 'lora_merge_precision', 'frame_range',
     'keyframes_relative_to_frame_range',
 }

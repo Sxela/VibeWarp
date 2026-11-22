@@ -297,6 +297,25 @@ def _make_run_sd_ctx(style_strength=0.65, steps=20, rec_noise_cfg=None):
 
 
 class TestTemporalGuidance:
+    def test_previous_sample_projection_uses_executed_img2img_window(self, tmp_path):
+        ctx = _make_run_sd_ctx(steps=8)
+        ctx.config.flow.temporal_guidance_strength = .2
+        ctx.temporal_motion = (np.zeros((64, 64, 2)), np.ones((64, 64)))
+        state = FrameState(frame_num=1, prev_latent=torch.ones(1, 4, 8, 8))
+        path = tmp_path / 'initial.png'
+        Image.new('RGB', (64, 64)).save(path)
+        calls = []
+
+        def sample(model, x, sigmas, **kwargs):
+            for sigma in sigmas[:-1]:
+                clean = model(x, sigma[None], **kwargs['extra_args'])
+                calls.append(float(clean.mean()))
+            return x
+
+        ctx.sampler_fn = sample
+        run_sd(ctx, str(path), 5, 64, 64, 'paint', '', 8, 123, 1, state)
+        assert calls == pytest.approx([0., .2, .2, 0.])
+
     def test_latent_gradient_is_applied_clamped_and_logged(self, capsys):
         denoised = torch.tensor([[[[1.0, 0.0], [1.0, 0.0]]]])
         target = torch.tensor([[[[0.0, 1.0], [0.0, 1.0]]]])

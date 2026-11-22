@@ -256,7 +256,9 @@ def test_padded_manual_and_source_aspect_geometry(monkeypatch):
     apply_path_defaults(c)
     assert resolve_padded_geometry(c)==((1080,1920),(1088,1920))
     c.video.visible_width=c.video.visible_height=0;c.video.max_size=1920
-    monkeypatch.setattr('vibewarp.video.input.probe_video',lambda p:dict(width=720,height=1280))
+    import importlib
+    monkeypatch.setattr(importlib.import_module('vibewarp.video.input'), 'probe_video',
+                        lambda p:dict(width=720,height=1280))
     assert resolve_padded_geometry(c)==((1080,1920),(1088,1920))
 
 
@@ -291,7 +293,7 @@ def test_video_export_crops_before_upscale_and_keeps_rendered_png(tmp_path,monke
 
 @pytest.mark.parametrize('blend_mode', ['linear', 'optical flow'])
 @pytest.mark.parametrize('upscale_ratio', [1, 2])
-def test_export_geometry_stays_out_of_blend_feedback(tmp_path, monkeypatch, blend_mode, upscale_ratio):
+def test_export_geometry_follows_original_frame_pair_blending(tmp_path, monkeypatch, blend_mode, upscale_ratio):
     from vibewarp.video.output import create_video
     flow_dir = tmp_path/'flow'
     flow_dir.mkdir()
@@ -307,7 +309,8 @@ def test_export_geometry_stays_out_of_blend_feedback(tmp_path, monkeypatch, blen
     create_video(str(tmp_path), str(tmp_path/'out.mp4'), batch_name='test', ffmpeg_path='fake',
                  blend_mode=blend_mode, blend=.5, flow_dir=str(flow_dir), check_consistency=False,
                  visible_size=(32, 48), upscale_ratio=upscale_ratio)
-    for index, expected in enumerate((40, 80, 140)):
+    # Notebook uses the original previous render: (120 + 200) / 2 = 160.
+    for index, expected in enumerate((40, 80, 160)):
         with Image.open(tmp_path/'blend_temp'/f'{index:06d}.png') as image:
             assert image.size == (32*upscale_ratio, 48*upscale_ratio)
             assert image.getpixel((image.width//2, image.height//2)) == (expected,)*3

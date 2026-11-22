@@ -2,6 +2,15 @@ import {render,screen,fireEvent} from '@testing-library/svelte';
 import {expect,it,vi} from 'vitest';
 import RequiredModels from './RequiredModels.svelte';
 
+it('distinguishes an unavailable Comfy inventory from missing weights',()=>{
+  render(RequiredModels,{files:[{name:'remote.safetensors',path:'diffusion_models/remote.safetensors',
+    source:'comfy',server_url:'http://comfy.example:8188',status:'unknown',downloadable:false,error:'ComfyUI is offline'}]});
+  expect(screen.getByText('Unavailable')).toBeInTheDocument();
+  expect(screen.getByText('ComfyUI is offline')).toBeInTheDocument();
+  expect(screen.getByText('http://comfy.example:8188')).toBeInTheDocument();
+  expect(screen.getByRole('button',{name:'Download required models'})).toBeDisabled();
+});
+
 it('keeps the required list collapsed through updates with download still accessible',async()=>{
   const ondownload=vi.fn();
   const files=[{name:'weights.pt',path:'models/weights.pt',status:'missing',downloadable:true}];

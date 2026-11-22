@@ -40,6 +40,9 @@ LAYOUT: Dict[str, Tuple[str, str]] = {}
 MODEL_FAMILY_BY_VERSION = {
     'control_multi_v15': 'sd',
     'control_multi_sdxl': 'sd',
+    'flux3_klein': 'comfy_image',
+    'moss_image': 'comfy_image',
+    'minimax_h3_image': 'comfy_image',
     'flux2_klein_edit': 'flux',
     'flux2_klein_9b_edit': 'flux',
     'hidream_o1_edit': 'hidream',
@@ -50,7 +53,7 @@ MODEL_FAMILY_BY_VERSION = {
     'disco_512': 'disco',
     'disco_256': 'disco',
 }
-ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream', 'qwen', 'mage', 'disco')
+ALL_MODEL_FAMILIES = ('sd', 'flux', 'hidream', 'qwen', 'mage', 'comfy_image', 'disco')
 
 # Workspace navigation is independent of storage tiers. In particular, a model's
 # server/files can appear during setup while remaining machine-local on export.
@@ -58,12 +61,12 @@ WORKFLOW_GROUPS = {
     'source': ('Input Video', 'Output', 'Video Input'),
     'model': ('Model',),
     'prompts': ('Prompts', 'Diffusion', 'Seed', 'Flux Edit', 'HiDream-O1 Edit',
-                'Qwen Image Edit', 'Mage-Flow Edit', 'Disco Diffusion', 'Disco inpainting masks', 'Turbo'),
+                'Qwen Image Edit', 'Mage-Flow Edit', 'Comfy Image', 'Disco Diffusion', 'Disco inpainting masks', 'Turbo'),
     'clip': ('General', 'CLIP guidance', 'Cutouts', 'Advanced guidance'),
     'conditioning': ('ControlNet', 'IP-Adapter', 'Reference Images', 'Temporal Contact Sheet'),
     'background': ('Background masking', 'RVM files'),
     'color': ('Raw input color match', 'Color Match — Before Diffusion', 'Color Match — After Diffusion'),
-    'consistency': ('Motion', 'Flow & Consistency', 'Warp', 'AnimateDiff',
+    'consistency': ('Temporal guidance', 'Motion', 'Flow & Consistency', 'Warp', 'AnimateDiff',
                     'Reconstruction Noise', 'Scene Scheduling'),
     'export': ('Video Output',),
     'all': (),
@@ -80,6 +83,9 @@ WORKFLOW_LABELS = {
 MODEL_LABELS = {
     'control_multi_v15': 'Stable Diffusion 1.5',
     'control_multi_sdxl': 'Stable Diffusion XL',
+    'flux3_klein': 'FLUX.3 Image Klein',
+    'moss_image': 'MOSS-Image',
+    'minimax_h3_image': 'MiniMax H3 Image',
     'flux2_klein_edit': 'FLUX.2 Klein · 4B',
     'flux2_klein_9b_edit': 'FLUX.2 Klein · 9B',
     'hidream_o1_edit': 'HiDream-O1',
@@ -95,7 +101,7 @@ MODEL_GROUP_LABELS = {'native': 'Native models', 'comfy': 'ComfyUI-managed model
 def model_runtime_group(version: str) -> str:
     # Group the edit models by their default backend; FLUX retains its optional
     # Diffusers backend in model settings.
-    return 'comfy' if MODEL_FAMILY_BY_VERSION[version] in ('flux', 'hidream', 'qwen', 'mage') else 'native'
+    return 'comfy' if MODEL_FAMILY_BY_VERSION[version] in ('flux', 'hidream', 'qwen', 'mage', 'comfy_image') else 'native'
 
 
 GROUP_EDITORS = {
@@ -146,7 +152,7 @@ def workspace_metadata(section: str, name: str) -> dict:
     tier, group = placed
     if tier == 'system':
         workflows = ['system']
-        if group == 'Paths' and (section in ('flux', 'hidream', 'qwen', 'mage')
+        if group == 'Paths' and (section in ('flux', 'hidream', 'qwen', 'mage', 'comfy_image')
                                  or (section == 'main' and name == 'comfy_models_dir')):
             workflows.insert(0, 'model')
     else:
@@ -154,8 +160,14 @@ def workspace_metadata(section: str, name: str) -> dict:
                            if group in groups), 'all')]
     result = {'workflows': workflows,
               'workspace_advanced': tier == 'advanced' and group not in ('Motion', 'Advanced guidance')}
+    from vibewarp.comfy_inventory import COMFY_FAMILIES, MODEL_FIELD_CATEGORIES
+    if section in COMFY_FAMILIES and name in MODEL_FIELD_CATEGORIES:
+        result['comfy_model'] = True
     if group in GROUP_EDITORS:
         result['editor'] = GROUP_EDITORS[group]
+    if group == 'Reference Images':
+        result['group_editor_extra'] = name not in ('references', 'reference_label_opacity',
+            'reference_label_font_scale', 'reference_label_badge_height')
     order = GROUP_FIELD_ORDER.get(group, ())
     key = f'{section}.{name}'
     if key in order:
@@ -170,6 +182,17 @@ def workspace_metadata(section: str, name: str) -> dict:
         result['schedule_fallback'] = SCHEDULE_FALLBACKS[key]
     if group in ('Background masking', 'Raw input color match'):
         result['preview'] = 'raw_video'
+    conditions = []
+    if section == 'comfy_image':
+        if name in ('references', 'multi_reference_instruction', 'comfy_edit_lora_name', 'edit_lora_strength'):
+            conditions.append({'path': 'comfy_image.mode', 'equals': 'edit'})
+        if name in ('comfy_edit_lora_name', 'edit_lora_strength'):
+            conditions.append({'path': 'model_version', 'equals': 'moss_image'})
+        if name == 'sampling_shift':
+            conditions.append({'path': 'model_version', 'equals': 'flux3_klein'})
+    if section == 'main' and name == 'negative_prompts':
+        conditions.append({'path': 'model_version', 'not_equals': 'minimax_h3_image'})
+    if conditions: result['visible_when'] = conditions
     return result
 
 
@@ -185,6 +208,7 @@ SECTION_MODEL_FAMILIES = {
     'hidream': ('hidream',),
     'qwen': ('qwen',),
     'mage': ('mage',),
+    'comfy_image': ('comfy_image',),
     'disco': ('disco',),
     'contact_sheet': ('flux', 'hidream', 'qwen', 'mage'),
 }
@@ -198,13 +222,15 @@ FIELD_MODEL_FAMILIES = {
     **{f'diffusion.{name}': ('sd', 'disco') for name in (
         'tiled_sampler', 'sampler_tile_size', 'sampler_tile_overlap',
         'sampler_tile_split_threshold', 'sampler_scale_schedule', 'sampler_scale_min_size')},
-    'main.reference_label_opacity': ('flux', 'hidream', 'qwen', 'mage'),
+    'main.reference_label_opacity': ('flux', 'hidream', 'qwen', 'mage', 'comfy_image'),
+    'main.reference_label_font_scale': ('flux', 'hidream', 'qwen', 'mage', 'comfy_image'),
+    'main.reference_label_badge_height': ('flux', 'hidream', 'qwen', 'mage', 'comfy_image'),
     # FLUX.2 uses positive instructions with zeroed negative conditioning.
-    'main.negative_prompts': ('sd', 'hidream', 'qwen', 'mage', 'disco'),
+    'main.negative_prompts': ('sd', 'hidream', 'qwen', 'mage', 'comfy_image', 'disco'),
     # These paths and precision settings belong to the local SD stack.
     'main.sd_checkpoint_path': ('sd',),
     'main.model_path': ('sd', 'disco'),
-    'main.comfy_models_dir': ('flux', 'hidream', 'qwen', 'mage'),
+    'main.comfy_models_dir': ('flux', 'hidream', 'qwen', 'mage', 'comfy_image'),
     'main.lora_dir': ('sd',),
     'main.lora_merge_precision': ('sd',),
     'video.visible_width': ('disco',),
@@ -319,9 +345,18 @@ _assign('render', 'IP-Adapter',
 # the fields live on the Render tab so the edit knobs sit next to the prompts they
 # drive. model_repo is a machine path and goes to System > Paths (below).
 _assign('render', 'Reference Images',
-        'main.reference_label_opacity', 'flux.references')
+        'main.reference_label_opacity', 'main.reference_label_font_scale',
+        'main.reference_label_badge_height', 'flux.references')
 _assign('render', 'Flux Edit',
         'flux.guidance_scale', 'flux.steps', 'flux.fixed_seed')
+_assign('render', 'Temporal guidance',
+        'flow.temporal_guidance_strength', 'flow.temporal_guidance_start',
+        'flow.temporal_guidance_end')
+FIELD_HELP['flow.temporal_guidance_strength'] = (
+    'Pull clean latent predictions toward the flow-warped previous render in '
+    'consistent areas. 0 disables guidance. The Klein experiment used 0.2.')
+FIELD_HELP['flow.temporal_guidance_start'] = 'First guided fraction of denoising steps (0 to 1).'
+FIELD_HELP['flow.temporal_guidance_end'] = 'Last guided fraction of denoising steps (0 to 1).'
 _assign('render', 'Reference Images', 'hidream.references')
 _assign('render', 'HiDream-O1 Edit',
         'hidream.guidance_scale', 'hidream.steps', 'hidream.fixed_seed',
@@ -684,3 +719,21 @@ for _path in ('disco.inpaint', 'disco.inpainting_stop', 'disco.inpaint_mask_blur
     _assign(LAYOUT[_path][0], 'Disco inpainting masks', _path)
 _assign('render', 'Raw input color match', 'mask.raw_color_enabled', 'mask.raw_color_method',
         'mask.raw_color_strength', 'mask.raw_color_reference')
+
+# Shared native Comfy still-image family; field ownership stays in the schema.
+from vibewarp.config import ComfyImageConfig
+for _field in fields(ComfyImageConfig):
+    _tier = 'system' if _field.name.startswith('comfy_') else 'render'
+    _group = 'Paths' if _tier == 'system' else 'Reference Images' if _field.name in ('references', 'multi_reference_instruction') else 'Seed' if _field.name == 'fixed_seed' else 'Comfy Image'
+    _assign(_tier, _group, f'comfy_image.{_field.name}')
+LABELS.update({'comfy_image.mode': 'Generation mode',
+    'comfy_image.multi_reference_instruction': 'Reference-role instructions (2+ images)',
+    'comfy_image.comfy_unet_name': 'Diffusion model filename',
+    'comfy_image.comfy_clip_name': 'Text encoder filename',
+    'comfy_image.comfy_vae_name': 'VAE filename',
+    'comfy_image.comfy_edit_lora_name': 'MOSS edit LoRA filename'})
+FIELD_HELP.update({'comfy_image.mode': 'Edit conditions on the selected reference images. Text uses only the prompt; the source video still defines the frame range.',
+    'comfy_image.multi_reference_instruction': 'Prepended to the main prompt when two or more reference images are sent. Describe which image provides content, style or identity. For one image, use the main prompt under Prompts & sampling.',
+    'comfy_image.comfy_unet_name': 'Filename relative to ComfyUI diffusion_models, including any subfolder. Availability comes from the ComfyUI API.',
+    'comfy_image.comfy_clip_name': 'Filename from ComfyUI text_encoders, not an absolute path.',
+    'comfy_image.comfy_vae_name': 'Filename from ComfyUI vae, not an absolute path.'})

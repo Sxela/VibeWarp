@@ -11,7 +11,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Union, get_args, get_origin, get_type_hints
 
 from vibewarp.config import (
-    FLUX_MODEL_DEFAULTS, MAGE_MODEL_DEFAULTS, QWEN_MODEL_DEFAULTS, ColorConfig,
+    FLUX_MODEL_DEFAULTS, MAGE_MODEL_DEFAULTS, QWEN_MODEL_DEFAULTS, COMFY_IMAGE_DEFAULTS,
+    COMFY_IMAGE_DIMENSION_MULTIPLES, comfy_image_defaults, ColorConfig,
     ContactSheetConfig, EditReferenceConfig, FluxConfig, HiDreamConfig, MageFlowEditConfig,
     QwenEditConfig, RunConfig, DiscoConfig, VideoConfig,
     flux_model_files,
@@ -28,6 +29,9 @@ from vibewarp.ipadapter_catalog import (
 )
 
 FIELD_CHOICES = {
+    "ComfyImageConfig.mode": ["edit", "text"],
+    "ComfyImageConfig.sampler": ["euler", "er_sde", "dpmpp_2m"],
+    "ComfyImageConfig.scheduler": ["simple", "normal", "beta"],
     "BackgroundMaskConfig.render_mask_stage": ['before diffusion', 'after diffusion'],
     "BackgroundMaskConfig.mask_source": ["RVM matting", "mask video", "image folder"],
     "BackgroundMaskConfig.raw_color_method": ["PDF", "LAB", "mean"],
@@ -43,6 +47,7 @@ FIELD_CHOICES = {
     # stack while retaining VibeWarp's flow, consistency and colour pipeline.
     "RunConfig.model_version": [
         "control_multi_v15", "control_multi_sdxl",
+        "flux3_klein", "moss_image", "minimax_h3_image",
         "flux2_klein_edit", "flux2_klein_9b_edit", "hidream_o1_edit",
         "qwen_image_edit_2511", "qwen_image_edit_2511_gguf",
         "mage_flow_edit", "mage_flow_edit_turbo",
@@ -278,6 +283,8 @@ def config_from_dict(data: Any, cls: type = RunConfig, path: str = "config") -> 
             migrate_cutout_schedules(result, legacy_original_time)
         except (ValueError, TypeError, IndexError, KeyError) as exc:
             raise ConfigError(f'Cannot migrate Disco cutout schedules: {exc}') from exc
+    if cls.__name__ in ('FluxConfig', 'QwenEditConfig', 'MageFlowEditConfig'):
+        result._explicit_fields = set(data)
     if cls is RunConfig and result.model_version in FLUX_MODEL_DEFAULTS:
         for key, value in flux_model_files(result).items():
             setattr(result.flux, key, value)
@@ -746,18 +753,22 @@ def validate_config(
             and not os.path.isfile(config.animatediff.motion_module_path)):
         error("animatediff.motion_module_path",
               f"Motion module does not exist: {config.animatediff.motion_module_path}")
-    if config.video.width <= 0 or (not config.model_version.startswith('disco_') and config.video.width % 8):
-        error("video.width", "Width must be positive and divisible by 8")
-    if config.video.height <= 0 or (not config.model_version.startswith('disco_') and config.video.height % 8):
-        error("video.height", "Height must be positive and divisible by 8")
-    visible = (config.video.visible_width, config.video.visible_height)
-    if any(type(v) is not int or v < 0 for v in visible) or bool(visible[0]) != bool(visible[1]):
-        error('video.visible_width', 'Set both visible dimensions to positive integers, or both to zero')
-    padded = config.model_version.startswith('disco_') and config.disco.pad_to_multiple_64
-    if any(visible) and not padded:
-        error('video.visible_width', 'Visible dimensions require Disco canvas padding')
-    if config.video_assembly.crop_to_visible and not padded:
-        error('video_assembly.crop_to_visible', 'Visible-content cropping requires Disco canvas padding')
+    if config.model_version not in COMFY_IMAGE_DIMENSION_MULTIPLES or config.video.max_size <= 0:
+        multiple = COMFY_IMAGE_DIMENSION_MULTIPLES.get(config.model_version, 8)
+        for axis in ('width', 'height'):
+            size = getattr(config.video, axis)
+            if size <= 0 or (not config.model_version.startswith('disco_') and size % multiple):
+                error(f'video.{axis}', f'{axis.title()} must be positive and divisible by {multiple}')
+    # Hidden Disco settings survive model switching; only Disco consumes them.
+    if config.model_version.startswith('disco_'):
+        visible = (config.video.visible_width, config.video.visible_height)
+        if any(type(v) is not int or v < 0 for v in visible) or bool(visible[0]) != bool(visible[1]):
+            error('video.visible_width', 'Set both visible dimensions to positive integers, or both to zero')
+        padded = config.disco.pad_to_multiple_64
+        if any(visible) and not padded:
+            error('video.visible_width', 'Visible dimensions require Disco canvas padding')
+        if config.video_assembly.crop_to_visible and not padded:
+            error('video_assembly.crop_to_visible', 'Visible-content cropping requires Disco canvas padding')
     if len(config.frame_range) not in (1, 2) or any(value < 0 for value in config.frame_range):
         error("frame_range", "Frame range must contain one frame number or two non-negative frame numbers")
     elif len(config.frame_range) == 2 and config.frame_range[1] and config.frame_range[1] < config.frame_range[0]:
@@ -858,10 +869,36 @@ def validate_config(
                 f"{phase.title()} color-match strength must be between 0 and 1",
             )
     family = model_family_for_version(config.model_version)
+    if family in ('flux', 'hidream', 'qwen', 'mage', 'comfy_image'):
+        for name, low, high in [('reference_label_opacity', 0, 1),
+                ('reference_label_font_scale', 0.5, 4), ('reference_label_badge_height', 0.04, 0.3)]:
+            value = getattr(config, name)
+            if not math.isfinite(value) or not low <= value <= high:
+                error(name, f'Choose a finite value between {low} and {high}')
+    if family == 'comfy_image':
+        ci = config.comfy_image
+        resolved = comfy_image_defaults(config)
+        if ci.mode not in ('edit', 'text'): error('comfy_image.mode', 'Choose edit or text mode')
+        if ci.steps < 1: error('comfy_image.steps', 'Steps must be positive')
+        if ci.guidance_scale < 0: error('comfy_image.guidance_scale', 'Guidance cannot be negative')
+        if ci.edit_lora_strength < 0: error('comfy_image.edit_lora_strength', 'LoRA strength cannot be negative')
+        for name in ('comfy_unet_name', 'comfy_clip_name', 'comfy_vae_name'):
+            if not str(resolved[name]).strip(): error(f'comfy_image.{name}', 'Choose a ComfyUI model filename')
+        if config.model_version == 'moss_image' and ci.mode == 'edit' and not resolved['comfy_edit_lora_name']:
+            error('comfy_image.comfy_edit_lora_name', 'MOSS editing requires the edit LoRA')
+        if not ci.comfy_server_url.startswith(('http://','https://')):
+            error('comfy_image.comfy_server_url', 'Enter an HTTP ComfyUI URL')
+        if ci.mode == 'edit':
+            from vibewarp.core.edit_references import MAX_EDIT_REFERENCES
+            if not ci.references or ci.references[0].source not in ('raw', 'previous', 'warped'):
+                error('comfy_image.references', 'Reference image 1 must use a video-frame source')
+            if len(ci.references) > MAX_EDIT_REFERENCES['comfy_image']:
+                error('comfy_image.references', 'At most five references are supported')
+            for index, reference in enumerate(ci.references):
+                if reference.source == 'upload' and (not reference.image_path or
+                        (check_paths and not os.path.isfile(reference.image_path))):
+                    error(f'comfy_image.references.{index}.image_path', 'Choose an existing reference image')
     if family in ('flux', 'hidream', 'qwen'):
-        if not 0 <= config.reference_label_opacity <= 1:
-            error("reference_label_opacity",
-                  "Reference label opacity must be between 0 and 1")
         refs = getattr(config, family).references
         path = f'{family}.references'
         allowed = {'raw', 'previous', 'warped', 'upload', 'none'}
@@ -894,6 +931,18 @@ def validate_config(
                 error("qwen.guidance_scale", "Qwen guidance cannot be negative")
             if config.qwen.lora_strength < 0:
                 error("qwen.lora_strength", "Qwen LoRA strength cannot be negative")
+    if config.flow.temporal_guidance_strength != 0:
+        flow = config.flow
+        if not 0 < flow.temporal_guidance_strength <= 1:
+            error('flow.temporal_guidance_strength', 'Strength must be between 0 and 1')
+        if not 0 <= flow.temporal_guidance_start < flow.temporal_guidance_end <= 1:
+            error('flow.temporal_guidance_start', 'Expected 0 <= start < end <= 1')
+        if family == 'flux' and config.flux.backend != 'comfy':
+            error('flux.backend', 'Klein temporal guidance requires ComfyUI')
+        if not config.flow.flow_warp or not config.flow.check_consistency:
+            error('flow.check_consistency', 'Temporal guidance requires flow warp and consistency checking')
+        if config.turbo.enabled or config.contact_sheet.mode != 'off' or config.animatediff.enabled:
+            error('flow.temporal_guidance_strength', 'Temporal guidance requires sequential sampled frames. Disable turbo, contact sheets and AnimateDiff.')
     if config.contact_sheet.mode not in FIELD_CHOICES["ContactSheetConfig.mode"]:
         error("contact_sheet.mode", "Unknown contact-sheet mode")
     if config.contact_sheet.layout not in FIELD_CHOICES["ContactSheetConfig.layout"]:
@@ -1044,6 +1093,18 @@ def config_schema() -> dict:
         version: dict(defaults)
         for version, defaults in QWEN_MODEL_DEFAULTS.items()
     }
+    schema["comfy_image_model_defaults"] = {version: dict(defaults) for version, defaults in COMFY_IMAGE_DEFAULTS.items()}
+    image_schema = schema['properties']['comfy_image']
+    image_schema['default'] = defaults['comfy_image']
+    for key in COMFY_IMAGE_DEFAULTS['flux3_klein']:
+        image_schema['properties'][key]['default'] = defaults['comfy_image'][key]
+    schema['comfy_image_dimension_multiples'] = dict(COMFY_IMAGE_DIMENSION_MULTIPLES)
+    from vibewarp.comfy_inventory import COMFY_FAMILIES, model_fields
+    schema['comfy_model_suggestions'] = {}
+    for version, family in schema['model_family_by_version'].items():
+        if family in COMFY_FAMILIES:
+            _, model_options = model_fields(RunConfig(model_version=version))
+            schema['comfy_model_suggestions'][version] = {row['field']: row['suggested'] for row in model_options}
     schema["mage_model_defaults"] = {
         version: dict(defaults)
         for version, defaults in MAGE_MODEL_DEFAULTS.items()

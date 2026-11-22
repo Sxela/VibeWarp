@@ -543,12 +543,20 @@ stream, the error is silently suppressed and the silent video is kept.
 
 This is WarpFusion's consistency-aware export smoothing path. Set
 `video_assembly.blend_mode="optical flow"` and `flow.check_consistency=True` to
-warp and blend the previous processed output using the saved flow and
+warp and blend the previous original rendered frame using the saved flow and
 forward/backward consistency map. `video_assembly.blend` and the three
 `video_assembly.*_consistency_weight` fields match the notebook panel. Video
 assembly uses the notebook's export mask settings (`blur=2`, `dilate=0`) rather
 than the render loop's mask post-processing values. This works for SD, Flux, and
 HiDream outputs.
+
+Each pair is independent: the blended export never feeds the next pair. Native
+`000000.jpg.npy` flow-cache names resolve from absolute render indices, including
+ranges starting above zero. Export uses the run's `warp.padding_ratio` and
+`warp.padding_mode`. Smaller cached flow grids are resized to the output size,
+with displacement vectors scaled in each axis, so export keeps native dimensions.
+Rebuilding currently requires existing flow/CC caches and enabled render flow;
+raw-reference-only jobs do not automatically acquire export-only flow caches.
 
 ### FFmpeg deflicker
 
@@ -575,6 +583,41 @@ Background types:
 - `'init_video'` — raw video frame for the same index
 
 `mask_clip_low` / `mask_clip_high` threshold the mask before compositing.
+
+## Flow-masked temporal guidance
+
+In **Frame consistency → Temporal guidance**, set **Temporal guidance strength**
+to `0.2` to use the Klein experiment's setting. The default is `0` (off).
+Use sequential rendering with **Flow warp** and **Check consistency** enabled.
+SD, SDXL, guided Disco, and the ComfyUI image renderers support this option.
+
+| Project setting | Default | Meaning |
+|---|---:|---|
+| `flow.temporal_guidance_strength` | `0` | Fraction of the distance each guided clean prediction moves toward the previous sample, from 0 to 1. |
+| `flow.temporal_guidance_start` | `0.1` | First eligible fraction of the executed denoising steps. |
+| `flow.temporal_guidance_end` | `0.85` | Last eligible fraction, inclusive. |
+
+The first frame has no predecessor. For subsequent frames, backward optical
+flow maps the previous sampled output into the current frame. Guidance applies
+only where the consistency mask and the source coordinates are trusted. This
+lets newly exposed areas follow the current prediction. At the default window,
+2 of 4, 5 of 8, or 11 of 16 Euler updates receive the correction. Shorter runs
+can have no step inside the window. The correction adds no denoiser calls.
+
+With FLUX.2's standard VAE, the warp operates on unpacked, denormalized VAE
+features. Other codecs use their spatial sample grid. Disco and HiDream operate
+on image-space predictions. A supplied first-frame image seeds history once.
+Normal reference images, prompts, img2img strength and SD's gradient-guidance
+controls remain independently configurable.
+
+**ComfyUI setup.** Copy [comfy_temporal_guidance.py](../vibewarp/core/comfy_temporal_guidance.py)
+into the server's `ComfyUI/custom_nodes/` directory and restart ComfyUI. The
+node uses the server's existing PyTorch installation. Keep the server's
+`output/vibewarp/` latents and the VibeWarp run's `temp/temporal-guidance/`
+checkpoints for resume. Native renders store the samples in the run itself.
+
+The Flux Diffusers backend, AnimateDiff batches, contact sheets, warp-only
+turbo frames and unconditional distilled Disco do not support this mode.
 
 ## SD/SDXL temporal guidance
 
@@ -1295,6 +1338,12 @@ are hidden from the UI. Legacy `before`, `after`, and `both` modes migrate to
 the corresponding independent enable toggles.
 
 ## Vendored libraries
+
+For native ComfyUI FLUX.3, MOSS and MiniMax still-image workflows, the
+`comfy_image` section holds the server-relative model filenames, text/edit
+mode, sampling controls and ordered references. See
+[Comfy image model settings](comfy-image-models.md). Availability for existing
+Comfy backends also uses the ComfyUI model-list API.
 
 VibeWarp vendors everything it needs in `vibewarp/vendor/` — no external git
 clones required.

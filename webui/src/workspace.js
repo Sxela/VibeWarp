@@ -1,3 +1,10 @@
+export function conditionsMatch(schema,config) {
+  return (schema?.visible_when||[]).every(condition=>{
+    const value=condition.path.split('.').reduce((item,key)=>item?.[key],config);
+    return 'equals' in condition?value===condition.equals:value!==condition.not_equals;
+  });
+}
+
 export function flattenFields(schema) {
   return Object.entries(schema?.properties || {}).flatMap(([name, prop]) =>
     prop.type === 'dataclass'

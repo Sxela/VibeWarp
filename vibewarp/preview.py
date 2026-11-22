@@ -432,7 +432,7 @@ def _expected_debug_stems(path: str, mtime_ns: int, size: int) -> tuple:
                         continue
                     index += 1
                     stems.append(f'ipa_{safe_key}_source_{index}')
-    elif family in ('flux', 'hidream', 'qwen', 'mage'):
+    elif family in ('flux', 'hidream', 'qwen', 'mage', 'comfy_image'):
         for index, ref in enumerate(getattr(config, family).references, 1):
             if index == 1 or ref.source != 'none':
                 stems.append(f'{family}_reference_{index}')

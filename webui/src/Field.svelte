@@ -1,13 +1,14 @@
 <script>
   // `error` is the server's validation message for THIS field. It is rendered next to the
   // input rather than only in the sidebar, and the anchor id lets the sidebar scroll here.
-  let { name, schema, value, onchange, path = '', hint = '', error = '' } = $props();
+  let { name, schema, value, onchange, path = '', hint = '', error = '', modelInfo=null } = $props();
   let help=$derived(hint||schema.help||'');
   import Field from './Field.svelte';
   import ScheduleEditor from './ScheduleEditor.svelte';
   import HelpTip from './HelpTip.svelte';
   import FrameRange from './FrameRange.svelte';
   import GuidanceEncoders from './GuidanceEncoders.svelte';
+  import ComfyModelSelect from './ComfyModelSelect.svelte';
   import { isPathField, stripQuotes } from './paths.js';
   // Every *_schedule field is a keyframe/per-frame series — chips, not raw JSON.
   let isProgress = $derived(['inference_progress','denoising_progress'].includes(schema.schedule_domain));
@@ -46,7 +47,9 @@
   }
   function jsonValue(e){ try { onchange(JSON.parse(e.target.value)); e.target.classList.remove('invalid'); } catch { e.target.classList.add('invalid'); } }
 </script>
-{#if schema.vector_labels}
+{#if schema.comfy_model}
+  <ComfyModelSelect {title} {anchor} {value} {onchange} info={modelInfo} {help} {error}/>
+{:else if schema.vector_labels}
   <fieldset id={anchor} class:errored={!!error}><legend>{title}{#if help}<HelpTip label={'Help: '+title} text={help}/>{/if}</legend><div class="vector-inputs">
     {#each schema.vector_labels as axis,index}<label><span>{axis}</span><input type="number" step="any"
       aria-label={`${title} ${axis}`} value={value?.[index]??0}

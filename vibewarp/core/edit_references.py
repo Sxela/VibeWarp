@@ -16,34 +16,49 @@ REFERENCE_SOURCE_LABELS = {
     'upload': 'uploaded image',
     'none': 'none',
 }
-MAX_EDIT_REFERENCES = {'flux': 10, 'hidream': 10, 'qwen': 3, 'mage': 16}
+MAX_EDIT_REFERENCES = {'flux': 10, 'hidream': 10, 'qwen': 3, 'mage': 16, 'comfy_image': 5}
 
 
 def add_reference_label(
-    image: Image.Image, text: str, opacity: float = 0.7
+    image: Image.Image, text: str, opacity: float = 0.7,
+    font_scale: float = 1.0, badge_height: float = 0.12,
 ) -> Image.Image:
-    """Alpha-blend a role label without changing image dimensions."""
+    """Bake a resolution-scaled tag with adjustable band height into model input."""
     base = image.convert('RGBA')
     width, height = base.size
-    band_height = max(24, round(height * 0.075))
-    font_size = max(12, round(band_height * 0.48))
-    try:
-        font = ImageFont.truetype('DejaVuSans-Bold.ttf', font_size)
-    except OSError:
-        font = ImageFont.load_default()
+    band_height = min(height, max(32, round(height * badge_height)))
+    font_size = max(1, round(min(width, height) * 0.08 * font_scale))
+    def load_font(size):
+        for name in ('DejaVuSans-Bold.ttf', 'segoeuib.ttf', 'arialbd.ttf'):
+            try:
+                return ImageFont.truetype(name, size)
+            except OSError:
+                pass
+        # Pillow's embedded scalable font: never silently fall back to 10px.
+        return ImageFont.load_default(size=size)
     alpha = round(max(0.0, min(1.0, opacity)) * 255)
     overlay = Image.new('RGBA', base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
+    padding = max(1, round(min(width, band_height) * 0.1))
+    while True:
+        font = load_font(font_size)
+        stroke = max(0, round(font_size * 0.02))
+        bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
+        text_width, text_height = bbox[2]-bbox[0], bbox[3]-bbox[1]
+        fit = min(1.0, max(1, width-2*padding)/max(1, text_width),
+                  max(1, band_height-2*padding)/max(1, text_height))
+        if fit >= 1 or font_size <= 1:
+            break
+        font_size = max(1, min(font_size-1, int(font_size*fit)))
     top = height - band_height
     draw.rectangle((0, top, width, height), fill=(0, 0, 0, alpha))
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_width = bbox[2] - bbox[0]
-    text_height = bbox[3] - bbox[1]
     draw.text(
-        ((width - text_width) / 2, top + (band_height - text_height) / 2 - bbox[1]),
+        ((width - text_width) / 2 - bbox[0], top + (band_height - text_height) / 2 - bbox[1]),
         text,
         fill=(255, 255, 255, alpha),
         font=font,
+        stroke_width=stroke,
+        stroke_fill=(255, 255, 255, alpha),
     )
     return Image.alpha_composite(base, overlay).convert('RGB')
 
@@ -74,6 +89,8 @@ def resolve_reference_images(
     size: tuple[int, int],
     max_references: int = 10,
     label_opacity: float = 0.7,
+    label_font_scale: float = 1.0,
+    label_badge_height: float = 0.12,
 ) -> list[Image.Image]:
     """Resolve an ordered reference configuration for one render frame.
 
@@ -113,7 +130,8 @@ def resolve_reference_images(
             image = image.resize(size, Image.Resampling.LANCZOS)
         if spec.label:
             image = add_reference_label(
-                image, f'@Image{len(resolved) + 1}', opacity=label_opacity)
+                image, f'@Image{len(resolved) + 1}', opacity=label_opacity,
+                font_scale=label_font_scale, badge_height=label_badge_height)
         resolved.append(image)
     if not resolved:
         raise ValueError('At least one edit reference is required')

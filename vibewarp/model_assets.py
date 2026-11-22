@@ -24,8 +24,13 @@ def models_root(config: RunConfig) -> Path:
     return path.parent if path.is_file() else path
 
 
-def required_model_files(config: RunConfig) -> list[dict]:
-    """Local presence preview only: no transfers, Hub requests or GPU loading."""
+def required_model_files(config: RunConfig, comfy_files=None) -> list[dict]:
+    """Presence preview: ComfyUI inventory or native files; no transfers/GPU loading."""
+    from vibewarp.comfy_inventory import model_specs, required_comfy_files
+    comfy_url, specs = model_specs(config)
+    remote = ([row for row in comfy_files if row['required']] if comfy_files is not None
+              else required_comfy_files(config) if comfy_url else [])
+    comfy_paths = {row['download_path'] for row in remote if row.get('download_path')}
     files = {}
     def add(path, name=None, *, downloadable=False, present=None, size=None):
         path = Path(path).expanduser().resolve()
@@ -36,8 +41,12 @@ def required_model_files(config: RunConfig) -> list[dict]:
         files[str(path)] = dict(name=name or path.name, path=str(path),
             status='present' if present else 'missing', total=size,
             downloadable=downloadable)
-    for asset in selected_assets(config):
+    for asset in selected_assets(config, comfy_files=remote if comfy_url else None):
+        if asset.path in comfy_paths:
+            continue
         add(asset.path, downloadable=True)
+    for row in remote:
+        files[row['path']] = row
     if config.model_version.startswith('disco_'):
         d = config.disco
         if d.checkpoint_path:
@@ -82,7 +91,7 @@ def required_model_files(config: RunConfig) -> list[dict]:
                            and any(p.is_file() and p.stat().st_size > 0 for p in tokenizer))
                 size = sum(p.stat().st_size for p in required+weights+tokenizer if p.is_file())
                 add(root,f'{name} (model and tokenizer)',downloadable=True,present=present,size=size or None)
-    else:
+    elif not comfy_url:
         if config.sd_checkpoint_path and config.model_version.startswith(('control_','v1_','v2_')):
             add(config.sd_checkpoint_path,'Diffusion checkpoint')
         if config.controlnet.enabled:
@@ -96,15 +105,21 @@ def required_model_files(config: RunConfig) -> list[dict]:
     return list(files.values())
 
 
-def selected_assets(config: RunConfig) -> list[ModelAsset]:
+def selected_assets(config: RunConfig, comfy_files=None) -> list[ModelAsset]:
     """Catalog weights with known sources; custom files are never substituted."""
     from vibewarp.ui_layout import model_family_for_version
     family = model_family_for_version(config.model_version)
     root = models_root(config)
     assets = []
-    if config.comfy_models_dir and family in ('flux', 'hidream', 'qwen', 'mage'):
+    if comfy_files is not None:
         from vibewarp.comfy_assets import COMFY_SOURCES
-        from vibewarp.config import flux_model_files, qwen_model_files, mage_model_defaults
+        for row in comfy_files:
+            if row.get('required') and row.get('downloadable') and row['name'] in COMFY_SOURCES:
+                assets.append(ModelAsset(COMFY_SOURCES[row['name']][1], row['download_path']))
+    elif (config.comfy_models_dir and family in ('flux', 'hidream', 'qwen', 'mage', 'comfy_image')
+            and (family != 'flux' or config.flux.backend == 'comfy')):
+        from vibewarp.comfy_assets import COMFY_SOURCES
+        from vibewarp.config import flux_model_files, qwen_model_files, mage_model_defaults, comfy_image_defaults
         section = getattr(config, family)
         files = ({key: value for key, value in vars(section).items() if key.startswith('comfy_') and key.endswith('_name')})
         if family == 'flux':
@@ -115,6 +130,9 @@ def selected_assets(config: RunConfig) -> list[ModelAsset]:
                 files.pop('comfy_lora_name', None)
         if family == 'mage':
             files.update(mage_model_defaults(config))
+        if family == 'comfy_image':
+            files.update(comfy_image_defaults(config))
+            if config.comfy_image.mode != 'edit': files.pop('comfy_edit_lora_name', None)
         for name in files.values():
             if name in COMFY_SOURCES:
                 folder, url = COMFY_SOURCES[name]
@@ -156,7 +174,15 @@ def selected_assets(config: RunConfig) -> list[ModelAsset]:
 
 def ensure_selected_assets(config: RunConfig):
     """Acquire known weights and fill only missing paths on this run's config."""
-    for asset in selected_assets(config):
+    from vibewarp.comfy_inventory import model_specs, required_comfy_files
+    comfy_url, specs = model_specs(config)
+    remote = required_comfy_files(config) if comfy_url else None
+    present = {row['path'] for row in remote if row['status'] == 'present'} if remote else set()
+    known_present = {str((Path(config.comfy_models_dir)/category/name).resolve())
+                     for category, name in specs if f'{category}/{name.replace(chr(92), "/")}' in present} if config.comfy_models_dir else set()
+    for asset in selected_assets(config, comfy_files=remote):
+        if asset.path in known_present:
+            continue
         acquire(asset.url, asset.path, sha256=asset.sha256)
     from vibewarp.ui_layout import model_family_for_version
     if model_family_for_version(config.model_version) == 'disco':

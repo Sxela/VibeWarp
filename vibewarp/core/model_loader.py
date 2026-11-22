@@ -243,7 +243,7 @@ def is_flux_model(model_version: str) -> bool:
     flow-matching DiT driven through `diffusers` — rather than the CompVis /
     k-diffusion stack the SD/SDXL versions use.
     """
-    return 'flux' in model_version.lower()
+    return 'flux' in model_version.lower() and not is_comfy_image_model(model_version)
 
 
 def is_hidream_model(model_version: str) -> bool:
@@ -263,9 +263,13 @@ def is_mage_flow_edit_model(model_version: str) -> bool:
     return 'mage' in lowered and 'flow' in lowered and 'edit' in lowered
 
 
+def is_comfy_image_model(model_version: str) -> bool:
+    return model_version in ('flux3_klein', 'moss_image', 'minimax_h3_image')
+
+
 def is_edit_model(model_version: str) -> bool:
     """Whether rendering is delegated to an external image-edit backend."""
-    return (is_flux_model(model_version) or is_hidream_model(model_version)
+    return (is_comfy_image_model(model_version) or is_flux_model(model_version) or is_hidream_model(model_version)
             or is_qwen_edit_model(model_version)
             or is_mage_flow_edit_model(model_version))
 

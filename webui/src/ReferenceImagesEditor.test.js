@@ -10,6 +10,16 @@ const defaults = [
 afterEach(() => { vi.restoreAllMocks(); delete global.fetch; });
 
 describe('ordered reference editor', () => {
+  it('edits independent tag size and badge height settings',async()=>{
+    const onLabelFontScaleChange=vi.fn(),onLabelBadgeHeightChange=vi.fn();
+    render(ReferenceImagesEditor,{value:defaults,onchange:vi.fn(),onLabelFontScaleChange,onLabelBadgeHeightChange});
+    expect(screen.getByLabelText('Reference tag size')).toHaveValue('1');
+    expect(screen.getByLabelText('Reference badge height')).toHaveValue('0.12');
+    await fireEvent.input(screen.getByLabelText('Reference tag size'),{target:{value:'2.5'}});
+    await fireEvent.input(screen.getByLabelText('Reference badge height'),{target:{value:'0.2'}});
+    expect(onLabelFontScaleChange).toHaveBeenCalledWith(2.5);
+    expect(onLabelBadgeHeightChange).toHaveBeenCalledWith(.2);
+  });
   it('always shows the required first image and one inactive next slot', () => {
     render(ReferenceImagesEditor, {
       value: defaults, onchange: vi.fn(), maxReferences: 4,

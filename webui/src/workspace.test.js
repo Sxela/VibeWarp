@@ -2,6 +2,17 @@ import {expect,it} from 'vitest';
 import {migrateLegacyFrameLimit} from './workspace.js';
 import {normalizeRawOpacities} from './workspace.js';
 import {fieldGroup,fieldEditor,fieldValue,searchFields} from './workspace.js';
+import {conditionsMatch} from './workspace.js';
+
+it('uses backend conditions for mode-specific fields without changing settings',()=>{
+  const field={visible_when:[{path:'comfy_image.mode',equals:'edit'},{path:'model_version',equals:'moss_image'}]};
+  const config={model_version:'moss_image',comfy_image:{mode:'edit'}};
+  expect(conditionsMatch(field,config)).toBe(true);
+  expect(conditionsMatch(field,{...config,comfy_image:{mode:'text'}})).toBe(false);
+  expect(conditionsMatch(field,{...config,model_version:'flux3_klein'})).toBe(false);
+  expect(conditionsMatch({},config)).toBe(true);
+  expect(conditionsMatch({visible_when:[{path:'model_version',not_equals:'minimax_h3_image'}]},config)).toBe(true);
+});
 
 it('uses backend group/editor overrides while preserving the contextual custom editor',()=>{
   const entry={group:'ControlNet',schema:{editor:'controlnet',workflow_groups:{background:'ControlNet masks'},workflow_editors:{background:null}}};

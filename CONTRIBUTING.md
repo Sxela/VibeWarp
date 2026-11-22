@@ -49,6 +49,12 @@ CUDA-only tests require a configured NVIDIA GPU and can be selected with
 `python -m pytest -m gpu`. Changes to rendering behavior should also be exercised with
 the validation process in [docs/gpu-validation.md](docs/gpu-validation.md).
 
+Some render-path checks allocate CUDA tensors even outside the `gpu` selection.
+When CUDA is unavailable, the test harness skips only recognized missing-CUDA
+errors, including a CUDA-enabled build whose devices are hidden with
+`CUDA_VISIBLE_DEVICES=-1`. These skips do not validate GPU rendering. Out-of-memory,
+shape and assertion failures remain failures.
+
 ## Pull requests
 
 - Keep changes focused and include tests for behavior changes.

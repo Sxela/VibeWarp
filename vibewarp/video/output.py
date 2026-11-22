@@ -7,6 +7,7 @@ background mask compositing, ffmpeg deflicker filter, audio preservation.
 
 import gc
 import os
+import re
 import subprocess
 from glob import glob
 from multiprocessing.pool import ThreadPool as Pool
@@ -288,6 +289,8 @@ def create_video(
     overshoot_consistency_weight: float = 1.0,
     edges_consistency_weight: float = 1.0,
     visible_size: Optional[tuple] = None,
+    padding_ratio: float = 0.1,
+    padding_mode: str = 'reflect',
 ) -> str:
     """Assemble rendered frames into a video file.
 
@@ -328,6 +331,8 @@ def create_video(
         mask_clip_low: threshold below which alpha mask values → 0
         mask_clip_high: threshold above which alpha mask values → 255
         visible_size: optional (width, height) of content inside the working canvas
+        padding_ratio: reflected/edge padding fraction used during flow warping
+        padding_mode: numpy padding mode, shared with the run's warp settings
 
     Returns:
         Path to the created video file.
@@ -377,7 +382,7 @@ def create_video(
                   "the video is exported unmasked. Render the run with masking enabled "
                   "to generate them.")
 
-    # Masking remains part of blend feedback; export geometry does not.
+    # Notebook exports blend adjacent original renders independently.
     def _postprocess(img: Image.Image, frame_idx: int) -> Image.Image:
         if use_background_mask_video and video_frames_folder:
             img = apply_video_mask(
@@ -402,7 +407,8 @@ def create_video(
         _blend_frames(frames, blend_dir, blend_mode, blend, flow_dir,
                       check_consistency, threads, _postprocess,
                       missed_consistency_weight, overshoot_consistency_weight,
-                      edges_consistency_weight, export_fn=_export)
+                      edges_consistency_weight, export_fn=_export,
+                      padding_ratio=padding_ratio, padding_mode=padding_mode)
     else:
         for i, f in enumerate(tqdm(frames, desc="Copying frames")):
             img = _export(_postprocess(Image.open(f), i))
@@ -445,8 +451,9 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
                   check_consistency, threads, postprocess_fn=None,
                   missed_consistency_weight=1.0,
                   overshoot_consistency_weight=1.0,
-                  edges_consistency_weight=1.0, export_fn=None):
-    """Blend consecutive frames for smoother video output.
+                  edges_consistency_weight=1.0, export_fn=None,
+                  padding_ratio=0.1, padding_mode='reflect'):
+    """Blend adjacent original renders independently, as in the notebook.
 
     Args:
         frames: sorted list of frame paths
@@ -464,13 +471,15 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
     if export_fn is None:
         export_fn = lambda img: img
 
-    previous = None
     for i, frame_path in enumerate(tqdm(frames, desc="Processing frames")):
         if i == 0 or blend_mode == 'None':
             img = postprocess_fn(Image.open(frame_path).convert('RGB'), i)
         else:
             curr = np.array(Image.open(frame_path).convert('RGB'))
-            prev = np.array(previous.convert('RGB'))
+            # Do not feed the processed export back into the next pair. The
+            # notebook loads frames_in[i-1], avoiding cumulative smoothing.
+            with Image.open(frames[i - 1]) as previous:
+                prev = np.array(previous.convert('RGB'))
 
             if blend_mode == 'linear':
                 blended = prev * (1 - blend) + curr * blend
@@ -479,6 +488,14 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
                 flow_path = _find_flow_file(flow_dir, frames[i - 1])
                 if flow_path and os.path.exists(flow_path):
                     flow = np.load(flow_path)
+                    # A shared flow cache may be smaller than the render.
+                    # Resize displacements as well as their spatial grid.
+                    if flow.shape[:2] != curr.shape[:2]:
+                        import cv2
+                        old_h, old_w = flow.shape[:2]
+                        flow = cv2.resize(flow, (curr.shape[1], curr.shape[0]),
+                                          interpolation=cv2.INTER_LINEAR)
+                        flow *= np.array([curr.shape[1] / old_w, curr.shape[0] / old_h])
                     weights = None
                     if check_consistency:
                         cc_path = _find_cc_file(flow_dir, flow_path)
@@ -494,9 +511,14 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
                                 blur=2,
                                 dilate=0,
                             )
+                            if weights.shape[:2] != curr.shape[:2]:
+                                import cv2
+                                weights = cv2.resize(weights, (curr.shape[1], curr.shape[0]),
+                                                     interpolation=cv2.INTER_LINEAR)
                     img = warp_frame(
                         Image.fromarray(prev), Image.fromarray(curr),
                         flow, blend=blend, weights=weights, video_mode=True,
+                        pad_pct=padding_ratio, padding_mode=padding_mode,
                     )
                 else:
                     img = Image.fromarray(curr)
@@ -505,7 +527,6 @@ def _blend_frames(frames, output_dir, blend_mode, blend, flow_dir,
 
             img = postprocess_fn(img, i)
 
-        previous = img.copy()
         export_fn(img).save(os.path.join(output_dir, f'{i:06d}.png'))
 
 
@@ -516,6 +537,10 @@ def _find_flow_file(flow_dir, frame_path):
         os.path.join(flow_dir, f'{basename}.npy'),
         os.path.join(flow_dir, f'{basename}.jpg.npy'),
     ]
+    # Native run caches use the previous render index, without batch prefix.
+    match = re.search(r'\((\d+)\)_(\d+)$', basename)
+    if match:
+        candidates.append(os.path.join(flow_dir, f'{int(match[2]):06d}.jpg.npy'))
     for c in candidates:
         if os.path.exists(c):
             return c

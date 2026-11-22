@@ -144,9 +144,9 @@ def test_schema_carries_model_family_compatibility():
     assert props['contact_sheet']['properties']['mode']['model_families'] == [
         'flux', 'hidream', 'qwen', 'mage']
     assert props['reference_label_opacity']['model_families'] == [
-        'flux', 'hidream', 'qwen', 'mage']
+        'flux', 'hidream', 'qwen', 'mage', 'comfy_image']
     assert props['negative_prompts']['model_families'] == [
-        'sd', 'hidream', 'qwen', 'mage', 'disco']
+        'sd', 'hidream', 'qwen', 'mage', 'comfy_image', 'disco']
     # Shared outer-loop settings and the edit renderers' base seed remain visible.
     assert 'model_families' not in props['warp']['properties']['flow_blend_schedule']
     assert 'model_families' not in props['diffusion']['properties']['seed']

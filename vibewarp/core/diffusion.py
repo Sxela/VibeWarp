@@ -91,6 +91,8 @@ class RenderContext:
 
     # Conditioning cache: {prompt_text: conditioning_tensor}
     _cond_cache: Dict[str, Any] = field(default_factory=dict)
+    # Current-to-previous pixel flow and white-trusted mask at flow resolution.
+    temporal_motion: Optional[Tuple[np.ndarray, np.ndarray]] = None
 
 
 # ---- Model offload helpers ----
@@ -673,6 +675,18 @@ def run_sd(
     target_latent = None
     guidance_start_code = None
     keep_vae_for_guidance = guidance_enabled and init_scale > 0
+    projection_target = None
+    if ctx.config.flow.temporal_guidance_strength:
+        from vibewarp.core.temporal_projection import native_target
+
+        def encode_initial(image):
+            pixels = TF.to_tensor(image)[None] * 2 - 1
+            # CompVis samples its encoding posterior. Isolate that one-time
+            # draw so enabling guidance preserves the frame's noise seed.
+            with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+                return encode_image_to_latent(sd_model, pixels)
+
+        projection_target = native_target(ctx, state, encode_initial, device='cuda')
     if init_image_path is not None or guidance_enabled:
         _move_to_cuda(sd_model.first_stage_model)
     if init_image_path is not None:
@@ -765,6 +779,10 @@ def run_sd(
     # Notebook order: compute and apply cond_fn first, then clamp the guided
     # clean-latent prediction with the static/dynamic threshold wrapper.
     model_fn = make_static_thresh_model_fn(model_fn, value=_dyn_thresh)
+    if projection_target is not None:
+        from vibewarp.core.temporal_projection import wrap_sd_projection
+        active_sigmas = sigmas[steps - t_enc - 1:] if skip_timesteps > 0 and x0 is not None else sigmas
+        model_fn = wrap_sd_projection(model_fn, projection_target, active_sigmas, ctx.config.flow)
 
     noise_mode = ctx.config.diffusion.noise_mode
     code_randomness = ctx.config.diffusion.code_randomness
@@ -1023,7 +1041,8 @@ def warp_between_frames(
         num_flow_updates=config.flow.num_flow_updates,
         dilation=config.flow.missed_consistency_dilation,
         edge_width=config.flow.edge_consistency_width,
-        force=config.flow.force_flow_generation,
+        force=config.flow.force_flow_generation or bool(
+            config.flow.temporal_guidance_strength and cc_path and not os.path.isfile(cc_path)),
     )
     _log_time(f"RAFT inference (frame {frame_num})", _time.time() - _t_flow)
 
@@ -1047,6 +1066,11 @@ def warp_between_frames(
             blur=cc_blur,
             dilate=cc_dilate,
         )
+
+    # Use backward vectors in their native canvas units, before the notebook's
+    # RGB warp applies its own resize convention and mask floor.
+    if return_warped and config.flow.temporal_guidance_strength and weights is not None:
+        ctx.temporal_motion = (flow, weights[..., 0])
 
     # Before-diffusion matching colorizes raw/current pixels toward the warped
     # previous render before the consistency mask blends them together.
@@ -1812,6 +1836,9 @@ def render_frame(ctx: RenderContext, state: FrameState) -> Image.Image:
     # Update state
     state.prev_frame = image
     state.prev_latent = latent.detach()
+    if config.flow.temporal_guidance_strength:
+        from vibewarp.core.temporal_projection import save_native_history
+        save_native_history(ctx, state, state.prev_latent)
 
     # Memory cleanup
     del x_samples, image_tensor, latent, rec_noise_tensor
@@ -1836,8 +1863,11 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
     from vibewarp.core.model_loader import (
         is_flux_model, is_hidream_model, is_mage_flow_edit_model,
         is_qwen_edit_model)
+    from vibewarp.core.model_loader import is_comfy_image_model
     flux_backend = is_flux_model(config.model_version)
-    if flux_backend:
+    if is_comfy_image_model(config.model_version):
+        family, edit_config = 'comfy_image', config.comfy_image
+    elif flux_backend:
         family, edit_config = 'flux', config.flux
     elif is_hidream_model(config.model_version):
         family, edit_config = 'hidream', config.hidream
@@ -1887,7 +1917,7 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
 
     from vibewarp.core.edit_references import (
         MAX_EDIT_REFERENCES, resolve_reference_images)
-    references = resolve_reference_images(
+    references = [raw_image] if family == 'comfy_image' and edit_config.mode == 'text' else resolve_reference_images(
         edit_config.references,
         raw_image=raw_image,
         previous_image=previous_image,
@@ -1895,8 +1925,14 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
         size=(W, H),
         max_references=MAX_EDIT_REFERENCES[family],
         label_opacity=config.reference_label_opacity,
+        label_font_scale=config.reference_label_font_scale,
+        label_badge_height=config.reference_label_badge_height,
     )
     from vibewarp.core.edit import render_edit_frame as run_edit_backend
+    guidance = {}
+    if config.flow.temporal_guidance_strength:
+        from vibewarp.core.temporal_projection import ComfyFrameGuidance
+        guidance['temporal_frame'] = ComfyFrameGuidance.for_frame(ctx, state)
     with _phase(ctx, 'run_sd_total'):
         image = run_edit_backend(
             ctx.edit_backend if ctx.edit_backend is not None else ctx.flux_pipe,
@@ -1910,6 +1946,7 @@ def render_frame_edit(ctx: RenderContext, state: FrameState) -> Image.Image:
             debug_dir=(os.path.join(ctx.batch_folder, 'debug')
                        if ctx.batch_folder else None),
             frame_num=frame_num,
+            **guidance,
         )
 
     if image.size != (W, H):
@@ -2367,6 +2404,7 @@ def _render_single_frame(
     previous_output = state.prev_frame.copy() if state.prev_frame is not None else None
     ctx._disco_consistency_mask = None
     ctx._temporal_consistency_mask = None
+    ctx.temporal_motion = None
     turbo = getattr(ctx, '_turbo', None)
     if turbo and turbo.feedback is not None:
         state.prev_frame = turbo.feedback.copy()
