@@ -71,7 +71,7 @@ sched = []  # retained for compatibility; LPIPS is now used by core guidance
 # Optional Diffusers backend for FLUX.2 Klein Edit. The default Comfy server
 # backend uses the core requests dependency and needs no extra Python packages.
 flux = ["diffusers>=0.39", "sentencepiece"]
-dev = ["pytest==9.0.3", "pytest-cov==7.1.0"]
+dev = ["pytest==9.2.0", "pytest-cov==7.1.0"]
 
 [tool.setuptools.packages.find]
 include = ["vibewarp*"]
